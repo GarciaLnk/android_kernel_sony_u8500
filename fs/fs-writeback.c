@@ -480,32 +480,6 @@ writeback_single_inode(struct inode *inode, struct bdi_writeback *wb,
 	return ret;
 }
 
-/*
- * For background writeback the caller does not have the sb pinned
- * before calling writeback. So make sure that we do pin it, so it doesn't
- * go away while we are writing inodes from it.
- */
-static bool pin_sb_for_writeback(struct super_block *sb)
-{
-	spin_lock(&sb_lock);
-	if (list_empty(&sb->s_instances)) {
-		spin_unlock(&sb_lock);
-		return false;
-	}
-
-	sb->s_count++;
-	spin_unlock(&sb_lock);
-
-	if (down_read_trylock(&sb->s_umount)) {
-		if (sb->s_root)
-			return true;
-		up_read(&sb->s_umount);
-	}
-
-	put_super(sb);
-	return false;
-}
-
 static long writeback_chunk_size(struct backing_dev_info *bdi,
 				 struct wb_writeback_work *work)
 {
@@ -643,7 +617,7 @@ static long __writeback_inodes_wb(struct bdi_writeback *wb,
 		struct inode *inode = wb_inode(wb->b_io.prev);
 		struct super_block *sb = inode->i_sb;
 
-		if (!pin_sb_for_writeback(sb)) {
+		if (!grab_super_passive(sb)) {
 			requeue_io(inode, wb);
 			continue;
 		}
