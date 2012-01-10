@@ -143,8 +143,6 @@ extern unsigned int dirty_writeback_active_interval;
 extern unsigned int dirty_writeback_suspend_interval;
 #endif
 
-extern unsigned long determine_dirtyable_memory(void);
-
 extern int dirty_background_ratio_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp,
 		loff_t *ppos);
