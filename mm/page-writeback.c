@@ -125,6 +125,8 @@ unsigned int dirty_writeback_suspend_interval = DEFAULT_DIRTY_WRITEBACK_INTERVAL
 EXPORT_SYMBOL_GPL(dirty_writeback_suspend_interval);
 #endif
 
+EXPORT_SYMBOL_GPL(dirty_writeback_interval);
+
 /*
  * The longest time for which data is allowed to remain dirty
  */
