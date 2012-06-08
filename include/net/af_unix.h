@@ -13,6 +13,7 @@ extern void wait_for_unix_gc(void);
 extern struct sock *unix_get_socket(struct file *filp);
 
 #define UNIX_HASH_SIZE	256
+#define UNIX_HASH_BITS	8
 
 extern unsigned int unix_tot_inflight;
 
