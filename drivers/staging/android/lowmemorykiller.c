@@ -44,6 +44,9 @@
 #ifdef CONFIG_ANDROID_LOW_MEMORY_KILLER_DO_NOT_KILL_PROCESS
 #include <linux/string.h>
 #endif
+#include <linux/memory.h>
+#include <linux/memory_hotplug.h>
+#include <linux/compaction.h>
 
 static uint32_t lowmem_debug_level = 1;
 static int lowmem_adj[6] = {
@@ -64,6 +67,14 @@ static int lowmem_minfree_size = 4;
 static ktime_t lowmem_deathpending_timeout;
 
 #define LMK_BUSY (-1)
+
+extern int compact_nodes(bool sync);
+
+#define lowmem_print(level, x...)			\
+	do {						\
+		if (lowmem_debug_level >= (level))	\
+			printk(x);			\
+	} while (0)
 
 #ifdef CONFIG_ANDROID_LOW_MEMORY_KILLER_DO_NOT_KILL_PROCESS
 #define MAX_NOT_KILLABLE_PROCESSES	25	/* Max number of not killable processes */
@@ -330,6 +341,9 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		     sc->nr_to_scan, sc->gfp_mask, rem);
 	rcu_read_unlock();
 	spin_unlock(&lowmem_lock);
+	read_unlock(&tasklist_lock);
+	if (selected)
+		compact_nodes(false);
 	return rem;
 }
 
