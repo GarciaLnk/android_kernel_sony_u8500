@@ -28,6 +28,7 @@ obj-$(CONFIG_CPU_FREQ_GOV_FANTASY)      += cpufreq_fantasy.o
 obj-$(CONFIG_CPU_FREQ_GOV_ZZMOOVE)      += cpufreq_zzmoove.o
 obj-$(CONFIG_CPU_FREQ_GOV_ONDEMANDQ)	+= cpufreq_ondemandq.o
 obj-$(CONFIG_CPU_FREQ_GOV_LULZACTIVEW)	+= cpufreq_lulzactivew.o
+obj-$(CONFIG_CPU_FREQ_GOV_ADAPTIVE)     += cpufreq_adaptive.o
 obj-$(CONFIG_CPU_BOOST)			+= cpu-boost.o
 
 # CPUfreq cross-arch helpers
