@@ -309,12 +309,12 @@ static ssize_t show_sampling_rate_min(struct kobject *kobj,
 define_one_global_ro(sampling_rate_min);
 
 /* cpufreq_hyper Governor Tunables */
-#define show_one(file_name, object)					\
-		static ssize_t show_##file_name						\
-		(struct kobject *kobj, struct attribute *attr, char *buf)              \
-		{									\
-	return sprintf(buf, "%u\n", dbs_tuners_ins.object);		\
-		}
+#define show_one(file_name, object) \
+	static ssize_t show_##file_name \
+	(struct kobject *kobj, struct attribute *attr, char *buf) \
+	{ \
+		return sprintf(buf, "%u\n", dbs_tuners_ins.object); \
+	}
 
 show_one(sampling_rate, sampling_rate);
 show_one(io_is_busy, io_is_busy);
@@ -333,11 +333,7 @@ static ssize_t store_sampling_rate(struct kobject *a, struct attribute *b,
 	ret = sscanf(buf, "%u", &input);
 	if (ret != 1)
 		return -EINVAL;
-
-	mutex_lock(&dbs_mutex);
 	dbs_tuners_ins.sampling_rate = max(input, min_sampling_rate);
-	mutex_unlock(&dbs_mutex);
-
 	return count;
 }
 
@@ -350,11 +346,7 @@ static ssize_t store_io_is_busy(struct kobject *a, struct attribute *b,
 	ret = sscanf(buf, "%u", &input);
 	if (ret != 1)
 		return -EINVAL;
-
-	mutex_lock(&dbs_mutex);
 	dbs_tuners_ins.io_is_busy = !!input;
-	mutex_unlock(&dbs_mutex);
-
 	return count;
 }
 
@@ -368,9 +360,7 @@ static ssize_t store_fast_start(struct kobject *a, struct attribute *b,
 	if (ret != 1)
 		return -EINVAL;
 
-	mutex_lock(&dbs_mutex);
 	dbs_tuners_ins.fast_start = !!input;
-	mutex_unlock(&dbs_mutex);
 
 	return count;
 }
@@ -385,9 +375,7 @@ static ssize_t store_deep_sleep(struct kobject *a, struct attribute *b,
 	if (ret != 1)
 		return -EINVAL;
 
-	mutex_lock(&dbs_mutex);
 	dbs_tuners_ins.deep_sleep = !!input;
-	mutex_unlock(&dbs_mutex);
 
 	return count;
 }
@@ -404,9 +392,7 @@ static ssize_t store_up_threshold(struct kobject *a, struct attribute *b,
 		return -EINVAL;
 	}
 
-	mutex_lock(&dbs_mutex);
 	dbs_tuners_ins.up_threshold = input;
-	mutex_unlock(&dbs_mutex);
 
 	return count;
 }
@@ -426,9 +412,7 @@ static ssize_t store_ignore_nice_load(struct kobject *a, struct attribute *b,
 	if (input > 1)
 		input = 1;
 
-	mutex_lock(&dbs_mutex);
 	if (input == dbs_tuners_ins.ignore_nice) { /* nothing to do */
-		mutex_unlock(&dbs_mutex);
 		return count;
 	}
 	dbs_tuners_ins.ignore_nice = input;
@@ -443,7 +427,6 @@ static ssize_t store_ignore_nice_load(struct kobject *a, struct attribute *b,
 			dbs_info->prev_cpu_nice = kstat_cpu(j).cpustat.nice;
 
 	}
-	mutex_unlock(&dbs_mutex);
 
 	return count;
 }
@@ -461,7 +444,6 @@ static ssize_t store_powersave_bias(struct kobject *a, struct attribute *b,
 	if (input > 1000)
 		input = 1000;
 
-	mutex_lock(&dbs_mutex);
 	dbs_tuners_ins.powersave_bias = input;
 	hyper_powersave_bias_init();
 
@@ -484,9 +466,7 @@ static ssize_t store_suspend_freq(struct kobject *a, struct attribute *b,
 	if (input < 100000)
 		input = 100000;
 
-	mutex_lock(&dbs_mutex);
 	dbs_tuners_ins.suspend_freq = input;
-	mutex_unlock(&dbs_mutex);
 
 	return count;
 }
