@@ -72,6 +72,14 @@ extern int mali_oskmem_allocorder;
 module_param(mali_oskmem_allocorder, int, S_IRUSR | S_IWUSR | S_IWGRP | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC(mali_utilization_sampling_rate, "Mali OS kernel memory allocation order");
 
+extern unsigned int mali_utilization_high_to_low;
+module_param(mali_utilization_high_to_low, uint, S_IRUSR | S_IWUSR | S_IWGRP | S_IRGRP | S_IROTH);
+MODULE_PARM_DESC(mali_utilization_high_to_low, "The high-to-low utilization line");
+
+extern unsigned int mali_utilization_low_to_high;
+module_param(mali_utilization_low_to_high, uint, S_IRUSR | S_IWUSR | S_IWGRP | S_IRGRP | S_IROTH);
+MODULE_PARM_DESC(mali_utilization_low_to_high, "The low-to-high utilization line");
+
 #if MALI_TIMELINE_PROFILING_ENABLED
 extern int mali_boot_profiling;
 module_param(mali_boot_profiling, int, S_IRUSR | S_IRGRP | S_IROTH);
