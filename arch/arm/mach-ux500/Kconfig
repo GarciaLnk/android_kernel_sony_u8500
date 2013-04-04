@@ -302,4 +302,9 @@ config SONY_SSM
 	  This enables support for power mode notifications, required by Super
 	  Stamina Mode.
 
+config DB8500_CLOCK_CONTROL
+	bool "DB8500 Clock Control Module"
+	depends on UX500_SOC_DB8500
+	default n
+
 endif
