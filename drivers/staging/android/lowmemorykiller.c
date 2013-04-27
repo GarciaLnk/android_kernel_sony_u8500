@@ -61,7 +61,7 @@ static int lowmem_minfree[6] = {
 };
 static int lowmem_minfree_size = 4;
 
-static ktime_t lowmem_deathpending_timeout;
+static unsigned long lowmem_deathpending_timeout;
 
 #define LMK_BUSY (-1)
 
@@ -163,7 +163,7 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 	int array_size = ARRAY_SIZE(lowmem_adj);
 	int other_free = global_page_state(NR_FREE_PAGES) - totalreserve_pages;
 	int other_file = global_page_state(NR_FILE_PAGES) -
-						global_page_state(NR_FILE_MAPPED);
+						global_page_state(NR_SHMEM);
 
 	if (lowmem_adj_size < array_size)
 		array_size = lowmem_adj_size;
@@ -230,30 +230,10 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 			continue;
 
 		if (test_tsk_thread_flag(p, TIF_MEMDIE) &&
-			ktime_us_delta(ktime_get(),
-				lowmem_deathpending_timeout) < 0) {
+		    time_before_eq(jiffies, lowmem_deathpending_timeout)) {
 			task_unlock(p);
-			same_count++;
-			if (p->pid != oldpid || same_count > 1000) {
-				lowmem_print(1,
-					"terminate %d (%s) old:%d last:%d %ld %d\n",
-					p->pid, p->comm, oldpid, lastpid,
-					(long)ktime_us_delta(ktime_get(),
-						lowmem_deathpending_timeout),
-					same_count);
-				lowmem_print(2,
-					"state:%ld flag:0x%x la:%lld busy:%d %d\n",
-					p->state, p->flags,
-					p->sched_info.last_arrival,
-					busy_count, oom_killer_disabled);
-				oldpid = p->pid;
-				same_count = 0;
-			}
 			rcu_read_unlock();
-			spin_unlock(&lowmem_lock);
-			/* wait one jiffie */
-			schedule_timeout(1);
-			return LMK_BUSY;
+			return 0;
 		}
 		oom_score_adj = p->signal->oom_score_adj;
 		if (oom_score_adj < min_score_adj) {
