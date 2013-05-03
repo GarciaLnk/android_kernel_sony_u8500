@@ -180,8 +180,8 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		 * and/or other_file are converted to unsigned.
 		 *
 		 */
-		if (other_free < (int) lowmem_minfree[i] &&
-		    other_file < (int) lowmem_minfree[i]) {
+		minfree = lowmem_minfree[i];
+		if (other_free < minfree && other_file < minfree) {
 			min_score_adj = lowmem_adj[i];
 			break;
 		}
@@ -295,8 +295,8 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		selected[proc_type] = p;
 		selected_tasksize[proc_type] = tasksize;
 		selected_oom_score_adj[proc_type] = oom_score_adj;
-		lowmem_print(4, "select %d (%s), adj %d, size %d, to kill\n",
-			     p->pid, p->comm, oom_score_adj, tasksize);
+		lowmem_print(4, "select '%s' (%d), adj %hd, size %d, to kill\n",
+			     p->comm, p->pid, oom_score_adj, tasksize);
 	}
 
 	/* For each managed process type check if a process to be killed has been found:
@@ -307,8 +307,11 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 	 *   if so kill it to prevent system slowdowns, hangs, etc. */
 	for (proc_type = KILLABLE_PROCESS; proc_type < MANAGED_PROCESS_TYPES; proc_type++) {
 		if (selected[proc_type]) {
-			lowmem_print(1, "send sigkill to %d (%s), adj %d, size %d\n",
-				     selected[proc_type]->pid, selected[proc_type]->comm,
+			lowmem_print(1, "Killing '%s' (%d), adj %hd, size %d,\n" \
+					"   to free %ldkB on behalf of '%s' (%d) because\n" \
+					"   cache %ldkB is below limit %ldkB for oom_score_adj %hd\n" \
+ 					"   Free memory is %ldkB above reserved\n",
+				     selected[proc_type]->comm, selected[proc_type]->pid,
 				     selected_oom_score_adj[proc_type], selected_tasksize[proc_type]);
 			send_sig(SIGKILL, selected[proc_type], 0);
 
