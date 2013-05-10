@@ -98,7 +98,7 @@ config CPU_FREQ_DEFAULT_GOV_ADAPTIVE
 	  'adaptive' governor for latency-sensitive workloads and demanding
 	  performance.
 
-config CPU_FREQ_DEFAULT_GOV_ADAPTIVE
+config CPU_FREQ_DEFAULT_GOV_BRAZILIANWAX
 	bool "brazilianwax"
 	select CPU_FREQ_GOV_BRAZILIANWAX
 	---help---
