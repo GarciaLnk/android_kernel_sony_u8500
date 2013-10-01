@@ -111,8 +111,8 @@ static struct ux500_pins *usb_gpio_pins;
  * endpoint.
  */
 static struct musb_fifo_cfg ux500_mode_cfg[] = {
-{ .hw_ep_num =  4, .style = FIFO_TX,   .maxpacket = 512, },
-{ .hw_ep_num =  4, .style = FIFO_RX,   .maxpacket = 512, },
+{ .hw_ep_num =  4, .style = FIFO_TX,   .maxpacket = 512, .mode = BUF_DOUBLE, },
+{ .hw_ep_num =  4, .style = FIFO_RX,   .maxpacket = 512, .mode = BUF_DOUBLE, },
 { .hw_ep_num =  5, .style = FIFO_TX,   .maxpacket = 512, },
 { .hw_ep_num =  5, .style = FIFO_RX,   .maxpacket = 512, },
 { .hw_ep_num =  6, .style = FIFO_TX,   .maxpacket = 512, .mode = BUF_DOUBLE, },
