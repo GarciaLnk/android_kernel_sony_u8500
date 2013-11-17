@@ -16,7 +16,12 @@
 #include <linux/time.h>
 #include <linux/hwmon.h>
 
+#include <linux/moduleparam.h>
+
 static struct device *sysctrl_dev;
+
+static bool force_pwroff = false;
+module_param(force_pwroff, bool, 0644);
 
 void ab8500_power_off(void)
 {
@@ -49,7 +54,7 @@ void ab8500_power_off(void)
 		}
 	}
 
-	if (!charger_present)
+	if ((!charger_present && !(data & 0x01)) || force_pwroff)
 		goto shutdown;
 
 	/* Check if battery is known */
