@@ -65,6 +65,12 @@
 #include <wl_cfg80211.h>
 #include <wl_cfgp2p.h>
 
+#include <linux/moduleparam.h>
+
+/* PM mode in userspace */
+static bool dhdpm_fast = true;
+module_param(dhdpm_fast, bool, 0644);
+
 static struct sdio_func *cfg80211_sdio_func;
 static struct wl_priv *wlcfg_drv_priv;
 
@@ -2859,7 +2865,14 @@ wl_cfg80211_set_power_mgmt(struct wiphy *wiphy, struct net_device *dev,
 	struct wl_priv *wl = wiphy_priv(wiphy);
 
 	CHECK_SYS_UP(wl);
+
+if (dhdpm_fast)
+	/* Use PM_FAST only instead of PM_MAX */
 	pm = enabled ? PM_FAST : PM_OFF;
+else
+	/* Depends on suspend state */
+	pm = enabled ? ((dhd->in_suspend) ? PM_MAX : PM_FAST) : PM_OFF;
+
 	/* Do not enable the power save after assoc if it is p2p interface */
 	if (wl->p2p && wl->p2p->vif_created) {
 		WL_DBG(("Do not enable the power save for p2p interfaces even after assoc\n"));
