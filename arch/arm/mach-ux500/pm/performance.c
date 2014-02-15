@@ -65,8 +65,10 @@ static void wlan_load(struct work_struct *work)
 
 	if ((num_irqs > old_num_irqs) &&
 	    (num_irqs - old_num_irqs) > WLAN_LIMIT) {
+		/*
 		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
 					     "wlan", 1000000);
+		*/
 		if (!wlan_pm_qos_is_latency_0) {
 			/*
 			 * The wake up latency is set to 0 to prevent
@@ -82,9 +84,11 @@ static void wlan_load(struct work_struct *work)
 			wlan_pm_qos_is_latency_0 = true;
 		}
 	} else {
+		/*
 		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
 					     "wlan",
 					     PRCMU_QOS_DEFAULT_VALUE);
+		*/
 		if (wlan_pm_qos_is_latency_0) {
 			pm_qos_remove_request(&wlan_pm_qos_latency);
 			wlan_pm_qos_is_latency_0 = false;
@@ -176,15 +180,18 @@ static void mmc_load(struct work_struct *work)
 	}
 
 	if (!old_mode && new_mode)
+		/*
 		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
 					     "mmc",
 					     1000000);
+		*/
 
 	if (old_mode && !new_mode)
+		/*
 		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
 					     "mmc",
 					     PRCMU_QOS_DEFAULT_VALUE);
-
+		*/
 	old_mode = new_mode;
 
 	schedule_delayed_work(&work_mmc,
