@@ -6,7 +6,6 @@
  * Author: Sundar Iyer
  * Author: Martin Persson
  * Author: Jonas Aaberg <jonas.aberg@stericsson.com>
- * GeralD_carl
  */
 
 #include <linux/kernel.h>
