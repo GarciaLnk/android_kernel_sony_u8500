@@ -96,6 +96,7 @@ lib/crc32table.h
 lib/gen_crc32table
 scripts/kconfig/conf
 scripts/kconfig/lex.zconf.c
+scripts/kconfig/mconf
 scripts/kconfig/zconf.hash.c
 scripts/kconfig/zconf.tab.c
 scripts/basic/fixdep
@@ -110,5 +111,7 @@ scripts/mod/elfconfig.h
 scripts/mod/mk_elfconfig
 scripts/mod/modpost
 scripts/recordmcount
+scripts/selinux/genheaders/genheaders
+scripts/selinux/mdp/mdp
 usr/gen_init_cpio
 usr/initramfs_data.cpio
