@@ -155,7 +155,6 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 	int tasksize;
 	int i;
 	int min_score_adj = OOM_SCORE_ADJ_MAX + 1;
-	int minfree = 0;
 	enum lowmem_process_type proc_type = KILLABLE_PROCESS;
 	int selected_tasksize[MANAGED_PROCESS_TYPES] = {0};
 	int selected_oom_score_adj[MANAGED_PROCESS_TYPES];
@@ -314,8 +313,7 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 					 minfree * (long)(PAGE_SIZE / 1024),
 					 min_score_adj,
 					 other_free * (long)(PAGE_SIZE / 1024));
-			lowmem_deathpending_timeout = ktime_add_ns(ktime_get(),
-								   NSEC_PER_SEC/2);
+			lowmem_deathpending_timeout = jiffies + HZ;
 			send_sig(SIGKILL, selected[proc_type], 0);
 			set_tsk_thread_flag(selected[proc_type], TIF_MEMDIE);
 			rem -= selected_tasksize[proc_type];
@@ -324,6 +322,8 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 	}
 
 	rcu_read_unlock();
+	/* give the system time to free up the memory */
+	msleep_interruptible(20);
 
 	lowmem_print(4, "lowmem_shrink %lu, %x, return %d\n",
 		     sc->nr_to_scan, sc->gfp_mask, rem);
