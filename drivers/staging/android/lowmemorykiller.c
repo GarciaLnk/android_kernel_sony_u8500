@@ -41,7 +41,6 @@
 #include <linux/string.h>
 #endif
 #include <linux/swap.h>
-#include <linux/fs.h>
 
 #ifdef CONFIG_HIGHMEM
 #define _ZONE ZONE_HIGHMEM
@@ -233,18 +232,9 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 	int selected_tasksize[MANAGED_PROCESS_TYPES] = {0};
 	int selected_oom_score_adj[MANAGED_PROCESS_TYPES];
 	int array_size = ARRAY_SIZE(lowmem_adj);
-	int other_free;
-	int other_file;
-
-	other_free = global_page_state(NR_FREE_PAGES) - totalreserve_pages;
-
-	if (global_page_state(NR_SHMEM) + total_swapcache_pages <
-		global_page_state(NR_FILE_PAGES))
-		other_file = global_page_state(NR_FILE_PAGES) -
-						global_page_state(NR_SHMEM) -
-						total_swapcache_pages;
-	else
-		other_file = 0;
+	int other_free = global_page_state(NR_FREE_PAGES) - totalreserve_pages;
+	int other_file = global_page_state(NR_FILE_PAGES) -
+						global_page_state(NR_SHMEM);
 
 	tune_lmk_param(&other_free, &other_file, sc);
 
