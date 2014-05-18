@@ -90,6 +90,7 @@ arch/arm/boot/Image
 arch/arm/boot/compressed/vmlinux.lds
 arch/arm/boot/zImage
 drivers/gpu/mali/mali400ko/driver/src/devicedrv/mali/__malidrv_build_info.c
+drivers/gpu/mali/mali400ko/driver/src/devicedrv/mali/arch
 kernel/config_data.h
 kernel/timeconst.h
 lib/crc32table.h
