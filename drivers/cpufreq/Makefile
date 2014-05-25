@@ -25,7 +25,6 @@ obj-$(CONFIG_CPU_FREQ_GOV_INTELLIDEMAND)	+= cpufreq_intellidemand.o
 obj-$(CONFIG_CPU_FREQ_GOV_DYNAMIC_INTERACTIVE)	+= cpufreq_dynamic_interactive.o
 obj-$(CONFIG_CPU_FREQ_GOV_PEGASUSQPLUS)	+= cpufreq_pegasusqplus.o
 obj-$(CONFIG_CPU_FREQ_GOV_FANTASY)      += cpufreq_fantasy.o
-obj-$(CONFIG_CPU_FREQ_GOV_ZZMOOVE)      += cpufreq_zzmoove.o
 obj-$(CONFIG_CPU_FREQ_GOV_INTERACTIVEPLUS)	+= cpufreq_interactiveplus.o
 obj-$(CONFIG_CPU_FREQ_GOV_ONDEMANDQ)	+= cpufreq_ondemandq.o
 
