@@ -54,7 +54,7 @@ void ab8500_power_off(void)
 		}
 	}
 
-	if ((!charger_present && !(data & 0x01)) || force_pwroff)
+	if ((!charger_present) || force_pwroff)
 		goto shutdown;
 
 	/* Check if battery is known */
