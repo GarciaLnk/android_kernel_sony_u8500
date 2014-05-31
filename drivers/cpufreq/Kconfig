@@ -468,7 +468,8 @@ config CPU_FREQ_GOV_INTERACTIVEPLUS
 
 config CPU_FREQ_GOV_ONDEMANDQ
 	tristate "'ondemand' cpufreq policy governor"
-	depends on HAS_EARLYSUSPEND
+	help
+	   Based on ondemand,hotplug in suspend.
 
 menu "x86 CPU frequency scaling drivers"
 depends on X86
