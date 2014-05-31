@@ -107,7 +107,7 @@ static irqreturn_t ab8500_ponkey_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-void ab8500_ponkey_emulator(bool press)
+static void ab8500_ponkey_emulator(bool press)
 {
 	if (press) {
 		gpio_keys_setstate(KEY_POWER, true);

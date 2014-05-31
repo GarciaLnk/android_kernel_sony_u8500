@@ -5,8 +5,6 @@
  * Author: Michael Ambrus <michael.ambrus@sonyericsson.com>
  *
  * AB8500 Power-On Key handler
- * API for AB8500 PowerOn Key
- *
  */
 
 #ifndef __AB8500_PONKEY_H__
@@ -31,7 +29,5 @@ static inline void ab8500_forcecrash_exit(struct platform_device *pdev) {}
 static inline void ab8500_forced_key_detect(int dummy) {}
 static inline void ab8500_forced_key_combo_detect(void) {}
 #endif
-
-void ab8500_ponkey_emulator(bool press);
 
 #endif /*__AB8500_PONKEY_H__*/
