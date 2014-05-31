@@ -183,17 +183,6 @@ config CPU_FREQ_DEFAULT_GOV_PEGASUSQPLUS
 	bool "pegasusq plus"
 	select CPU_FREQ_GOV_PEGASUSQPLUS
 
-config CPU_FREQ_DEFAULT_GOV_INTERACTIVEPLUS
-	bool "interactiveplus"
-	select CPU_FREQ_GOV_INTERACTIVEPLUS
-	help
-	  Use the CPUFreq governor 'interactiveplus' as default. This allows
-	  you to get a full dynamic cpu frequency capable system by simply
-	  loading your cpufreq low-level hardware driver, using the
-	  'interactiveplus' governor for latency-sensitive workloads.
-
-	  The 'interactiveplus' governor also hotplugs on suspend.
-
 config CPU_FREQ_DEFAULT_GOV_ZZMOOVE
 	  bool "zzmoove"
 	  select CPU_FREQ_GOV_ZZMOOVE
@@ -465,25 +454,6 @@ config CPU_FREQ_GOV_FANTASY
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called cpufreq_fantasy.
-
-	  For details, take a look at linux/Documentation/cpu-freq.
-
-	  If in doubt, say N.
-
-config CPU_FREQ_GOV_INTERACTIVEPLUS
-	tristate "'interactiveplus' cpufreq policy governor"
-	help
-	  'interactiveplus' - This driver adds a dynamic cpufreq policy governor
-	  designed for latency-sensitive workloads.
-
-	  This governor attempts to reduce the latency of clock
-	  increases so that the system is more responsive to
-	  interactive workloads.
-
-	  The 'interactiveplus' governor also hotplugs CPU1 on suspend.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called cpufreq_interactiveplus.
 
 	  For details, take a look at linux/Documentation/cpu-freq.
 
