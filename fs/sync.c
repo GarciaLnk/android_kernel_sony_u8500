@@ -169,20 +169,21 @@ SYSCALL_DEFINE1(syncfs, int, fd)
  */
 int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 {
-	struct address_space *mapping = file->f_mapping;
-	int err, ret;
 #ifdef CONFIG_DYNAMIC_FSYNC
 	if (!early_suspend_active)
 		return 0;
 	else {
 #endif
+	struct address_space *mapping = file->f_mapping;
+	int err, ret;
+
 	if (!file->f_op || !file->f_op->fsync) {
 		ret = -EINVAL;
-		goto out;
-	}
+		return file->f_op->fsync(file, start, end, datasync);
 #ifdef CONFIG_DYNAMIC_FSYNC
 	}
 #endif
+
 	ret = filemap_write_and_wait_range(mapping, start, end);
 
 	/*
