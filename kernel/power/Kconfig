@@ -321,3 +321,10 @@ config SEMC_FREEZE_TIMEOUT
 	  time window for the hardware watchdog (defined to 10 seconds in
 	  watchdog-kicker/kickdogd.c), or there is a risk of receiving a HWWD
 	  when some userspace process fails to freeze.
+
+config SPEEDUP_KEYRESUME
+	bool "Speed up late resume"
+	depends on SUSPEND
+	default y
+	---help---
+	  Speed up system resume
