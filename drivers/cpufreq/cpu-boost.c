@@ -44,16 +44,16 @@ static struct workqueue_struct *cpu_boost_wq;
 
 static struct work_struct input_boost_work;
 
-static unsigned int boost_ms;
+static unsigned int boost_ms = 10;
 module_param(boost_ms, uint, 0644);
 
-static unsigned int sync_threshold;
+static unsigned int sync_threshold = 800000;
 module_param(sync_threshold, uint, 0644);
 
-static unsigned int input_boost_freq = 500000;
+static unsigned int input_boost_freq = 600000;
 module_param(input_boost_freq, uint, 0644);
 
-static unsigned int input_boost_ms = 35;
+static unsigned int input_boost_ms = 40;
 module_param(input_boost_ms, uint, 0644);
 
 static u64 last_input_time;
