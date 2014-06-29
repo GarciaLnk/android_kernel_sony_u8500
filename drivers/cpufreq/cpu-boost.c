@@ -25,6 +25,7 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/time.h>
+#include <linux/earlysuspend.h>
 
 struct cpu_sync {
 	struct task_struct *thread;
@@ -329,6 +330,22 @@ static struct input_handler cpuboost_input_handler = {
 	.id_table       = cpuboost_ids,
 };
 
+static void cpuboost_late_resume(struct early_suspend *handle)
+{
+	if (!input_boost_freq || work_pending(&input_boost_work))
+		return;
+
+	pr_debug("[cpu-boost] boosting cpufreq on resume");
+
+	queue_work(cpu_boost_wq, &input_boost_work);
+	last_input_time = ktime_to_us(ktime_get());
+}
+
+static struct early_suspend cpuboost_early_suspend = {
+	.level			= EARLY_SUSPEND_LEVEL_DISABLE_FB,
+	.resume			= cpuboost_late_resume,
+};
+
 static int cpu_boost_init(void)
 {
 	int cpu, ret;
@@ -355,6 +372,8 @@ static int cpu_boost_init(void)
 	atomic_notifier_chain_register(&migration_notifier_head,
 					&boost_migration_nb);
 	ret = input_register_handler(&cpuboost_input_handler);
+
+	register_early_suspend(&cpuboost_early_suspend);
 
 	return 0;
 }
