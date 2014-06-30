@@ -1,3 +1,4 @@
+#ifndef _LINUX_EXPORT_H
 #define _LINUX_EXPORT_H
 /*
  * Export symbols from the kernel to modules.  Forked from module.h
