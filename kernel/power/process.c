@@ -140,8 +140,7 @@ static int try_to_freeze_tasks(bool sig_only)
 			do_each_thread(g, p) {
 			task_lock(p);
 		        if (p != current && !freezer_should_skip(p)
-			    && freezing(p) && !frozen(p) &&
-                               elapsed_csecs > 1000)
+			    && freezing(p) && !frozen(p))
 			       sched_show_task(p);
 			cancel_freezing(p);
 			task_unlock(p);
