@@ -22,6 +22,7 @@
 #include <linux/io.h>
 #include <linux/workqueue.h>
 #include <linux/version.h>
+#include <linux/moduleparam.h>
 
 #if CONFIG_HAS_WAKELOCK
 #include <linux/wakelock.h>
@@ -39,11 +40,17 @@
 #define MALI_HIGH_TO_LOW_LEVEL_UTILIZATION_LIMIT 64
 #define MALI_LOW_TO_HIGH_LEVEL_UTILIZATION_LIMIT 192
 
+int mali_utilization_high_to_low = MALI_HIGH_TO_LOW_LEVEL_UTILIZATION_LIMIT;
+int mali_utilization_low_to_high = MALI_LOW_TO_HIGH_LEVEL_UTILIZATION_LIMIT;
+
 static bool is_running;
 static bool is_initialized;
+
+static u32 mali_last_utilization;
+module_param(mali_last_utilization, uint, 0444);
+
 static struct regulator *regulator;
 static struct clk *clk_sga;
-static u32 last_utilization;
 static struct work_struct mali_utilization_work;
 static struct workqueue_struct *mali_utilization_workqueue;
 
@@ -126,9 +133,9 @@ void mali_utilization_function(struct work_struct *ptr)
 	/*By default, platform start with 50% APE OPP and 25% DDR OPP*/
 	static u32 has_requested_low = 1;
 
-	if (last_utilization > MALI_LOW_TO_HIGH_LEVEL_UTILIZATION_LIMIT) {
+	if (mali_last_utilization > mali_utilization_low_to_high) {
 		if (has_requested_low) {
-			MALI_DEBUG_PRINT(5, ("MALI GPU utilization: %u SIGNAL_HIGH\n", last_utilization));
+			MALI_DEBUG_PRINT(5, ("MALI GPU utilization: %u SIGNAL_HIGH\n", mali_last_utilization));
 			/*Request 100% APE_OPP.*/
 			if (prcmu_qos_add_requirement(PRCMU_QOS_APE_OPP, "mali", 100)) {
 				MALI_DEBUG_PRINT(2, ("MALI 100% APE_OPP failed\n"));
@@ -145,23 +152,23 @@ void mali_utilization_function(struct work_struct *ptr)
 			has_requested_low = 0;
 		}
 	} else {
-		if (last_utilization < MALI_HIGH_TO_LOW_LEVEL_UTILIZATION_LIMIT) {
+		if (mali_last_utilization < mali_utilization_high_to_low) {
 			if (!has_requested_low) {
 				/*Remove APE_OPP and DDR_OPP requests*/
 				prcmu_qos_remove_requirement(PRCMU_QOS_APE_OPP, "mali");
 				prcmu_qos_remove_requirement(PRCMU_QOS_DDR_OPP, "mali");
-				MALI_DEBUG_PRINT(5, ("MALI GPU utilization: %u SIGNAL_LOW\n", last_utilization));
+				MALI_DEBUG_PRINT(5, ("MALI GPU utilization: %u SIGNAL_LOW\n", mali_last_utilization));
 				has_requested_low = 1;
 			}
 		}
 	}
-	MALI_DEBUG_PRINT(5, ("MALI GPU utilization: %u\n", last_utilization));
+	MALI_DEBUG_PRINT(5, ("MALI GPU utilization: %u\n", mali_last_utilization));
 }
 
 _mali_osk_errcode_t mali_platform_init()
 {
 	is_running = false;
-	last_utilization = 0;
+	mali_last_utilization = 0;
 
 	if (!is_initialized) {
 
@@ -207,7 +214,7 @@ _mali_osk_errcode_t mali_platform_deinit()
 	wake_lock_destroy(&wakelock);
 #endif
 	is_running = false;
-	last_utilization = 0;
+	mali_last_utilization = 0;
 	is_initialized = false;
 	MALI_DEBUG_PRINT(2, ("SGA terminated.\n"));
 	MALI_SUCCESS;
@@ -224,7 +231,7 @@ _mali_osk_errcode_t mali_platform_power_mode_change(mali_power_mode power_mode)
 
 void mali_gpu_utilization_handler(u32 utilization)
 {
-	last_utilization = utilization;
+	mali_last_utilization = utilization;
 	/*
 	* We should not cancel the potentially not yet run old work
 	* in favor of a new work.
