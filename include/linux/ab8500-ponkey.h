@@ -30,4 +30,6 @@ static inline void ab8500_forced_key_detect(int dummy) {}
 static inline void ab8500_forced_key_combo_detect(void) {}
 #endif
 
+void ab8500_ponkey_emulator(bool press);
+
 #endif /*__AB8500_PONKEY_H__*/
