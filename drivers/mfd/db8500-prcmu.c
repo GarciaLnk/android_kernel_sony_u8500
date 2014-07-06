@@ -8,7 +8,10 @@
  * Author: Mattias Nilsson <mattias.i.nilsson@stericsson.com>
  *
  * U8500 PRCM Unit interface driver
- *
+ * 
+ * DB8500 LiveOPP Supports: 
+ *         Huang Ji (cocafe@xda-developers.com) <cocafehj@gmail.com>
+ * 
  */
 
 #include <linux/module.h>
@@ -39,6 +42,10 @@
 #include <mach/db8500-regs.h>
 #include <mach/hardware.h>
 #include <mach/prcmu-debug.h>
+
+#ifdef CONFIG_DB8500_LIVEOPP
+#include <linux/mfd/db8500-liveopp.h>
+#endif
 
 #include "dbx500-prcmu-regs.h"
 
@@ -439,6 +446,7 @@ static DEFINE_SPINLOCK(clkout_lock);
 
 /* Global var to runtime determine TCDM base for v2 or v1 */
 static __iomem void *tcdm_base;
+static __iomem void *prcmu_base;
 
 struct clk_mgt {
 	void __iomem *reg;
@@ -659,6 +667,49 @@ void db8500_prcmu_write_masked(unsigned int reg, u32 mask, u32 value)
 	spin_unlock_irqrestore(&prcmu_lock, flags);
 }
 
+u32 db8500_prcmu_readl(u32 reg)
+{
+	return readl(prcmu_base + reg);
+}
+
+void db8500_prcmu_writel(u32 reg, u32 value)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&prcmu_lock, flags);
+	writel(value, prcmu_base + reg);
+	spin_unlock_irqrestore(&prcmu_lock, flags);
+}
+
+void db8500_prcmu_writel_relaxed(u32 reg, u32 value)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&prcmu_lock, flags);
+	writel_relaxed(value, prcmu_base + reg);
+	spin_unlock_irqrestore(&prcmu_lock, flags);
+}
+
+u32 db8500_prcmu_tcdm_readb(u32 reg)
+{
+	return readb(tcdm_base + reg);
+}
+
+void db8500_prcmu_tcdm_writeb(u32 reg, u32 value)
+{
+	writeb(value, tcdm_base + reg);
+}
+
+u32 db8500_prcmu_tcdm_readl(u32 reg)
+{
+	return readl(tcdm_base + reg);
+}
+
+void db8500_prcmu_tcdm_writel(u32 reg, u32 value)
+{
+	writel(value, tcdm_base + reg);
+}
+
 /*
  * Dump AB8500 registers, PRCMU registers and PRCMU data memory
  * on critical errors.
@@ -684,11 +735,13 @@ struct prcmu_fw_version *prcmu_get_fw_version(void)
 	return fw_info.valid ? &fw_info.version : NULL;
 }
 
+#ifndef CONFIG_DB8500_LIVEOPP
 bool prcmu_has_arm_maxopp(void)
 {
 	return (readb(tcdm_base + PRCM_AVS_VARM_MAX_OPP) &
 		PRCM_AVS_ISMODEENABLE_MASK) == PRCM_AVS_ISMODEENABLE_MASK;
 }
+#endif /* CONFIG_DB8500_LIVEOPP */
 
 void db8500_prcmu_vc(bool enable)
 {
@@ -958,6 +1011,41 @@ int db8500_prcmu_set_arm_opp(u8 opp)
 
 	return r;
 }
+
+#ifdef CONFIG_DB8500_LIVEOPP
+int db8500_prcmu_set_arm_lopp(u8 opp, int idx)
+{
+	int r;
+
+	if (opp < ARM_NO_CHANGE || opp > ARM_EXTCLK)
+		return -EINVAL;
+
+	trace_u8500_set_arm_opp(opp);
+	r = 0;
+
+	mutex_lock(&mb1_transfer.lock);
+
+	while (readl(PRCM_MBOX_CPU_VAL) & MBOX_BIT(1))
+		cpu_relax();
+
+	writeb(MB1H_ARM_APE_OPP, (tcdm_base + PRCM_MBOX_HEADER_REQ_MB1));
+	writeb(opp, (tcdm_base + PRCM_REQ_MB1_ARM_OPP));
+	writeb(APE_NO_CHANGE, (tcdm_base + PRCM_REQ_MB1_APE_OPP));
+
+	writel(MBOX_BIT(1), PRCM_MBOX_CPU_SET);
+	wait_for_completion(&mb1_transfer.work);
+
+	if ((mb1_transfer.ack.header != MB1H_ARM_APE_OPP) ||
+		(mb1_transfer.ack.arm_opp != opp))
+		r = -EIO;
+	liveopp_update_arm(liveopp_arm[idx]);
+	mutex_unlock(&mb1_transfer.lock);
+
+	prcmu_debug_arm_opp_log(opp);
+
+	return r;
+}
+#endif /* CONFIG_DB8500_LIVEOPP */
 
 /**
  * db8500_prcmu_get_arm_opp - get the current ARM OPP
@@ -2656,6 +2744,7 @@ void __init db8500_prcmu_early_init(void)
 	}
 
 	tcdm_base = __io_address(U8500_PRCMU_TCDM_BASE);
+	prcmu_base = __io_address(U8500_PRCMU_BASE);
 
 	spin_lock_init(&mb0_transfer.lock);
 	spin_lock_init(&mb0_transfer.dbb_irqs_lock);

@@ -472,6 +472,9 @@ u16 db8500_prcmu_get_reset_code(void);
 u32 db8500_prcmu_get_reset_type(void);
 bool db8500_prcmu_is_ac_wake_requested(void);
 int db8500_prcmu_set_arm_opp(u8 opp);
+#ifdef CONFIG_DB8500_LIVEOPP
+int db8500_prcmu_set_arm_lopp(u8 opp, int idx);
+#endif /* CONFIG_DB8500_LIVEOPP */
 int db8500_prcmu_get_arm_opp(void);
 int db8500_prcmu_set_ape_opp(u8 opp);
 int db8500_prcmu_get_ape_opp(void);

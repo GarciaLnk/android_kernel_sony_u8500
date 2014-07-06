@@ -352,6 +352,13 @@ static inline int prcmu_set_arm_opp(u8 opp)
 		return db8500_prcmu_set_arm_opp(opp);
 }
 
+#ifdef CONFIG_DB8500_LIVEOPP
+static inline int prcmu_set_arm_lopp(u8 opp, int idx)
+{
+	return db8500_prcmu_set_arm_lopp(opp, idx);
+}
+#endif /* CONFIG_DB8500_LIVEOPP */
+
 static inline int prcmu_get_arm_opp(void)
 {
 	if (cpu_is_u5500())
@@ -479,6 +486,20 @@ static inline void prcmu_vc(bool enable)
 	if (cpu_is_u8500())
 		db8500_prcmu_vc(enable);
 }
+
+u32 db8500_prcmu_readl(u32 reg);
+
+void db8500_prcmu_writel(u32 reg, u32 value);
+
+void db8500_prcmu_writel_relaxed(u32 reg, u32 value);
+
+u32 db8500_prcmu_tcdm_readl(u32 reg);
+
+void db8500_prcmu_tcdm_writel(u32 reg, u32 value);
+
+u32 db8500_prcmu_tcdm_readb(u32 reg);
+
+void db8500_prcmu_tcdm_writeb(u32 reg, u32 value);
 
 #else
 
