@@ -16,7 +16,18 @@
 #include <linux/time.h>
 #include <linux/hwmon.h>
 
+#include <linux/moduleparam.h>
+
+/* RtcCtrl bits */
+#define AB8500_ALARM_MIN_LOW  0x08
+#define AB8500_ALARM_MIN_MID 0x09
+#define RTC_CTRL 0x0B
+#define RTC_ALARM_ENABLE 0x4
+
 static struct device *sysctrl_dev;
+
+static bool force_pwroff = false;
+module_param(force_pwroff, bool, 0644);
 
 void ab8500_power_off(void)
 {
@@ -49,7 +60,7 @@ void ab8500_power_off(void)
 		}
 	}
 
-	if (!charger_present)
+	if ((!charger_present) || force_pwroff)
 		goto shutdown;
 
 	/* Check if battery is known */
@@ -88,6 +99,79 @@ shutdown:
 			(void)sigprocmask(SIG_SETMASK, &old, NULL);
 		}
 	}
+}
+
+/*
+ * Use the AB WD to reset the platform. It will perform a hard
+ * reset instead of a soft reset. Write the reset reason to
+ * the AB before reset, which can be read upon restart.
+ */
+void ab8500_restart(u16 reset_code)
+{
+	struct ab8500_platform_data *plat;
+	struct ab8500_sysctrl_platform_data *pdata;
+	u16 reason = 0;
+	u8 val, val_s;
+	int trial = 10;
+
+	if (sysctrl_dev == NULL) {
+		pr_err("%s: sysctrl not initialized\n", __func__);
+		return;
+	}
+
+#if 0
+	plat = dev_get_platdata(sysctrl_dev->parent);
+	pdata = plat->sysctrl;
+	if (pdata->reboot_reason_code)
+		reason = pdata->reboot_reason_code(cmd);
+	else
+		pr_warn("[%s] No reboot reason set. Default reason %d\n",
+			__func__, reason);
+#else
+	reason = reset_code;
+#endif
+	/*
+	 * Disable RTC alarm, just a precaution so that no alarm
+	 * is running when WD reset is executed.
+	 */
+	abx500_get_register_interruptible(sysctrl_dev, AB8500_RTC,
+		RTC_CTRL , &val);
+	abx500_set_register_interruptible(sysctrl_dev, AB8500_RTC,
+		RTC_CTRL , (val & ~RTC_ALARM_ENABLE));
+
+	/* SMPL disabled for AB WatchDog */
+	while (trial) {
+		abx500_set_register_interruptible(sysctrl_dev, AB8500_RTC,
+			0x12 , 0);
+		abx500_get_register_interruptible(sysctrl_dev, AB8500_RTC,
+		0x12 , &val_s);
+		if(!val_s)
+			break;
+		else
+			trial--;
+	}
+
+	/*
+	 * Android is not using the RTC alarm registers during reboot
+	 * so we borrow them for writing the reason of reset
+	 */
+
+	/* reason[8 LSB] */
+	val = reason & 0xFF;
+	abx500_set_register_interruptible(sysctrl_dev, AB8500_RTC,
+		AB8500_ALARM_MIN_LOW , val);
+
+	/* reason[8 MSB] */
+	val = (reason>>8) & 0xFF;
+	abx500_set_register_interruptible(sysctrl_dev, AB8500_RTC,
+		AB8500_ALARM_MIN_MID , val);
+
+	/* Setting WD timeout to 0 */
+	ab8500_sysctrl_write(AB8500_MAINWDOGTIMER, 0xFF, 0x0);
+
+	/* Setting the parameters to AB8500 WD*/
+	ab8500_sysctrl_write(AB8500_MAINWDOGCTRL, 0xFF, (AB8500_ENABLE_WD |
+		AB8500_WD_RESTART_ON_EXPIRE | AB8500_KICK_WD));
 }
 
 static int ab8500_notifier_call(struct notifier_block *this,
@@ -152,10 +236,39 @@ int ab8500_sysctrl_write(u16 reg, u8 mask, u8 value)
 }
 EXPORT_SYMBOL(ab8500_sysctrl_write);
 
+static ssize_t abb_sysctrl_restart_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	return 0;
+}
+
+static ssize_t abb_sysctrl_restart_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	int reason;
+	if (sscanf(buf, "%x", &reason)) {
+		ab8500_restart((u16)reason);
+	}
+	
+	return count;
+}
+static struct kobj_attribute abb_sysctrl_restart_interface = 
+	__ATTR(abb_restart, 0644, abb_sysctrl_restart_show, abb_sysctrl_restart_store);
+
+static struct attribute *abb_sysctrl_attrs[] = {
+	&abb_sysctrl_restart_interface.attr, 
+	NULL,
+};
+
+static struct attribute_group abb_sysctrl_interface_group = {
+	.attrs = abb_sysctrl_attrs,
+};
+
+static struct kobject *abb_sysctrl_kobject;
+
 static int __devinit ab8500_sysctrl_probe(struct platform_device *pdev)
 {
 	struct ab8500_platform_data *plat;
 	struct ab8500_sysctrl_platform_data *pdata;
+	int ret;
 
 	sysctrl_dev = &pdev->dev;
 	plat = dev_get_platdata(pdev->dev.parent);
@@ -166,7 +279,6 @@ static int __devinit ab8500_sysctrl_probe(struct platform_device *pdev)
 	pdata = plat->sysctrl;
 
 	if (pdata) {
-		int ret;
 		int i;
 		int j;
 		for (i = AB8500_SYSCLKREQ1RFCLKBUF;
@@ -184,6 +296,15 @@ static int __devinit ab8500_sysctrl_probe(struct platform_device *pdev)
 					"%d\n", j + 1, ret);
 			}
 		}
+	}
+
+	abb_sysctrl_kobject = kobject_create_and_add("abb-sysctrl", kernel_kobj);
+	if (!abb_sysctrl_kobject) {
+		pr_err("[ABB-SysCtrl] Failed to create kobject interface\n");
+	}
+	ret = sysfs_create_group(abb_sysctrl_kobject, &abb_sysctrl_interface_group);
+	if (ret) {
+		kobject_put(abb_sysctrl_kobject);
 	}
 
 	return 0;
