@@ -153,7 +153,7 @@ static int dbx500_cpufreq_target(struct cpufreq_policy *policy,
 	BUG_ON(idx >= freq_table_len);
 
 	/* request the PRCM unit for opp change */
-	if (freq_table[idx].frequency!=1150000){
+	if (freq_table[idx].frequency!=1100000){
 		if (last_idx==1){
 			db8500_prcmu_set_arm_opp(ARM_100_OPP);
 			prcmu_abb_write(AB8500_REGU_CTRL2, 0x0B, &varm_raw_rec, 1);
@@ -180,7 +180,7 @@ static int dbx500_cpufreq_target(struct cpufreq_policy *policy,
 
 	/* Frequency */
 	db8500_prcmu_write(PRCMU_PLLARM_REG,PLLARM_MAXOPP);
-	db8500_prcmu_write(PRCMU_PLLARM_REG, 0x0001011E);
+	db8500_prcmu_write(PRCMU_PLLARM_REG, 0x00030156);
 	writeb(ARM_MAX_OPP,(prcmu_base + PRCM_ACK_MB1_CURRENT_ARM_OPP));}
 
 	/* post change notification */
@@ -225,7 +225,7 @@ static void __init dbx500_cpufreq_init_maxopp_freq(void)
 	case PRCMU_FW_PROJECT_U8500:
 	case PRCMU_FW_PROJECT_U9500:
 	case PRCMU_FW_PROJECT_U8420:
-		freq_table[5].frequency = 1150000;
+		freq_table[5].frequency = 1100000;
 		break;
 	case PRCMU_FW_PROJECT_U8500_C2:
 	case PRCMU_FW_PROJECT_U9500_C2:
