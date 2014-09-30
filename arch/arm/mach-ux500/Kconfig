@@ -48,6 +48,13 @@ config MACH_U8500
 	help
 	  Include support for the mop500 development platform.
 
+config MACH_U8500_KUMQUAT
+	bool "Sony Ericsson Kumquat"
+	select WLAN_PMUEN_UX500
+	select CW1200_USE_GPIO_IRQ
+	help
+	  Support for Sony Ericsson Kumquat devices.
+
 config MACH_U8500_LOTUS
 	bool "Sony Ericsson Lotus"
 	select WLAN_PMUEN_UX500
