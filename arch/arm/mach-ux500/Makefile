@@ -82,6 +82,17 @@ obj-$(CONFIG_MACH_U8500_PDP_R2)  += board-rio-grande.o board-rio-grande-sdi.o \
 				display-rio-grande_r2.o \
 				board-mop500-vibra.o
 
+obj-$(CONFIG_MACH_U8500_PEPPER)  += board-rio-grande.o board-rio-grande-sdi.o \
+				board-mop500-regulators.o \
+				gpio-pepper.o \
+				board-mop500-msp.o board-mop500-bm.o \
+				board-rio-grande-mmio.o board-mop500-wlan.o \
+				simple_remote-rio-grande.o \
+				input-pepper.o leds-pepper.o \
+				display-rio-grande.o sim_detect_semc.o \
+				board-mop500-vibra-pepper.o \
+				charger-pepper.o
+
 obj-$(CONFIG_MACH_U5500)	+= board-u5500.o board-u5500-sdi.o \
 				   board-u5500-regulators.o \
 				   board-u5500-pins.o \
