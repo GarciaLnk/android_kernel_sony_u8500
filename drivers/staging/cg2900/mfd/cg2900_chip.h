@@ -6,6 +6,7 @@
  * Josef Kindberg (josef.kindberg@stericsson.com) for ST-Ericsson.
  * Dariusz Szymszak (dariusz.xd.szymczak@stericsson.com) for ST-Ericsson.
  * Kjell Andersson (kjell.k.andersson@stericsson.com) for ST-Ericsson.
+ * Hemant Gupta (hemant.gupta@stericsson.com) for ST-Ericsson.
  * License terms:  GNU General Public License (GPL), version 2
  *
  * Linux Bluetooth HCI H:4 Driver for ST-Ericsson CG2900 GPS/BT/FM controller.
@@ -39,13 +40,6 @@ static inline void store_bit(__u8 *var, size_t bit, __u8 value)
 
 /* Supported chips */
 #define CG2900_SUPP_MANUFACTURER			0x30
-#define CG2900_SUPP_REVISION_MIN			0x0100
-#define CG2900_SUPP_REVISION_MAX			0x0200
-
-/* Specific chip version data */
-#define CG2900_PG1_REV					0x0101
-#define CG2900_PG2_REV					0x0200
-#define CG2900_PG1_SPECIAL_REV				0x0700
 
 /*
  *	Bluetooth
@@ -81,6 +75,20 @@ struct bt_vs_store_in_fs_cmd {
 
 #define CG2900_VS_STORE_IN_FS_USR_ID_BD_ADDR		0xFE
 
+#define HCI_EV_VENDOR_SPECIFIC					0xFF
+#define CG2900_EV_VS_WRITE_FILE_BLOCK_COMPLETE	0x60
+/* BT VS Event */
+struct bt_vs_evt {
+	__u8	evt_id;
+	__u8	data[];
+} __packed;
+
+/* BT VS Write File Block Event */
+struct bt_vs_write_file_block_evt {
+	__u8	status;
+	__u8	file_blk_id;
+} __packed;
+
 /* BT VS Write File Block command */
 #define CG2900_BT_OP_VS_WRITE_FILE_BLOCK		0xFC2E
 struct bt_vs_write_file_block_cmd {
@@ -100,17 +108,6 @@ struct bt_vs_bt_enable_cmd {
 	u8	plen;
 	u8	enable;
 } __packed;
-
-/* Bytes in the command Hci_Cmd_ST_Set_Uart_Baud_Rate */
-#define CG2900_BAUD_RATE_57600				0x03
-#define CG2900_BAUD_RATE_115200				0x02
-#define CG2900_BAUD_RATE_230400				0x01
-#define CG2900_BAUD_RATE_460800				0x00
-#define CG2900_BAUD_RATE_921600				0x20
-#define CG2900_BAUD_RATE_2000000			0x25
-#define CG2900_BAUD_RATE_3000000			0x27
-#define CG2900_BAUD_RATE_3250000			0x28
-#define CG2900_BAUD_RATE_4000000			0x2B
 
 /* BT VS SetBaudRate command */
 #define CG2900_BT_OP_VS_SET_BAUD_RATE			0xFC09

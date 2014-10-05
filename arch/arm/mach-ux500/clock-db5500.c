@@ -118,6 +118,26 @@ static struct clkops clkout1_ops = {
 	.disable = clkout1_disable,
 };
 
+#define PRCM_CLKOCR2		0x58C
+#define PRCM_CLKOCR2_REFCLK	(1 << 0)
+#define PRCM_CLKOCR2_STATIC0	(1 << 2)
+
+static int clkout2_enable(struct clk *clk)
+{
+	prcmu_write(PRCM_CLKOCR2, PRCM_CLKOCR2_REFCLK);
+	return 0;
+}
+
+static void clkout2_disable(struct clk *clk)
+{
+	prcmu_write(PRCM_CLKOCR2, PRCM_CLKOCR2_STATIC0);
+}
+
+static struct clkops clkout2_ops = {
+	.enable = clkout2_enable,
+	.disable = clkout2_disable,
+};
+
 #define DEF_PER1_PCLK(_cg_bit, _name) \
 	DEF_PRCC_PCLK(_name, U5500_CLKRST1_BASE, _cg_bit, &per1clk)
 #define DEF_PER2_PCLK(_cg_bit, _name) \
@@ -205,6 +225,13 @@ static struct clk clkout1 = {
 	.mutex = &sysclk_mutex,
 };
 
+static struct clk clkout2 = {
+	.name = "clkout2",
+	.ops = &clkout2_ops,
+	.parent = &sysclk,
+	.mutex = &sysclk_mutex,
+};
+
 static DEFINE_MUTEX(parented_prcmu_mutex);
 
 #define DEF_PRCMU_CLK_PARENT(_name, _cg_sel, _rate, _parent) \
@@ -236,8 +263,8 @@ static DEF_PRCMU_CLK(msp02clk, PRCMU_MSP02CLK, 13000000);
 static DEF_PRCMU_CLIENT_CLK(msp1clk, PRCMU_MSP1CLK, 26000000);
 static DEF_PRCMU_CLIENT_CLK(cdclk, PRCMU_CDCLK, 26000000);
 static DEF_PRCMU_CLK(i2cclk, PRCMU_I2CCLK, 24000000);
-static DEF_PRCMU_CLK(irdaclk, PRCMU_IRDACLK, 48000000);
-static DEF_PRCMU_CLK(irrcclk, PRCMU_IRRCCLK, 48000000);
+static DEF_PRCMU_CLK_PARENT(irdaclk, PRCMU_IRDACLK, 48000000, &soc1_pll);
+static DEF_PRCMU_CLK_PARENT(irrcclk, PRCMU_IRRCCLK, 48000000, &soc1_pll);
 static DEF_PRCMU_CLK(rngclk, PRCMU_RNGCLK, 26000000);
 static DEF_PRCMU_CLK(pwmclk, PRCMU_PWMCLK, 26000000);
 static DEF_PRCMU_CLK(sdmmcclk, PRCMU_SDMMCCLK, 50000000);
@@ -466,6 +493,7 @@ static struct clk *db5500_dbg_clks[] __initdata = {
 	/* Clock sources */
 	&clkout0,
 	&clkout1,
+	&clkout2,
 	&rtc_clk1,
 };
 
@@ -483,7 +511,7 @@ static struct clk_lookup db5500_prcmu_clocks[] = {
 	CLK_LOOKUP(svaclk, "hva", NULL),
 	CLK_LOOKUP(uartclk, "UART", NULL),
 	CLK_LOOKUP(msp02clk, "MSP02", NULL),
-	CLK_LOOKUP(msp1clk, "MSP_I2S.1", NULL),
+	CLK_LOOKUP(msp1clk, "ux500-msp-i2s.1", NULL),
 	CLK_LOOKUP(cdclk, "cable_detect.0", NULL),
 	CLK_LOOKUP(i2cclk, "I2C", NULL),
 	CLK_LOOKUP(sdmmcclk, "sdmmc", NULL),
@@ -493,20 +521,26 @@ static struct clk_lookup db5500_prcmu_clocks[] = {
 	CLK_LOOKUP(per5clk, "PERIPH5", NULL),
 	CLK_LOOKUP(per6clk, "PERIPH6", NULL),
 	CLK_LOOKUP(hdmiclk, "mcde", "hdmi"),
+	CLK_LOOKUP(hdmiclk, "dsilink.0", "dsihs0"),
+	CLK_LOOKUP(hdmiclk, "dsilink.1", "dsihs1"),
 	CLK_LOOKUP(apeatclk, "apeat", NULL),
 	CLK_LOOKUP(apetraceclk, "apetrace", NULL),
 	CLK_LOOKUP(mcdeclk, "mcde", NULL),
 	CLK_LOOKUP(mcdeclk, "mcde", "mcde"),
+	CLK_LOOKUP(mcdeclk, "dsilink.0", "dsisys"),
+	CLK_LOOKUP(mcdeclk, "dsilink.1", "dsisys"),
 	CLK_LOOKUP(dmaclk, "dma40.0", NULL),
 	CLK_LOOKUP(b2r2clk, "b2r2", NULL),
 	CLK_LOOKUP(b2r2clk, "b2r2_bus", NULL),
 	CLK_LOOKUP(b2r2clk, "U8500-B2R2.0", NULL),
 	CLK_LOOKUP(tvclk, "tv", NULL),
 	CLK_LOOKUP(tvclk, "mcde", "tv"),
+	CLK_LOOKUP(tvclk, "dsilink.0", "dsilp0"),
+	CLK_LOOKUP(tvclk, "dsilink.1", "dsilp1"),
 };
 
 static struct clk_lookup db5500_prcc_clocks[] = {
-	CLK_LOOKUP(p1_msp0_clk, "MSP_I2S.0", NULL),
+	CLK_LOOKUP(p1_msp0_clk, "ux500-msp-i2s.0", NULL),
 	CLK_LOOKUP(p1_sdi0_clk, "sdi0", NULL),
 	CLK_LOOKUP(p1_sdi2_clk, "sdi2", NULL),
 	CLK_LOOKUP(p1_uart0_clk, "uart0", NULL),
@@ -522,7 +556,7 @@ static struct clk_lookup db5500_prcc_clocks[] = {
 	CLK_LOOKUP(p3_pwm_clk, "pwm", NULL),
 	CLK_LOOKUP(p3_pclk2, "gpio.4", NULL),
 
-	CLK_LOOKUP(p5_msp2_clk, "MSP_I2S.2", NULL),
+	CLK_LOOKUP(p5_msp2_clk, "ux500-msp-i2s.2", NULL),
 	CLK_LOOKUP(p5_uart1_clk, "uart1", NULL),
 	CLK_LOOKUP(p5_uart2_clk, "uart2", NULL),
 	CLK_LOOKUP(p5_uart3_clk, "uart3", NULL),
@@ -555,11 +589,14 @@ static struct clk_lookup db5500_prcc_clocks[] = {
 	 * Dummy clock sets up the GPIOs.
 	 */
 	CLK_LOOKUP(clk_dummy, "gpio.3", NULL),
+	CLK_LOOKUP(rtc32k, "rtc-pl031", NULL),
 };
 
 static struct clk_lookup db5500_clkouts[] = {
 	CLK_LOOKUP(clkout1, "mmio_camera", "primary-cam"),
 	CLK_LOOKUP(clkout1, "mmio_camera", "secondary-cam"),
+	CLK_LOOKUP(clkout2, "ab5500-usb.0", "sysclk"),
+	CLK_LOOKUP(clkout2, "ab5500-codec.0", "sysclk"),
 };
 
 static struct clk_lookup u5500_clocks[] = {
@@ -640,8 +677,10 @@ static struct clk *db5500_clks_tobe_disabled[] __initdata = {
 	&p5_sdi3_clk,
 	&p5_sdi4_clk,
 	&p5_i2c3_clk,
-	&p5_irrc_clk,
-	&p5_irda_clk,
+	&pwmclk,
+	&svaclk,
+	&cdclk,
+	&clkout2,
 };
 
 static int __init init_clock_states(void)
@@ -670,18 +709,7 @@ late_initcall(init_clock_states);
 
 int __init db5500_clk_init(void)
 {
-	if (ux500_is_svp()) {
-		prcmu_clk_ops.enable = NULL;
-		prcmu_clk_ops.disable = NULL;
-		prcc_pclk_ops.enable = NULL;
-		prcc_pclk_ops.disable = NULL;
-		prcc_kclk_ops.enable = NULL;
-		prcc_kclk_ops.disable = NULL;
-	}
 	prcmu_clk_ops.get_rate = NULL;
-
-	if (cpu_is_u5500v1())
-		p1_sdi0_kclk.parent = &sdmmcclk;
 
 	clkdev_add_table(u8500_common_clock_sources,
 		ARRAY_SIZE(u8500_common_clock_sources));

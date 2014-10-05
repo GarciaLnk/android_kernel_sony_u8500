@@ -26,6 +26,9 @@
 #define IO_REGU_MIN		1650000
 #define IO_REGU_MAX		3300000
 
+#define DSI_HS_FREQ_HZ		420160000
+#define DSI_LP_FREQ_HZ		19200000
+
 struct device_info {
 	int reset_gpio;
 	struct mcde_port port;
@@ -66,8 +69,15 @@ static int power_off(struct mcde_display_device *ddev)
 static int display_on(struct mcde_display_device *ddev)
 {
 	int ret;
+	u8 val = 0;
 
 	dev_dbg(&ddev->dev, "Display on s6d16d0\n");
+
+	ret = mcde_dsi_dcs_write(ddev->chnl_state,
+						DCS_CMD_SET_TEAR_ON, &val, 1);
+	if (ret)
+		dev_warn(&ddev->dev,
+			"%s:Failed to enable synchronized update\n", __func__);
 
 	ret = mcde_dsi_dcs_write(ddev->chnl_state, DCS_CMD_EXIT_SLEEP_MODE,
 								NULL, 0);
@@ -159,10 +169,21 @@ static int __devinit samsung_s6d16d0_probe(struct mcde_display_device *ddev)
 	di->port.type = MCDE_PORTTYPE_DSI;
 	di->port.mode = MCDE_PORTMODE_CMD;
 	di->port.pixel_format = MCDE_PORTPIXFMT_DSI_24BPP;
-	di->port.sync_src = MCDE_SYNCSRC_BTA;
+	di->port.sync_src = ddev->port->sync_src;
+	if (ddev->port->sync_src == MCDE_SYNCSRC_TE0 ||
+				ddev->port->sync_src == MCDE_SYNCSRC_TE1) {
+		di->port.vsync_polarity = VSYNC_ACTIVE_HIGH;
+		di->port.vsync_clock_div = 0;
+		di->port.vsync_min_duration = 0;
+		di->port.vsync_max_duration = 0;
+	}
+	di->port.frame_trig = ddev->port->frame_trig;
 	di->port.phy.dsi.num_data_lanes = 2;
+	di->port.phy.dsi.host_eot_gen = true;
 	/* TODO: Move UI to mcde_hw.c when clk_get_rate(dsi) is done */
 	di->port.phy.dsi.ui = 9;
+	di->port.phy.dsi.hs_freq = DSI_HS_FREQ_HZ;
+	di->port.phy.dsi.lp_freq = DSI_LP_FREQ_HZ;
 
 	ret = gpio_request(di->reset_gpio, NULL);
 	if (ret)
@@ -178,7 +199,7 @@ static int __devinit samsung_s6d16d0_probe(struct mcde_display_device *ddev)
 		goto regulator_voltage_failed;
 
 	/* Get in sync with u-boot */
-	if (ddev->power_mode == MCDE_DISPLAY_PM_STANDBY)
+	if (ddev->power_mode != MCDE_DISPLAY_PM_OFF)
 		(void)regulator_enable(di->regulator);
 
 	ddev->set_power_mode = set_power_mode;

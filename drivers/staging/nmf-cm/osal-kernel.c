@@ -2,6 +2,7 @@
  * Copyright (C) ST-Ericsson SA 2010
  * Author: Pierre Peiffer <pierre.peiffer@stericsson.com> for ST-Ericsson.
  * License terms: GNU General Public License (GPL), version 2.
+ * Copyright (c) 2012 Sony Mobile Communications AB
  */
 
 /** \file osal-kernel.c
@@ -46,6 +47,9 @@ MODULE_PARM_DESC(dspLoadHighThreshold, "Threshold above which 100 APE OPP is req
 static unsigned int dspLoadLowThreshold = 35;
 module_param(dspLoadLowThreshold, uint, S_IWUSR|S_IRUGO);
 MODULE_PARM_DESC(dspLoadLowThreshold, "Threshold below which 100 APE OPP request is removed");
+static bool cm_use_ftrace;
+module_param(cm_use_ftrace, bool, S_IWUSR|S_IRUGO);
+MODULE_PARM_DESC(cm_use_ftrace, "Whether all CM debug traces goes through ftrace or normal kernel output");
 
 /** \defgroup ENVIRONMENT_INITIALIZATION Environment initialization
  * Includes functions that initialize the Linux OSAL itself plus functions that
@@ -84,7 +88,7 @@ int remapRegions(void)
 	}
 
 	/* Remap _all_ ESRAM banks */
-	osalEnv.esram_base = ioremap_nocache(ESRAM_BASE, cfgESRAMSize*ONE_KB);
+	osalEnv.esram_base = ioremap_nocache(osalEnv.esram_base_phys, cfgESRAMSize*ONE_KB);
 	if(osalEnv.esram_base == NULL){
 		pr_err("%s: could not remap ESRAM Base\n", __func__);
 		return -ENOMEM;
@@ -211,7 +215,7 @@ int getNmfHwMappingDesc(t_nmf_hw_mapping_desc* nmfHwMappingDesc)
 	if (nmfHwMappingDesc == NULL)
 		return -ENXIO;
 
-	nmfHwMappingDesc->esramDesc.systemAddr.physical = ESRAM_BASE;
+	nmfHwMappingDesc->esramDesc.systemAddr.physical = (t_cm_physical_address)osalEnv.esram_base_phys;
 	nmfHwMappingDesc->esramDesc.systemAddr.logical = (t_cm_logical_address)osalEnv.esram_base;
 	nmfHwMappingDesc->esramDesc.size = cfgESRAMSize*ONE_KB;
 
@@ -350,7 +354,7 @@ void OSAL_PostDfc(t_nmf_mpc2host_handle upLayerTHIS, t_uint32 methodIndex, t_eve
 	spin_unlock_bh(&skelwrapper->channelPriv->bh_lock);
 	
 	/* Wake up process' wait queue */
-	wake_up_interruptible(&skelwrapper->channelPriv->waitq);
+	wake_up(&skelwrapper->channelPriv->waitq);
 }
 
 
@@ -521,7 +525,7 @@ void* OSAL_Alloc(t_cm_size size)
 	if (size == 0)
 		return NULL;
 
-	entry = kmalloc(size + sizeof(*entry), GFP_KERNEL);
+	entry = kmalloc(size + sizeof(*entry), GFP_KERNEL | __GFP_NOWARN);
 
 	if (entry == NULL) {
 		entry = vmalloc(size + sizeof(*entry));
@@ -547,7 +551,8 @@ void* OSAL_Alloc(t_cm_size size)
 
 	if (size == 0)
 		return NULL;
-	mem = kmalloc(size, GFP_KERNEL);
+	/* Use kmalloc() if the size is small enough. */
+	mem = (size < (2 * PAGE_SIZE - 64)) ? kmalloc(size, GFP_KERNEL) : NULL;
 	if (mem == NULL) {
 		mem = vmalloc(size);
 		if (mem == NULL)
@@ -570,7 +575,7 @@ void* OSAL_Alloc_Zero(t_cm_size size)
 	if (size == 0)
 		return NULL;
 
-	entry = kzalloc(size + sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc(size + sizeof(*entry), GFP_KERNEL | __GFP_NOWARN);
 	if (entry == NULL) {
 		entry = vmalloc(size + sizeof(*entry));
 		if (entry == NULL) {
@@ -597,7 +602,8 @@ void* OSAL_Alloc_Zero(t_cm_size size)
 
 	if (size == 0)
 		return NULL;
-	mem = kzalloc(size, GFP_KERNEL);
+	/* Use kzalloc() if the size is small enough. */
+	mem = (size < (2 * PAGE_SIZE - 64)) ? kzalloc(size, GFP_KERNEL) : NULL;
 	if (mem == NULL) {
 		mem = vmalloc(size);
 		if (mem == NULL)
@@ -677,7 +683,11 @@ void OSAL_Write64(t_nmf_trace_channel channel, t_uint8 isTimestamped, t_uint64 v
  */
 void OSAL_Log(const char *format, int param1, int param2, int param3, int param4, int param5, int param6)
 {
-	printk(format, param1, param2, param3, param4, param5, param6);
+	if (cm_use_ftrace)
+		trace_printk(format,
+			     param1, param2, param3, param4, param5, param6);
+	else
+		printk(format, param1, param2, param3, param4, param5, param6);
 }
 
 /**
@@ -752,8 +762,8 @@ static int dspload_monitor(void *idx)
 	/* init counter */
 	if (CM_GetMpcLoadCounter(mpc->coreId,
 				 &mpc->oldLoadCounter) != CM_OK)
-		pr_err("CM Driver: Failed to init load counter for %s\n",
-		       mpc->name);
+		pr_warn("CM Driver: Failed to init load counter for %s\n",
+			mpc->name);
 
 	while (!kthread_should_stop()) {
 		t_cm_mpc_load_counter loadCounter;
@@ -916,7 +926,7 @@ void OSAL_DisablePwrRessource(t_nmf_power_resource resource, t_uint32 firstParam
 
 		/* Compute the relative end address of the range,
 		   relative to base address of BANK1 */
-		secondParam = (firstParam+secondParam-(U8500_ESRAM_BASE+0x20000)-1);
+		secondParam = (firstParam+secondParam-U8500_ESRAM_BANK1-1);
 
 		/* if end is below base address of BANK1, it means that full
 		   range of addresses is on Bank0 */
@@ -924,16 +934,16 @@ void OSAL_DisablePwrRessource(t_nmf_power_resource resource, t_uint32 firstParam
 			break;
 		/* Compute the index of the last bank accessed among
 		   esram 1+2 and esram 3+4 banks */
-		secondParam /= 0x40000;
+		secondParam /= (2*U8500_ESRAM_BANK_SIZE);
 		WARN_ON(secondParam > 1);
 
 		/* Compute the index of the first bank accessed among esram 1+2
 		   and esram 3+4 banks
 		   Do not manage Bank 0 (secured, must be always ON) */
-		if (firstParam < (U8500_ESRAM_BASE+0x20000))
+		if (firstParam < U8500_ESRAM_BANK1)
 			firstParam  = 0;
 		else
-			firstParam  = (firstParam-(U8500_ESRAM_BASE+0x20000))/0x40000;
+			firstParam  = (firstParam-U8500_ESRAM_BANK1)/(2*U8500_ESRAM_BANK_SIZE);
 
 		/* power off the banks 1+2 and 3+4 if accessed. */
 		for (i=firstParam; i<=secondParam; i++) {
@@ -1029,7 +1039,7 @@ t_cm_error OSAL_EnablePwrRessource(t_nmf_power_resource resource, t_uint32 first
 
 		/* Compute the relative end address of the range, relative
 		   to base address of BANK1 */
-		secondParam = (firstParam+secondParam-(U8500_ESRAM_BASE+0x20000)-1);
+		secondParam = (firstParam+secondParam-U8500_ESRAM_BANK1-1);
 
 		/* if end is below base address of BANK1, it means that full
 		   range of addresses is on Bank0 */
@@ -1037,16 +1047,16 @@ t_cm_error OSAL_EnablePwrRessource(t_nmf_power_resource resource, t_uint32 first
 			break;
 		/* Compute the index of the last bank accessed among esram 1+2
 		   and esram 3+4 banks */
-		secondParam /= 0x40000;
+		secondParam /= (2*U8500_ESRAM_BANK_SIZE);
 		WARN_ON(secondParam > 1);
 
 		/* Compute the index of the first bank accessed among esram 1+2
 		   and esram 3+4 banks
 		   Do not manage Bank 0 (secured, must be always ON) */
-		if (firstParam < (U8500_ESRAM_BASE+0x20000))
+		if (firstParam < U8500_ESRAM_BANK1)
 			firstParam  = 0;
 		else
-			firstParam  = (firstParam-(U8500_ESRAM_BASE+0x20000))/0x40000;
+			firstParam  = (firstParam-U8500_ESRAM_BANK1)/(2*U8500_ESRAM_BANK_SIZE);
 
 		/* power on the banks 1+2 and 3+4 if accessed. */
 		for (i=firstParam; i<=secondParam; i++) {

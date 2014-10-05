@@ -17,6 +17,9 @@
 
 #include "power_supply.h"
 
+int sysfs_attr_on;  /* flag, get_property called from sysfs */
+int uevent_flag;
+
 /*
  * This is because the name "current" breaks the device attr macro.
  * The "current" word resolves to "(get_current())" so instead of
@@ -67,10 +70,13 @@ static ssize_t power_supply_show_property(struct device *dev,
 	const ptrdiff_t off = attr - power_supply_attrs;
 	union power_supply_propval value;
 
+	sysfs_attr_on = !uevent_flag;
 	if (off == POWER_SUPPLY_PROP_TYPE)
 		value.intval = psy->type;
 	else
 		ret = psy->get_property(psy, off, &value);
+
+	sysfs_attr_on = 0;
 
 	if (ret < 0) {
 		if (ret == -ENODATA)
@@ -220,6 +226,8 @@ void power_supply_init_attrs(struct device_type *dev_type)
 
 	for (i = 0; i < ARRAY_SIZE(power_supply_attrs); i++)
 		__power_supply_attrs[i] = &power_supply_attrs[i].attr;
+	sysfs_attr_on = 0;
+	uevent_flag = 0;
 }
 
 static char *kstruprdup(const char *str, gfp_t gfp)
@@ -268,8 +276,9 @@ int power_supply_uevent(struct device *dev, struct kobj_uevent_env *env)
 		char *line;
 
 		attr = &power_supply_attrs[psy->properties[j]];
-
+		uevent_flag = 1;
 		ret = power_supply_show_property(dev, attr, prop_buf);
+		uevent_flag = 0;
 		if (ret == -ENODEV || ret == -ENODATA) {
 			/* When a battery is absent, we expect -ENODEV. Don't abort;
 			   send the uevent with at least the the PRESENT=0 property */

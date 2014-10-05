@@ -2,6 +2,8 @@
  * Copyright (C) ST-Ericsson SA 2011
  *
  * Author: Avinash Kumar <avinash.kumar@stericsson.com> for ST-Ericsson
+ * Author: Ravi Kant SINGH <ravikant.singh@stericsson.com> for ST-Ericsson
+ * Author: Supriya  s KARANTH <supriya.karanth@stericsson.com> for ST-Ericsson
  * License terms: GNU General Public License (GPL) version 2
  */
 
@@ -20,11 +22,14 @@
 #include <mach/usb.h>
 #include <linux/kernel_stat.h>
 #include <mach/gpio.h>
+#include <mach/reboot_reasons.h>
+#include <linux/pm_qos_params.h>
+
+#include <linux/wakelock.h>
+static struct wake_lock ab5500_musb_wakelock;
 
 /* AB5500 USB macros
  */
-#define AB5500_USB_HOST_ENABLE 0x1
-#define AB5500_USB_DEVICE_ENABLE 0x2
 #define AB5500_MAIN_WATCHDOG_ENABLE 0x1
 #define AB5500_MAIN_WATCHDOG_KICK 0x2
 #define AB5500_MAIN_WATCHDOG_DISABLE 0x0
@@ -45,9 +50,16 @@
 #define AB5500_USB_LINK_STATUS_MASK_V2		0xF8
 
 #define USB_PROBE_DELAY 1000 /* 1 seconds */
+#define USB_LIMIT (200) /* If we have more than 200 irqs per second */
+
+static struct pm_qos_request_list usb_pm_qos_latency;
+static bool usb_pm_qos_is_latency_0;
+
+#define PUBLIC_ID_BACKUPRAM1 (U5500_BACKUPRAM1_BASE + 0x0FC0)
+#define MAX_USB_SERIAL_NUMBER_LEN 31
 
 /* UsbLineStatus register - usb types */
-enum ab8500_usb_link_status {
+enum ab5500_usb_link_status {
 	USB_LINK_NOT_CONFIGURED,
 	USB_LINK_STD_HOST_NC,
 	USB_LINK_STD_HOST_C_NS,
@@ -64,7 +76,9 @@ enum ab8500_usb_link_status {
 	USB_LINK_HM_IDGND,
 	USB_LINK_OTG_HOST_NO_CURRENT,
 	USB_LINK_NOT_VALID_LINK,
-	USB_LINK_HM_IDGND_V2 = 18,
+	USB_LINK_PHY_EN_NO_VBUS_NO_IDGND,
+	USB_LINK_STD_UPSTREAM_NO_VBUS_NO_IDGND,
+	USB_LINK_HM_IDGND_V2
 };
 
 /**
@@ -105,6 +119,7 @@ static int ab5500_usb_boot_detect(struct ab5500_usb *ab);
 static int ab5500_usb_link_status_update(struct ab5500_usb *ab);
 
 static void ab5500_usb_phy_enable(struct ab5500_usb *ab, bool sel_host);
+static void ab5500_usb_phy_disable(struct ab5500_usb *ab, bool sel_host);
 
 static inline struct ab5500_usb *xceiv_to_ab(struct otg_transceiver *x)
 {
@@ -141,51 +156,94 @@ static void ab5500_usb_wd_workaround(struct ab5500_usb *ab)
 		udelay(AB5500_WATCHDOG_DELAY_US);
 }
 
+static void ab5500_usb_load(struct work_struct *work)
+{
+	int cpu;
+	unsigned int num_irqs = 0;
+	static unsigned int old_num_irqs = UINT_MAX;
+	struct delayed_work *work_usb_workaround = to_delayed_work(work);
+	struct ab5500_usb *ab = container_of(work_usb_workaround,
+				struct ab5500_usb, work_usb_workaround);
+
+	for_each_online_cpu(cpu)
+	num_irqs += kstat_irqs_cpu(IRQ_DB5500_USBOTG, cpu);
+
+	if ((num_irqs > old_num_irqs) &&
+		(num_irqs - old_num_irqs) > USB_LIMIT) {
+
+		if (!usb_pm_qos_is_latency_0) {
+
+			pm_qos_add_request(&usb_pm_qos_latency,
+						PM_QOS_CPU_DMA_LATENCY, 0);
+			usb_pm_qos_is_latency_0 = true;
+		}
+	} else {
+
+		if (usb_pm_qos_is_latency_0) {
+
+				pm_qos_remove_request(&usb_pm_qos_latency);
+				usb_pm_qos_is_latency_0 = false;
+		}
+	}
+	old_num_irqs = num_irqs;
+
+	schedule_delayed_work_on(0,
+				&ab->work_usb_workaround,
+				msecs_to_jiffies(USB_PROBE_DELAY));
+}
+
 static void ab5500_usb_phy_enable(struct ab5500_usb *ab, bool sel_host)
 {
-	u8 bit;
+	int ret = 0;
 	/* Workaround for spurious interrupt to be checked with Hardware Team*/
 	if (ab->phy_enabled == true)
 		return;
 	ab->phy_enabled = true;
-	bit = sel_host ? AB5500_USB_HOST_ENABLE :
-			AB5500_USB_DEVICE_ENABLE;
 
+	wake_lock(&ab5500_musb_wakelock);
 	ab->usb_gpio->enable();
 	clk_enable(ab->sysclk);
 	regulator_enable(ab->v_ape);
-
-	if (!sel_host) {
+	/* TODO: Remove ux500_resotore_context and handle similar to ab8500 */
+	ux500_restore_context(NULL);
+	ret = gpio_direction_output(ab->usb_cs_gpio, 0);
+	if (ret < 0) {
+		dev_err(ab->dev, "usb_cs_gpio: gpio direction failed\n");
+		gpio_free(ab->usb_cs_gpio);
+		return;
+	}
+	gpio_set_value(ab->usb_cs_gpio, 1);
+	if (sel_host) {
 		schedule_delayed_work_on(0,
 					&ab->work_usb_workaround,
 					msecs_to_jiffies(USB_PROBE_DELAY));
 	}
-
-	abx500_mask_and_set_register_interruptible(ab->dev,
-			AB5500_BANK_USB,
-			AB5500_USB_PHY_CTRL_REG,
-			bit, bit);
 }
 
 static void ab5500_usb_phy_disable(struct ab5500_usb *ab, bool sel_host)
 {
-	u8 bit;
 	/* Workaround for spurious interrupt to be checked with Hardware Team*/
 	if (ab->phy_enabled == false)
 		return;
 	ab->phy_enabled = false;
-	bit = sel_host ? AB5500_USB_HOST_ENABLE :
-			AB5500_USB_DEVICE_ENABLE;
 
-	abx500_mask_and_set_register_interruptible(ab->dev,
-			AB5500_BANK_USB,
-			AB5500_USB_PHY_CTRL_REG,
-			bit, 0);
 	/* Needed to disable the phy.*/
 	ab5500_usb_wd_workaround(ab);
 	clk_disable(ab->sysclk);
 	regulator_disable(ab->v_ape);
 	ab->usb_gpio->disable();
+	gpio_set_value(ab->usb_cs_gpio, 0);
+
+	if (sel_host) {
+		if (usb_pm_qos_is_latency_0) {
+
+				pm_qos_remove_request(&usb_pm_qos_latency);
+				usb_pm_qos_is_latency_0 = false;
+		}
+		cancel_delayed_work_sync(&ab->work_usb_workaround);
+	}
+
+	wake_unlock(&ab5500_musb_wakelock);
 }
 
 #define ab5500_usb_peri_phy_en(ab)	ab5500_usb_phy_enable(ab, false)
@@ -197,15 +255,13 @@ static void ab5500_usb_phy_disable(struct ab5500_usb *ab, bool sel_host)
 static int ab5500_usb_link_status_update(struct ab5500_usb *ab)
 {
 	u8 val = 0;
-	int ret = 0;
-	int gpioval = 0;
-	enum ab8500_usb_link_status lsts;
-	enum usb_xceiv_events event = USB_IDLE;
+	enum ab5500_usb_link_status lsts;
+	enum usb_xceiv_events event = USB_EVENT_NONE;
 
 	(void)abx500_get_register_interruptible(ab->dev,
 			AB5500_BANK_USB, AB5500_USB_LINE_STAT_REG, &val);
 
-	if (ab->rev == AB5500_2_0)
+	if (ab->rev >= AB5500_2_0)
 		lsts = (val & AB5500_USB_LINK_STATUS_MASK_V2) >> 3;
 	else
 		lsts = (val & AB5500_USB_LINK_STATUS_MASK_V1) >> 3;
@@ -218,20 +274,20 @@ static int ab5500_usb_link_status_update(struct ab5500_usb *ab)
 	case USB_LINK_HOST_CHG_NM:
 	case USB_LINK_HOST_CHG_HS:
 	case USB_LINK_HOST_CHG_HS_CHIRP:
+
+		event = USB_EVENT_VBUS;
+		ab5500_usb_peri_phy_en(ab);
+
+		break;
+	case USB_LINK_DEDICATED_CHG:
+		/* TODO: vbus_draw */
+		event = USB_EVENT_CHARGER;
 		break;
 
 	case USB_LINK_HM_IDGND:
-		if (ab->rev == AB5500_2_0)
-			break;
+		if (ab->rev >= AB5500_2_0)
+			return -1;
 
-		/* enable usb chip Select */
-		ret = gpio_direction_output(ab->usb_cs_gpio, gpioval);
-		if (ret < 0) {
-			dev_err(ab->dev, "usb_cs_gpio: gpio direction failed\n");
-			gpio_free(ab->usb_cs_gpio);
-			return ret;
-		}
-		gpio_set_value(ab->usb_cs_gpio, 1);
 
 		ab5500_usb_host_phy_en(ab);
 
@@ -239,19 +295,19 @@ static int ab5500_usb_link_status_update(struct ab5500_usb *ab)
 		event = USB_EVENT_ID;
 
 		break;
+	case USB_LINK_PHY_EN_NO_VBUS_NO_IDGND:
+		ab5500_usb_peri_phy_dis(ab);
+
+		break;
+	case USB_LINK_STD_UPSTREAM_NO_VBUS_NO_IDGND:
+		ab5500_usb_host_phy_dis(ab);
+
+		break;
 
 	case USB_LINK_HM_IDGND_V2:
-		if (!(ab->rev == AB5500_2_0))
-			break;
+		if (!(ab->rev >= AB5500_2_0))
+			return -1;
 
-		/* enable usb chip Select */
-		ret = gpio_direction_output(ab->usb_cs_gpio, gpioval);
-		if (ret < 0) {
-			dev_err(ab->dev, "usb_cs_gpio: gpio direction failed\n");
-			gpio_free(ab->usb_cs_gpio);
-			return ret;
-		}
-		gpio_set_value(ab->usb_cs_gpio, 1);
 
 		ab5500_usb_host_phy_en(ab);
 
@@ -288,70 +344,11 @@ static irqreturn_t ab5500_usb_link_status_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t ab5500_usb_device_insert_irq(int irq, void *data)
-{
-	int ret = 0, val = 1;
-	struct ab5500_usb *ab = (struct ab5500_usb *) data;
 
-	enum usb_xceiv_events event;
 
-	ab->mode = USB_DEVICE;
-
-	ab5500_usb_peri_phy_en(ab);
-
-	/* enable usb chip Select */
-	event = USB_EVENT_VBUS;
-	ret = gpio_direction_output(ab->usb_cs_gpio, val);
-	if (ret < 0) {
-		dev_err(ab->dev, "usb_cs_gpio: gpio direction failed\n");
-		gpio_free(ab->usb_cs_gpio);
-		return ret;
-	}
-	gpio_set_value(ab->usb_cs_gpio, 1);
-
-	atomic_notifier_call_chain(&ab->otg.notifier, event, &ab->vbus_draw);
-
-	return IRQ_HANDLED;
-}
-
-/**
- * This function used to remove the voltage for USB ab->dev mode.
- */
-static irqreturn_t ab5500_usb_device_disconnect_irq(int irq, void *data)
-{
-	struct ab5500_usb *ab = (struct ab5500_usb *) data;
-	/* disable usb chip Select */
-	gpio_set_value(ab->usb_cs_gpio, 0);
-	ab5500_usb_peri_phy_dis(ab);
-	return IRQ_HANDLED;
-}
-
-/**
- * ab5500_usb_host_disconnect_irq : work handler for host cable insert.
- * @work: work structure
- *
- * This function is used to handle the host cable insert work.
- */
-static irqreturn_t ab5500_usb_host_disconnect_irq(int irq, void *data)
-{
-	struct ab5500_usb *ab = (struct ab5500_usb *) data;
-	/* disable usb chip Select */
-	gpio_set_value(ab->usb_cs_gpio, 0);
-	ab5500_usb_host_phy_dis(ab);
-	return IRQ_HANDLED;
-}
 
 static void ab5500_usb_irq_free(struct ab5500_usb *ab)
 {
-	if (ab->irq_num_id_fall)
-		free_irq(ab->irq_num_id_fall, ab);
-
-	if (ab->irq_num_vbus_rise)
-		free_irq(ab->irq_num_vbus_rise, ab);
-
-	if (ab->irq_num_vbus_fall)
-		free_irq(ab->irq_num_vbus_fall, ab);
-
 	if (ab->irq_num_link_status)
 		free_irq(ab->irq_num_link_status, ab);
 }
@@ -371,31 +368,6 @@ static int ab5500_usb_irq_setup(struct platform_device *pdev,
 	if (!ab->dev)
 		return -EINVAL;
 
-	irq = platform_get_irq_byname(pdev, "usb_idgnd_f");
-	if (irq < 0) {
-		dev_err(&pdev->dev, "ID fall irq not found\n");
-		err = irq;
-		goto irq_fail;
-	}
-	ab->irq_num_id_fall = irq;
-
-	irq = platform_get_irq_byname(pdev, "VBUS_F");
-	if (irq < 0) {
-		dev_err(&pdev->dev, "VBUS fall irq not found\n");
-		err = irq;
-		goto irq_fail;
-
-	}
-	ab->irq_num_vbus_fall = irq;
-
-	irq = platform_get_irq_byname(pdev, "VBUS_R");
-	if (irq < 0) {
-		dev_err(&pdev->dev, "VBUS raise irq not found\n");
-		err = irq;
-		goto irq_fail;
-
-	}
-	ab->irq_num_vbus_rise = irq;
 
 	irq = platform_get_irq_byname(pdev, "Link_Update");
 	if (irq < 0) {
@@ -417,47 +389,60 @@ static int ab5500_usb_irq_setup(struct platform_device *pdev,
 		goto irq_fail;
 	}
 
-	ret = request_threaded_irq(ab->irq_num_vbus_rise, NULL,
-		ab5500_usb_device_insert_irq,
-		IRQF_NO_SUSPEND | IRQF_SHARED,
-		"usb-vbus-rise", ab);
-	if (ret < 0) {
-		printk(KERN_ERR "failed to set the callback"
-				" handler for usb ab->dev"
-				" insertion\n");
-		err = ret;
-		goto irq_fail;
-	}
-
-	ret = request_threaded_irq(ab->irq_num_vbus_fall, NULL,
-		ab5500_usb_device_disconnect_irq,
-		IRQF_NO_SUSPEND | IRQF_SHARED,
-		"usb-vbus-fall", ab);
-	if (ret < 0) {
-		printk(KERN_ERR "failed to set the callback"
-				" handler for usb ab->dev"
-				" removal\n");
-		err = ret;
-		goto irq_fail;
-	}
-
-	ret = request_threaded_irq((ab->irq_num_id_fall), NULL,
-		ab5500_usb_host_disconnect_irq,
-		IRQF_NO_SUSPEND | IRQF_SHARED,
-		"usb-id-fall", ab);
-	if (ret < 0) {
-		printk(KERN_ERR "failed to set the callback"
-				" handler for usb host"
-				" removal\n");
-		err = ret;
-		goto irq_fail;
-	}
-
 	ab5500_usb_wd_workaround(ab);
 	return 0;
 
 irq_fail:
 	ab5500_usb_irq_free(ab);
+	return err;
+}
+
+/* Sys interfaces */
+static ssize_t
+serial_number_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	u32 bufer[5];
+	void __iomem *backup_ram = NULL;
+	backup_ram = ioremap(PUBLIC_ID_BACKUPRAM1, 0x14);
+
+	if (backup_ram) {
+		bufer[0] = readl(backup_ram);
+		bufer[1] = readl(backup_ram + 4);
+		bufer[2] = readl(backup_ram + 8);
+		bufer[3] = readl(backup_ram + 0x0c);
+		bufer[4] = readl(backup_ram + 0x10);
+
+		snprintf(buf, MAX_USB_SERIAL_NUMBER_LEN+1,
+				"%.8X%.8X%.8X%.8X%.8X",
+			bufer[0], bufer[1], bufer[2], bufer[3], bufer[4]);
+
+		iounmap(backup_ram);
+	} else
+			dev_err(dev, "$$\n");
+
+	return strlen(buf);
+}
+
+
+static DEVICE_ATTR(serial_number, 0644, serial_number_show, NULL);
+
+static struct attribute *ab5500_usb_attributes[] = {
+	&dev_attr_serial_number.attr,
+	NULL
+};
+static const struct attribute_group ab5500_attr_group = {
+	.attrs = ab5500_usb_attributes,
+};
+
+static int ab5500_create_sysfsentries(struct ab5500_usb *ab)
+{
+	int err;
+
+	err = sysfs_create_group(&ab->dev->kobj, &ab5500_attr_group);
+	if (err)
+		sysfs_remove_group(&ab->dev->kobj, &ab5500_attr_group);
+
 	return err;
 }
 
@@ -469,44 +454,15 @@ irq_fail:
  */
 static int ab5500_usb_boot_detect(struct ab5500_usb *ab)
 {
-	int ret;
-	int val = 1;
 	int usb_status = 0;
-	int gpioval = 0;
-	enum ab8500_usb_link_status lsts;
+	enum ab5500_usb_link_status lsts;
 	if (!ab->dev)
 		return -EINVAL;
-
-	abx500_mask_and_set_register_interruptible(ab->dev,
-			AB5500_BANK_USB,
-			AB5500_USB_PHY_CTRL_REG,
-			AB5500_USB_DEVICE_ENABLE,
-			AB5500_USB_DEVICE_ENABLE);
-
-	udelay(AB5500_PHY_DELAY_US);
-
-	abx500_mask_and_set_register_interruptible(ab->dev,
-			AB5500_BANK_USB,
-			AB5500_USB_PHY_CTRL_REG,
-			AB5500_USB_DEVICE_ENABLE, 0);
-
-	abx500_mask_and_set_register_interruptible(ab->dev,
-			AB5500_BANK_USB,
-			AB5500_USB_PHY_CTRL_REG,
-			AB5500_USB_HOST_ENABLE,
-			AB5500_USB_HOST_ENABLE);
-
-	udelay(AB5500_PHY_DELAY_US);
-
-	abx500_mask_and_set_register_interruptible(ab->dev,
-			AB5500_BANK_USB,
-			AB5500_USB_PHY_CTRL_REG,
-			AB5500_USB_HOST_ENABLE, 0);
 
 	(void)abx500_get_register_interruptible(ab->dev,
 			AB5500_BANK_USB, AB5500_USB_LINE_STAT_REG, &usb_status);
 
-	if (ab->rev == AB5500_2_0)
+	if (ab->rev >= AB5500_2_0)
 		lsts = (usb_status & AB5500_USB_LINK_STATUS_MASK_V2) >> 3;
 	else
 		lsts = (usb_status & AB5500_USB_LINK_STATUS_MASK_V1) >> 3;
@@ -519,30 +475,23 @@ static int ab5500_usb_boot_detect(struct ab5500_usb *ab)
 	case USB_LINK_HOST_CHG_NM:
 	case USB_LINK_HOST_CHG_HS:
 	case USB_LINK_HOST_CHG_HS_CHIRP:
-
-		ab5500_usb_peri_phy_en(ab);
-
-		/* enable usb chip Select */
-		ret = gpio_direction_output(ab->usb_cs_gpio, val);
-		if (ret < 0) {
-			dev_err(ab->dev, "usb_cs_gpio: gpio direction failed\n");
-			gpio_free(ab->usb_cs_gpio);
-			return ret;
+		/*
+		 * If Power on key was not pressed then enter charge only
+		 * mode and dont enumerate
+		 */
+		if ((!(ab5500_get_turn_on_status() &
+					(P_ON_KEY1_EVENT | P_ON_KEY2_EVENT))) &&
+					(prcmu_get_reset_code() ==
+					SW_RESET_COLDSTART)) {
+			dev_dbg(ab->dev, "USB entered charge only mode");
+			return 0;
 		}
-		gpio_set_value(ab->usb_cs_gpio, 1);
+		ab5500_usb_peri_phy_en(ab);
 
 		break;
 
 	case USB_LINK_HM_IDGND:
 	case USB_LINK_HM_IDGND_V2:
-		/* enable usb chip Select */
-		ret = gpio_direction_output(ab->usb_cs_gpio, gpioval);
-		if (ret < 0) {
-			dev_err(ab->dev, "usb_cs_gpio: gpio direction failed\n");
-			gpio_free(ab->usb_cs_gpio);
-			return ret;
-		}
-		gpio_set_value(ab->usb_cs_gpio, 1);
 		ab5500_usb_host_phy_en(ab);
 
 		break;
@@ -656,6 +605,9 @@ static int __devinit ab5500_usb_probe(struct platform_device *pdev)
 	 */
 	INIT_DELAYED_WORK(&ab->dwork, ab5500_usb_delayed_work);
 
+	INIT_DELAYED_WORK_DEFERRABLE(&ab->work_usb_workaround,
+							ab5500_usb_load);
+
 	err = otg_set_transceiver(&ab->otg);
 	if (err)
 		dev_err(&pdev->dev, "Can't register transceiver\n");
@@ -689,9 +641,19 @@ static int __devinit ab5500_usb_probe(struct platform_device *pdev)
 	if (err < 0)
 		goto fail1;
 
+	/*
+	 * wake lock is acquired when usb cable is connected and released when
+	 * cable is removed
+	 */
+	wake_lock_init(&ab5500_musb_wakelock, WAKE_LOCK_SUSPEND, "ab5500-usb");
+
 	err = ab5500_usb_boot_detect(ab);
 	if (err < 0)
 		goto fail1;
+
+	err = ab5500_create_sysfsentries(ab);
+	if (err < 0)
+		dev_err(ab->dev, "usb create sysfs entries failed\n");
 
 	return 0;
 

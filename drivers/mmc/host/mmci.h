@@ -60,6 +60,13 @@
 #define MCI_ST_DPSM_RWMOD	(1 << 10)
 #define MCI_ST_DPSM_SDIOEN	(1 << 11)
 /* Control register extensions in the ST Micro Ux500 versions */
+/*
+ * DMA request control is required for write
+ * if transfer size is not 32 byte aligned.
+ * DMA request control is also needed if the total
+ * transfer size is 32 byte aligned but any of the
+ * sg element lengths are not aligned with 32 byte.
+ */
 #define MCI_ST_DPSM_DMAREQCTL	(1 << 12)
 #define MCI_ST_DPSM_DBOOTMODEEN	(1 << 13)
 #define MCI_ST_DPSM_BUSYMODE	(1 << 14)
@@ -179,7 +186,10 @@ struct mmci_host {
 
 	unsigned int		mclk;
 	unsigned int		cclk;
-	u32			pwr;
+	unsigned int		cclk_desired;
+	u32			pwr_reg;
+	u32			clk_reg;
+	u32			datactrl_reg;
 	struct mmci_platform_data *plat;
 	struct variant_data	*variant;
 
@@ -193,6 +203,8 @@ struct mmci_host {
 	struct sg_mapping_iter	sg_miter;
 	unsigned int		size;
 	struct regulator	*vcc;
+
+	struct timer_list	req_expiry;
 
 #ifdef CONFIG_DMA_ENGINE
 	/* DMA stuff */

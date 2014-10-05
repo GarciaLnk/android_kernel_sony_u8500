@@ -826,6 +826,7 @@ config ARCH_U8500
 	select HAVE_CLK
 	select ARCH_HAS_CPUFREQ
 	select NOMADIK_GPIO
+	select ARCH_HAS_PASR
 	help
 	  Support for ST-Ericsson's Ux500 architecture
 
@@ -1718,6 +1719,15 @@ config DEPRECATED_PARAM_STRUCT
 	  This was deprecated in 2001 and announced to live on for 5 years.
 	  Some old boot loaders still use this way.
 
+config ARM_FLUSH_CONSOLE_ON_RESTART
+	bool "Force flush the console on restart"
+	help
+	  If the console is locked while the system is rebooted, the messages
+	  in the temporary logbuffer would not have propogated to all the
+	  console drivers. This option forces the console lock to be
+	  released if it failed to be acquired, which will cause all the
+	  pending messages to be flushed.
+
 endmenu
 
 menu "Boot options"
@@ -1873,6 +1883,15 @@ config KEXEC
 	  initially work for you.  It may help to enable device hotplugging
 	  support.
 
+config CRASH_NOTES
+	bool "Support for storing crash_notes"
+	default n
+	help
+	  Expose crash_notes and fill it with register values at the time of
+	  panic. This is used during off line post processing of the crash
+	  to figure out call stack, build info, crashing CPU, crashing
+	  process etc.
+
 config CRASH_SWRESET
 	bool "Perform a software reset at a panic (EXPERIMENTAL)"
 	depends on EXPERIMENTAL
@@ -1900,6 +1919,16 @@ config CRASH_DUMP
 	  memory address not used by the main kernel
 
 	  For more details see Documentation/kdump/kdump.txt
+
+config EMGNCY_EQ_PANIC
+	bool "Treat machine_emergency_restart as a panic restart"
+	default n
+	help
+	  To be able to capture panic function calls to the ramdumper
+	  the restart reason must be set. This configuration changes
+	  the machine_emergency_restart() to set the restart command.
+	  Nullpointer accesses failures are not using this
+	  machine_emergency_restart and is not affected by this config
 
 config AUTO_ZRELADDR
 	bool "Auto calculation of the decompressed kernel image address"

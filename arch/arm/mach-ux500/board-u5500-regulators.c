@@ -28,9 +28,23 @@ static struct regulator_consumer_supply ab5500_ldo_h_consumers[] = {
 	REGULATOR_SUPPLY("vin", "2-0036"), /* LM3530 */
 	REGULATOR_SUPPLY("vcpin", "spi1.0"),
 	REGULATOR_SUPPLY("v-ana", "mmio_camera"),
+	REGULATOR_SUPPLY("vdd", "2-0019"),
+	REGULATOR_SUPPLY("vdd", "2-001e"),
 };
 
 static struct regulator_consumer_supply ab5500_ldo_k_consumers[] = {
+	REGULATOR_SUPPLY("v-mmio-camera", "mmio_camera"),
+};
+
+static struct regulator_consumer_supply ab5500_ldo_h_consumers_pre_r3a[] = {
+	REGULATOR_SUPPLY("vddi", "mcde_disp_sony_acx424akp.0"),
+	REGULATOR_SUPPLY("vdd", "1-004b"), /* Synaptics */
+	REGULATOR_SUPPLY("vin", "2-0036"), /* LM3530 */
+	REGULATOR_SUPPLY("vcpin", "spi1.0"),
+	REGULATOR_SUPPLY("v-ana", "mmio_camera"),
+};
+
+static struct regulator_consumer_supply ab5500_ldo_k_consumers_pre_r3a[] = {
 	REGULATOR_SUPPLY("vdd", "lsm303dlh.0"),
 	REGULATOR_SUPPLY("vdd", "lsm303dlh.1"),
 	REGULATOR_SUPPLY("v-mmio-camera", "mmio_camera"),
@@ -42,6 +56,7 @@ static struct regulator_consumer_supply ab5500_ldo_l_consumers[] = {
 };
 
 static struct regulator_consumer_supply ab5500_ldo_vdigmic_consumers[] = {
+	REGULATOR_SUPPLY("vdigmic", "ab5500-codec.0"),
 };
 
 static struct regulator_consumer_supply ab5500_ldo_sim_consumers[] = {
@@ -117,9 +132,7 @@ ab5500_regulator_init_data[AB5500_NUM_REGULATORS] = {
 	},
 	[AB5500_LDO_SIM] = {
 		.constraints = {
-			.boot_on        = 1,
-			.always_on      = 1,
-			.min_uV         = 2900000,
+			.min_uV		= 1875000,
 			.max_uV		= 2900000,
 			.apply_uV	= 1,
 			.valid_ops_mask	= REGULATOR_CHANGE_VOLTAGE |
@@ -137,8 +150,20 @@ ab5500_regulator_init_data[AB5500_NUM_REGULATORS] = {
 	},
 };
 
+static struct ab5500_regulator_data
+ab5500_regulator_data[AB5500_NUM_REGULATORS] = {
+	[AB5500_LDO_H] = {
+		/*
+		 * The sub camera on the dev boards needs both supplies to be
+		 * on to avoid high leakage.
+		 */
+		.off_is_lowpower = true,
+	},
+};
+
 struct ab5500_regulator_platform_data u5500_ab5500_regulator_data = {
 	.regulator	= ab5500_regulator_init_data,
+	.data		= ab5500_regulator_data,
 	.num_regulator	= ARRAY_SIZE(ab5500_regulator_init_data),
 };
 
@@ -172,6 +197,20 @@ static struct fixed_voltage_config u5500_vio_pdata __initdata = {
 
 void __init u5500_regulators_init(void)
 {
+	if (u5500_board_is_pre_r3a()) {
+		struct regulator_init_data *rid = ab5500_regulator_init_data;
+
+		rid[AB5500_LDO_K].consumer_supplies
+			= ab5500_ldo_k_consumers_pre_r3a;
+		rid[AB5500_LDO_K].num_consumer_supplies
+			= ARRAY_SIZE(ab5500_ldo_k_consumers_pre_r3a);
+
+		rid[AB5500_LDO_H].consumer_supplies
+			= ab5500_ldo_h_consumers_pre_r3a;
+		rid[AB5500_LDO_H].num_consumer_supplies
+			= ARRAY_SIZE(ab5500_ldo_h_consumers_pre_r3a);
+	}
+
 	u5500_regulators_init_debug();
 
 	platform_device_register_data(NULL, "reg-fixed-voltage", -1,

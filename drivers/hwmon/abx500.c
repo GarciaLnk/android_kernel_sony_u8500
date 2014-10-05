@@ -36,8 +36,6 @@
 #include <linux/jiffies.h>
 #include <linux/mutex.h>
 #include <linux/pm.h>
-#include <asm/mach-types.h>
-
 #include "abx500.h"
 
 #define DEFAULT_MONITOR_DELAY 1000
@@ -60,6 +58,7 @@ static bool find_active_thresholds(struct abx500_temp *data)
 		"cancel deferred job (if it exists)"
 		"and reset temp monitor delay\n");
 	cancel_delayed_work_sync(&data->work);
+	data->work_active = false;
 	return false;
 }
 
@@ -67,12 +66,14 @@ static inline void schedule_monitor(struct abx500_temp *data)
 {
 	unsigned long delay_in_jiffies;
 	delay_in_jiffies = msecs_to_jiffies(data->gpadc_monitor_delay);
+	data->work_active = true;
 	schedule_delayed_work(&data->work, delay_in_jiffies);
 }
 
 static inline void gpadc_monitor_exit(struct abx500_temp *data)
 {
 	cancel_delayed_work_sync(&data->work);
+	data->work_active = false;
 }
 
 static void gpadc_monitor(struct work_struct *work)
@@ -181,6 +182,7 @@ static void gpadc_monitor(struct work_struct *work)
 		}
 	}
 	delay_in_jiffies = msecs_to_jiffies(data->gpadc_monitor_delay);
+	data->work_active = true;
 	schedule_delayed_work(&data->work, delay_in_jiffies);
 }
 
@@ -506,14 +508,14 @@ static SENSOR_DEVICE_ATTR(temp4_max_hyst_alarm, S_IRUGO,
 /* GPADC - SENSOR5 */
 static SENSOR_DEVICE_ATTR(temp5_label, S_IRUGO, show_label, NULL, 5);
 static SENSOR_DEVICE_ATTR(temp5_input, S_IRUGO, show_input, NULL, 5);
-static SENSOR_DEVICE_ATTR(temp5_min, S_IWUSR | S_IRUGO, show_min, set_min, 4);
-static SENSOR_DEVICE_ATTR(temp5_max, S_IWUSR | S_IRUGO, show_max, set_max, 4);
+static SENSOR_DEVICE_ATTR(temp5_min, S_IWUSR | S_IRUGO, show_min, set_min, 5);
+static SENSOR_DEVICE_ATTR(temp5_max, S_IWUSR | S_IRUGO, show_max, set_max, 5);
 static SENSOR_DEVICE_ATTR(temp5_max_hyst, S_IWUSR | S_IRUGO,
-			  show_max_hyst, set_max_hyst, 4);
-static SENSOR_DEVICE_ATTR(temp5_min_alarm, S_IRUGO, show_min_alarm, NULL, 4);
-static SENSOR_DEVICE_ATTR(temp5_max_alarm, S_IRUGO, show_max_alarm, NULL, 4);
+			  show_max_hyst, set_max_hyst, 5);
+static SENSOR_DEVICE_ATTR(temp5_min_alarm, S_IRUGO, show_min_alarm, NULL, 5);
+static SENSOR_DEVICE_ATTR(temp5_max_alarm, S_IRUGO, show_max_alarm, NULL, 5);
 static SENSOR_DEVICE_ATTR(temp5_max_hyst_alarm, S_IRUGO,
-			  show_max_hyst_alarm, NULL, 4);
+			  show_max_hyst_alarm, NULL, 5);
 static SENSOR_DEVICE_ATTR(temp5_crit_alarm, S_IRUGO,
 			  show_crit_alarm, NULL, 5);
 
@@ -612,10 +614,7 @@ static int __devinit abx500_temp_probe(struct platform_device *pdev)
 	mutex_init(&data->lock);
 
 	/* Chip specific initialization */
-	if (!machine_is_u5500())
-		err = ab8500_hwmon_init(data);
-	else
-		err = ab5500_hwmon_init(data);
+	err = abx500_hwmon_init(data);
 	if (err	< 0) {
 		dev_err(&pdev->dev, "abx500 init failed");
 		goto exit;
@@ -670,12 +669,32 @@ static int __devexit abx500_temp_remove(struct platform_device *pdev)
 	return 0;
 }
 
-/* No action required in suspend/resume, thus the lack of functions */
+static int abx500_temp_suspend(struct platform_device *pdev,
+			       pm_message_t state)
+{
+	struct abx500_temp *data = platform_get_drvdata(pdev);
+
+	if (data->work_active)
+		cancel_delayed_work_sync(&data->work);
+	return 0;
+}
+
+static int abx500_temp_resume(struct platform_device *pdev)
+{
+	struct abx500_temp *data = platform_get_drvdata(pdev);
+
+	if (data->work_active)
+		schedule_monitor(data);
+	return 0;
+}
+
 static struct platform_driver abx500_temp_driver = {
 	.driver = {
 		.owner = THIS_MODULE,
 		.name = "abx500-temp",
 	},
+	.suspend = abx500_temp_suspend,
+	.resume = abx500_temp_resume,
 	.probe = abx500_temp_probe,
 	.remove = __devexit_p(abx500_temp_remove),
 };

@@ -76,8 +76,54 @@ extern struct list_head channel_list; /**< List of all allocated channel structu
 extern struct list_head process_list; /**< List of all allocated process private structure */
 #ifdef CONFIG_DEBUG_FS
 extern bool cmld_user_has_debugfs; /**< Whether user side has proper support of debugfs to take a dump */
-extern bool cmld_dump_ongoing; /**< Whether a dump is on-going */
+extern pid_t cmld_dump_ongoing; /**< If a dump is on-going, store pid of process doing the dump */
 #endif
+
+/* Structure used to embed DSP traces */
+#define TB_MEDIA_FILE 0x1C
+#define TB_DEV_PC 0x10
+#define TB_DEV_TRACEBOX 0x4C
+#define TB_TRACEBOX 0x7C
+#define DEFAULT_RECEIVERR_OBJ 0x0
+#define DEFAULT_SENDER_OBJ 0x0A
+#define TB_TRACE_MSG 0x94
+#define TB_TRACE_EXCEPTION_MSG 0x95
+#define TB_EXCEPTION_LONG_OVRF_PACKET 0x07
+#define OST_MASTERID 0x08
+#define OST_VERSION 0x05
+#define ENTITY 0xAA
+#define PROTOCOL_ID 0x03
+#define BTRACE_HEADER_SIZE 4
+
+struct __attribute__ ((__packed__)) mmdsp_trace {
+	u8 media;
+	u8 receiver_dev;
+	u8 sender_dev;
+	u8 unused;
+	u16 size;
+	u8 receiver_obj;
+	u8 sender_obj;
+	u8 transaction_id;
+	u8 message_id;
+	u8 master_id;
+	u8 channel_id;
+	u64 timestamp;
+	u8 ost_master_id;
+	u8 ost_version;
+	u8 entity;
+	u8 protocol_id;
+	u8 length;
+	u64 timestamp2;
+	u32 component_id;
+	u32 trace_id;
+	u8 btrace_hdr_size;
+	u8 btrace_hdr_flag;
+	u8 btrace_hdr_category;
+	u8 btrace_hdr_subcategory;
+	u32 parent_handle;
+	u32 component_handle;
+	u32 params[4];
+};
 
 /** Lock/unlock per process mutex
  *
@@ -129,6 +175,7 @@ int cmld_GetComponentPropertyNumber(struct cm_process_priv *,
 int cmld_GetComponentPropertyName(struct cm_process_priv *, CM_GetComponentPropertyName_t __user *);
 int cmld_GetComponentPropertyValue(struct cm_process_priv *, CM_GetComponentPropertyValue_t __user *);
 int cmld_ReadComponentAttribute(struct cm_process_priv *, CM_ReadComponentAttribute_t __user *);
+int cmld_WriteComponentAttribute(struct cm_process_priv *, CM_WriteComponentAttribute_t __user *);
 int cmld_GetExecutiveEngineHandle(struct cm_process_priv *, CM_GetExecutiveEngineHandle_t __user *);
 int cmld_SetMode(CM_SetMode_t __user *);
 int cmld_GetRequiredComponentFiles(struct cm_process_priv *cmPriv,

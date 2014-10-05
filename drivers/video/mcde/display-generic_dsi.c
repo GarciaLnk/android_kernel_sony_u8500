@@ -18,6 +18,9 @@
 #include <video/mcde_display.h>
 #include <video/mcde_display-generic_dsi.h>
 
+#define DSI_HS_FREQ_HZ 420160000
+#define DSI_LP_FREQ_HZ 19200000
+
 static int generic_platform_enable(struct mcde_display_device *dev)
 {
 	struct mcde_display_generic_platform_data *pdata =
@@ -33,10 +36,10 @@ static int generic_platform_enable(struct mcde_display_device *dev)
 		}
 	}
 	if (pdata->reset_gpio)
-		gpio_set_value_cansleep(pdata->reset_gpio, pdata->reset_high);
+		gpio_set_value(pdata->reset_gpio, pdata->reset_high);
 	mdelay(pdata->reset_delay);
 	if (pdata->reset_gpio)
-		gpio_set_value_cansleep(pdata->reset_gpio, !pdata->reset_high);
+		gpio_set_value(pdata->reset_gpio, !pdata->reset_high);
 
 	return 0;
 }
@@ -137,6 +140,7 @@ static int __devinit generic_probe(struct mcde_display_device *dev)
 	int ret = 0;
 	struct mcde_display_generic_platform_data *pdata =
 		dev->dev.platform_data;
+	struct mcde_port *port;
 
 	if (pdata == NULL) {
 		dev_err(&dev->dev, "%s:Platform data missing\n", __func__);
@@ -149,6 +153,16 @@ static int __devinit generic_probe(struct mcde_display_device *dev)
 			__func__, dev->port->type);
 		return -EINVAL;
 	}
+
+	port = dev->port;
+	port->phy.dsi.num_data_lanes = 2;
+	/* If link2 is connected to e.g. HDMI this freq
+	 * should be set to DSI_PLL_FREQ, DSI_PLL_FREQ / 2
+	 * or DSI_PLL_FREQ / 4.
+	 * All other settings will result in one of these freqs.
+	 */
+	port->phy.dsi.hs_freq = DSI_HS_FREQ_HZ;
+	port->phy.dsi.lp_freq = DSI_LP_FREQ_HZ;
 
 	if (!dev->platform_enable && !dev->platform_disable) {
 		pdata->generic_platform_enable = true;
@@ -164,7 +178,7 @@ static int __devinit generic_probe(struct mcde_display_device *dev)
 				!pdata->reset_high);
 		}
 		if (pdata->regulator_id) {
-			pdata->regulator = regulator_get(&dev->dev,
+			pdata->regulator = regulator_get(NULL,
 				pdata->regulator_id);
 			if (IS_ERR(pdata->regulator)) {
 				ret = PTR_ERR(pdata->regulator);
@@ -207,6 +221,8 @@ static int __devinit generic_probe(struct mcde_display_device *dev)
 		}
 	}
 
+	/* TODO: Remove when DSI send command uses interrupts */
+	dev->prepare_for_update = NULL;
 	dev->platform_enable = generic_platform_enable,
 	dev->platform_disable = generic_platform_disable,
 	dev->set_power_mode = generic_set_power_mode;
@@ -253,8 +269,6 @@ static int generic_resume(struct mcde_display_device *ddev)
 	if (ret < 0)
 		dev_warn(&ddev->dev, "%s:Failed to resume display\n"
 			, __func__);
-	ddev->set_synchronized_update(ddev,
-					ddev->get_synchronized_update(ddev));
 	return ret;
 }
 

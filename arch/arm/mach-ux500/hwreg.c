@@ -98,9 +98,8 @@
 #include <linux/seq_file.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
-
-#include <asm/uaccess.h>
-#include <asm/io.h>
+#include <linux/uaccess.h>
+#include <linux/io.h>
 
 #include <mach/hardware.h>
 
@@ -138,9 +137,9 @@ struct hwreg_cfg {
 };
 #define REG_FMT_DEC(c) ((c)->fmt & 0x1)		/* bit 0: 0=hexa, 1=dec */
 #define REG_FMT_HEX(c) (!REG_FMT_DEC(c))	/* bit 0: 0=hexa, 1=dec */
-#define REG_FMT_32B(c) (((c)->fmt & 0x6)==0x0)	/* bit[2:1]=0 => 32b access */
-#define REG_FMT_16B(c) (((c)->fmt & 0x6)==0x2)	/* bit[2:1]=1 => 16b access */
-#define REG_FMT_8B(c)  (((c)->fmt & 0x6)==0x4)	/* bit[2:1]=2 => 8b access */
+#define REG_FMT_32B(c) (((c)->fmt & 0x6) == 0x0)	/* bit[2:1]=0 => 32b access */
+#define REG_FMT_16B(c) (((c)->fmt & 0x6) == 0x2)	/* bit[2:1]=1 => 16b access */
+#define REG_FMT_8B(c)  (((c)->fmt & 0x6) == 0x4)	/* bit[2:1]=2 => 8b access */
 
 static struct hwreg_cfg hwreg_cfg = {
 	.addr = 0,			/* default: invalid phys addr */
@@ -157,10 +156,12 @@ struct hwreg_io_range {
 	u8 *addr;
 };
 
+static struct hwreg_io_range *hwreg_io_current_map;
+
 /*
  * HWREG guts: mapping table
  */
-static struct hwreg_io_range hwreg_io_map[] = {
+static struct hwreg_io_range hwreg_u8500_io_map[] = {
 	/* Periph1 Peripherals */
 	{.base = U8500_PER1_BASE,	.size = 0x10000},
 	/* Periph2 Peripherals */
@@ -238,17 +239,89 @@ static struct hwreg_io_range hwreg_io_map[] = {
 
 };
 
+static struct hwreg_io_range hwreg_u9540_io_map[] = {
+	/* Periph1 Peripherals */
+	{.base = U8500_PER1_BASE,	.size = 0x10000},
+	/* Periph2 Peripherals */
+	{.base = U8500_PER2_BASE,	.size = 0x10000},
+	/* Periph3 Peripherals */
+	{.base = U8500_PER3_BASE,	.size = 0x10000},
+	/* Periph4 Peripherals */
+	{.base = U8500_PER4_BASE,	.size = 0x70000},
+	/* Periph5 Periphals */
+	{.base = U8500_PER5_BASE,	.size = 0x20000},
+	/* Periph6 Peripherals */
+	{.base = U8500_PER6_BASE,	.size = 0x10000},
+	/*
+	 * Snoop Control Unit, A9 Private interrupt IF,
+	 * A9 private peripherals, Level-2 Cache Configuration registers,
+	 * and some reserved area
+	 */
+	{.base = U8500_SCU_BASE,	.size = 0x4000},
+
+	/* DISPLAY Ctrl. configuration registers */
+	{.base = U8500_MCDE_BASE,	.size = SZ_4K},
+
+	/* DSI1 link registers */
+	{.base = U8500_DSI_LINK1_BASE,	.size = SZ_4K},
+
+	/* DSI2 link registers */
+	{.base = U8500_DSI_LINK2_BASE,	.size = SZ_4K},
+
+	/* DSI3 link registers */
+	{.base = U8500_DSI_LINK3_BASE,	.size = SZ_4K},
+
+	/* DMA Ctrl. configuration registers (base address changed in V1) */
+	{.base = U8500_DMA_BASE,	.size = SZ_4K},
+
+	/* 0xB7A00000 -> 0xB7E04000: Modem I2C */
+	{.base = U8500_MODEM_I2C,	.size = 0x404000},
+
+	/* 0xA0390000 -> 0xA039FFFF: SBAG configuration registers */
+	{.base = U8500_SBAG_BASE,	.size = SZ_4K},
+
+	/* 0xA0300000 -> 0xA031FFFF: SGA configuration registers */
+	{.base = U8500_SGA_BASE,	.size = 0x10000},
+
+	/* 0xA0200000 -> 0xA02FFFFF: Smart Imaging Acc. Data Memory space (SIA)
+	 */
+	{.base = U8500_SIA_BASE,	.size = 0x60000},
+
+	/* 0xA0100000 -> 0xA01FFFFF: Smart Video Acc. Data Memory space (SVA) */
+	{.base = U8500_SVA_BASE,	.size = 0x60000},
+
+	/* 0x81000000 -> 0x8103FFFF: Main ICN Crossbar configuration registers
+	 */
+	{.base = U8500_ICN_BASE,	.size = 0x2000},
+
+	/* 0x80140000 -> 0x8014FFFF: HSEM (Semaphores) configuration  */
+	{.base = U8500_HSEM_BASE,	.size = SZ_4K},
+
+	/* 0x80130000 -> 0x8013FFFF: B2R2 configuration registers */
+	{.base = U8500_B2R2_BASE,	.size = SZ_4K},
+
+	/* 0x80100000 -> 0x8010FFFF: STM */
+	{.base = U8500_STM_BASE,	.size = 0x10000},
+
+	/* High part of embedded boot ROM */
+	{.base = U9540_ASIC_ID_BASE,	.size = SZ_4K},
+
+	{.base = 0, .size = 0, },
+
+};
+
 static void hwreg_io_init(void)
 {
 	int i;
 
-	for (i = 0; hwreg_io_map[i].base; ++i) {
-		hwreg_io_map[i].addr = ioremap(hwreg_io_map[i].base,
-						 hwreg_io_map[i].size);
-		if (!hwreg_io_map[i].addr)
+	for (i = 0; hwreg_io_current_map[i].base; ++i) {
+		hwreg_io_current_map[i].addr =
+			ioremap(hwreg_io_current_map[i].base,
+				hwreg_io_current_map[i].size);
+		if (!hwreg_io_current_map[i].addr)
 			printk(KERN_WARNING
 				"%s: ioremap for %d (%08x) failed\n",
-				__func__, i, hwreg_io_map[i].base);
+				__func__, i, hwreg_io_current_map[i].base);
 	}
 }
 
@@ -256,19 +329,19 @@ static void hwreg_io_exit(void)
 {
 	int i;
 
-	for (i = 0; hwreg_io_map[i].base; ++i)
-		if (hwreg_io_map[i].addr)
-			iounmap(hwreg_io_map[i].addr);
+	for (i = 0; hwreg_io_current_map[i].base; ++i)
+		if (hwreg_io_current_map[i].addr)
+			iounmap(hwreg_io_current_map[i].addr);
 }
 
 static void *hwreg_io_ptov(u32 phys)
 {
 	int i;
 
-	for (i = 0; hwreg_io_map[i].base; ++i) {
-		u32 base = hwreg_io_map[i].base;
-		u32 size = hwreg_io_map[i].size;
-		u8 *addr = hwreg_io_map[i].addr;
+	for (i = 0; hwreg_io_current_map[i].base; ++i) {
+		u32 base = hwreg_io_current_map[i].base;
+		u32 size = hwreg_io_current_map[i].size;
+		u8 *addr = hwreg_io_current_map[i].addr;
 
 		if (phys < base || phys >= base + size)
 			continue;
@@ -308,7 +381,7 @@ static ssize_t hwreg_address_write(struct file *file,
 	if (err)
 		return err;
 
-	if (hwreg_io_ptov(user_address)==NULL)
+	if (hwreg_io_ptov(user_address) == NULL)
 		return -EADDRNOTAVAIL;
 
 	debug_address = user_address;
@@ -370,10 +443,12 @@ static const struct file_operations hwreg_value_fops = {
 static int hwreg_map_print(struct seq_file *s, void *p)
 {
 	int err, i;
-	for (i = 0; hwreg_io_map[i].base; ++i) {
+
+	for (i = 0; hwreg_io_current_map[i].base; ++i) {
 		err = seq_printf(s, "%d: 0x%08X => 0x%08X\n",
-				 i, hwreg_io_map[i].base,
-				 hwreg_io_map[i].base+hwreg_io_map[i].size);
+			i, hwreg_io_current_map[i].base,
+			hwreg_io_current_map[i].base +
+			hwreg_io_current_map[i].size);
 		if (err < 0)
 			return -ENOMEM;
 	}
@@ -398,15 +473,15 @@ static const struct file_operations hwreg_map_fops = {
 
 static int hwreg_print(struct seq_file *s, void *d)
 {
-	struct hwreg_cfg *c = (struct hwreg_cfg*) s->private;
+	struct hwreg_cfg *c = (struct hwreg_cfg *) s->private;
 	void *p;
 	uint  v;
 
-	if ((c==NULL) || ((p = hwreg_io_ptov(c->addr))==NULL))
+	if ((c == NULL) || ((p = hwreg_io_ptov(c->addr)) == NULL))
 		return -EADDRNOTAVAIL;
 
 	v = (uint) (REG_FMT_32B(c) ? readl(p) : REG_FMT_16B(c) ? readw(p) : readb(p));
-	v = (c->shift>=0) ? v >> c->shift : v << (-c->shift);
+	v = (c->shift >= 0) ? v >> c->shift : v << (-c->shift);
 	v = v & c->mask;
 
 	if (REG_FMT_DEC(c))
@@ -434,16 +509,16 @@ static int hwreg_open(struct inode *inode, struct file *file)
 static int strval_len(char *b)
 {
 	char *s = b;
-	if((*s=='0') && ((*(s+1)=='x') || (*(s+1)=='X'))) {
+	if ((*s == '0') && ((*(s+1) == 'x') || (*(s+1) == 'X'))) {
 		s += 2;
-		for (; *s && (*s!=' ') && (*s!='\n'); s++) {
+		for (; *s && (*s != ' ') && (*s != '\n'); s++) {
 			if (!isxdigit(*s))
 				return 0;
 		}
 	} else {
-		if (*s=='-')
+		if (*s == '-')
 			s++;
-		for (; *s && (*s!=' ') && (*s!='\n'); s++) {
+		for (; *s && (*s != ' ') && (*s != '\n'); s++) {
 			if (!isdigit(*s))
 				return 0;
 		}
@@ -457,7 +532,7 @@ static int strval_len(char *b)
  */
 static ssize_t hwreg_common_write(char *b, struct hwreg_cfg *cfg)
 {
-	uint write, val=0, offset=0;
+	uint write, val = 0, offset = 0;
 	struct hwreg_cfg loc = {
 		.addr = 0,		/* default: invalid phys addr */
 		.fmt = 0,		/* default: 32bit access, hex output */
@@ -466,7 +541,7 @@ static ssize_t hwreg_common_write(char *b, struct hwreg_cfg *cfg)
 	};
 
 	/* read or write ? */
-	if(!strncmp(b, "read ", 5)) {
+	if (!strncmp(b, "read ", 5)) {
 		write = 0;
 		b += 5;
 	} else if (!strncmp(b, "write ", 6)) {
@@ -477,31 +552,31 @@ static ssize_t hwreg_common_write(char *b, struct hwreg_cfg *cfg)
 	}
 
 	/* OPTIONS -l|-w|-b -s -m -o */
-	while((*b==' ') || (*b=='-')) {
-		if (*(b-1)!=' ') {
+	while ((*b == ' ') || (*b == '-')) {
+		if (*(b-1) != ' ') {
 			b++;
 			continue;
 		}
 		if ((!strncmp(b, "-d ", 3)) || (!strncmp(b, "-dec ", 5))) {
-			b += (*(b+2)==' ') ? 3 : 5;
+			b += (*(b+2) == ' ') ? 3 : 5;
 			loc.fmt |= (1<<0);
 		} else if ((!strncmp(b, "-h ", 3)) || (!strncmp(b, "-hex ", 5))) {
-			b += (*(b+2)==' ') ? 3 : 5;
+			b += (*(b+2) == ' ') ? 3 : 5;
 			loc.fmt &= ~(1<<0);
 		} else if ((!strncmp(b, "-m ", 3)) || (!strncmp(b, "-mask ", 6))) {
-			b += (*(b+2)==' ') ? 3 : 6;
-			if (strval_len(b)==0)
+			b += (*(b+2) == ' ') ? 3 : 6;
+			if (strval_len(b) == 0)
 				return -EINVAL;
 			loc.mask = simple_strtoul(b, &b, 0);
-		} else if ((!strncmp(b, "-s ", 3)) || (!strncmp(b,"-shift ", 7))) {
-			b += (*(b+2)==' ') ? 3 : 7;
-			if (strval_len(b)==0)
+		} else if ((!strncmp(b, "-s ", 3)) || (!strncmp(b, "-shift ", 7))) {
+			b += (*(b+2) == ' ') ? 3 : 7;
+			if (strval_len(b) == 0)
 				return -EINVAL;
 			loc.shift = simple_strtol(b, &b, 0);
 
-		} else if ((!strncmp(b, "-o ", 3)) || (!strncmp(b,"-offset ", 8))) {
-			b += (*(b+2)==' ') ? 3 : 8;
-			if (strval_len(b)==0)
+		} else if ((!strncmp(b, "-o ", 3)) || (!strncmp(b, "-offset ", 8))) {
+			b += (*(b+2) == ' ') ? 3 : 8;
+			if (strval_len(b) == 0)
 				return -EINVAL;
 			offset = simple_strtol(b, &b, 0);
 		} else if (!strncmp(b, "-l ", 3)) {
@@ -518,7 +593,7 @@ static ssize_t hwreg_common_write(char *b, struct hwreg_cfg *cfg)
 		}
 	}
 	/* get arg ADDRESS */
-	if (strval_len(b)==0)
+	if (strval_len(b) == 0)
 		return -EINVAL;
 	loc.addr = simple_strtoul(b, &b, 0);
 	loc.addr += offset;
@@ -526,8 +601,9 @@ static ssize_t hwreg_common_write(char *b, struct hwreg_cfg *cfg)
 		return -EINVAL;
 
 	if (write) {
-		while(*b==' ') b++; /* skip spaces up to arg VALUE */
-		if (strval_len(b)==0)
+		while (*b == ' ')
+			b++; /* skip spaces up to arg VALUE */
+		if (strval_len(b) == 0)
 			return -EINVAL;
 		val = simple_strtoul(b, &b, 0);
 	}
@@ -538,9 +614,9 @@ static ssize_t hwreg_common_write(char *b, struct hwreg_cfg *cfg)
 #ifdef DEBUG
 	printk(KERN_INFO "HWREG request: %s %d-bit reg, %s, addr=0x%08X, "
 	       "mask=0x%X, shift=%d value=0x%X\n",
-	       (write)?"write":"read",
-	       REG_FMT_32B(cfg)?32:REG_FMT_16B(cfg)?16:8,
-	       REG_FMT_DEC(cfg)?"decimal":"hexa",
+	       (write) ? "write" : "read",
+	       REG_FMT_32B(cfg) ? 32 : REG_FMT_16B(cfg) ? 16 : 8,
+	       REG_FMT_DEC(cfg) ? "decimal" : "hexa",
 	       cfg->addr, cfg->mask, cfg->shift, val);
 #endif
 
@@ -602,6 +678,15 @@ static const struct file_operations hwreg_fops = {
 static int __init hwreg_initialize(void)
 {
 	static struct dentry *file;
+
+	if (cpu_is_u9540()) {
+		printk(KERN_INFO "hwreg: cpu is U9540\n");
+		hwreg_io_current_map = hwreg_u9540_io_map;
+	} else {
+		printk(KERN_INFO "hwreg: cpu is U8500\n");
+		hwreg_io_current_map = hwreg_u8500_io_map;
+	}
+
 	hwreg_io_init();
 
 	hwreg_debugfs_dir = debugfs_create_dir("mem", NULL);

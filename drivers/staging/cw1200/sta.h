@@ -42,11 +42,6 @@ int cw1200_set_rts_threshold(struct ieee80211_hw *hw, u32 value);
 
 void cw1200_flush(struct ieee80211_hw *hw, bool drop);
 
-u64 cw1200_prepare_multicast(struct ieee80211_hw *hw,
-			     struct netdev_hw_addr_list *mc_list);
-
-int cw1200_set_pm(struct cw1200_common *priv, const struct wsm_set_pm *arg);
-
 /* ******************************************************************** */
 /* WSM callbacks							*/
 
@@ -71,14 +66,8 @@ int cw1200_setup_mac(struct cw1200_common *priv);
 void cw1200_join_work(struct work_struct *work);
 void cw1200_join_timeout(struct work_struct *work);
 void cw1200_unjoin_work(struct work_struct *work);
-void cw1200_offchannel_work(struct work_struct *work);
 void cw1200_wep_key_work(struct work_struct *work);
 void cw1200_update_listening(struct cw1200_common *priv, bool enabled);
 void cw1200_update_filtering(struct cw1200_common *priv);
-int __cw1200_flush(struct cw1200_common *priv, bool drop);
-int cw1200_enable_listening(struct cw1200_common *priv);
-int cw1200_disable_listening(struct cw1200_common *priv);
-int cw1200_set_uapsd_param(struct cw1200_common *priv,
-				const struct wsm_edca_params *arg);
 
 #endif

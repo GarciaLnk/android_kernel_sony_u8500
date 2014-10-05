@@ -23,8 +23,17 @@ static inline void arch_idle(void)
 static inline void arch_reset(char mode, const char *cmd)
 {
 #ifdef CONFIG_UX500_SOC_DB8500
-	/* Call the PRCMU reset API (w/o reset reason code) */
-	prcmu_system_reset(SW_RESET_NO_ARGUMENT);
+	unsigned short reset_code;
+	unsigned short preset_code;
+
+	preset_code = reboot_reason_get_preset();
+
+	if (preset_code != SW_RESET_CRASH)
+		prcmu_system_reset(preset_code);
+	else {
+		reset_code = reboot_reason_code(cmd);
+		prcmu_system_reset(reset_code);
+	}
 #endif
 }
 

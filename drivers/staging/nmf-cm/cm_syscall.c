@@ -5,11 +5,11 @@
  */
 
 #include <linux/interrupt.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 #include <cm/engine/api/cm_engine.h>
-#include <linux/sched.h>
 #include "cmioctl.h"
 #include "osal-kernel.h"
 #include "cmld.h"
@@ -1115,6 +1115,33 @@ out:
 	return 0;
 }
 
+
+inline int cmld_WriteComponentAttribute(struct cm_process_priv *procPriv,
+                               CM_WriteComponentAttribute_t __user *param)
+{
+    CM_WriteComponentAttribute_t data;
+    char attrName[MAX_ATTRIBUTE_NAME_LENGTH];
+
+    /* Copy user input data in kernel space */
+    if (copy_from_user(&data.in, &param->in, sizeof(data.in)))
+        return -EFAULT;
+
+    if ((data.out.error = copy_string_from_user(attrName,
+                            data.in.attrName,
+                            sizeof(attrName))))
+        goto out;
+
+    data.out.error = CM_ENGINE_WriteComponentAttribute(data.in.component,
+                            attrName,
+                            data.in.value);
+out:
+    /* Copy results back to userspace */
+    if (copy_to_user(&param->out, &data.out, sizeof(data.out)))
+        return -EFAULT;
+    return 0;
+}
+
+
 inline int cmld_GetExecutiveEngineHandle(struct cm_process_priv *procPriv,
 					 CM_GetExecutiveEngineHandle_t __user *param)
 {
@@ -1397,9 +1424,9 @@ int cmld_PrivReserveMemory(struct cm_process_priv *procPriv, unsigned int physAd
 			/* Mark this memory area reserved for a mapping for this thread ID */
 			/* It must not be already reserved but this should not happen */
 			if (curr->tid) {
-				/*pr_err("%s: thread %d can't reseveved memory %x already "
+				pr_err("%s: thread %d can't reseveved memory %x already "
 				       "reserved for %d\n",
-				       __func__, current->pid, physAddr, (int)curr->tid);*/
+				       __func__, current->pid, physAddr, curr->tid);
 				err = -EBUSY;
 			} else {
 				curr->tid = current->pid;

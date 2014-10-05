@@ -30,8 +30,8 @@
 #define MASK_8_16_BIT           0x0000FF00
 #define MSG_LEN_OFFSET          16
 #define SHRM_VER                2
-#define ca_ist_inactivity_timer 100 /*100ms */
-#define ca_csc_inactivity_timer 100 /*100ms */
+#define ca_ist_inactivity_timer 25 /*25ms */
+#define ca_csc_inactivity_timer 25 /*25ms */
 
 static u8 msg_audio_counter;
 static u8 msg_common_counter;
@@ -111,7 +111,7 @@ u8 read_boot_info_req(struct shrm_dev *shrm,
 		dev_err(shrm->dev, "Read_Boot_Info_Req Fatal ERROR\n");
 		dev_err(shrm->dev, "Received msgtype is %d\n", msgtype);
 		dev_info(shrm->dev, "Initiating a modem reset\n");
-		queue_work(shrm->shm_ac_wake_wq,
+		queue_kthread_work(&shrm->shm_ac_wake_kw,
 				&shrm->shm_mod_reset_req);
 		return 0;
 	}
@@ -421,7 +421,7 @@ u8 read_one_l2msg_common(struct shrm_dev *shrm,
 		/* Fatal ERROR - should never happens */
 		dev_crit(shrm->dev, "Fatal ERROR - should never happen\n");
 		dev_info(shrm->dev, "Initiating a modem reset\n");
-		queue_work(shrm->shm_ac_wake_wq,
+		queue_kthread_work(&shrm->shm_ac_wake_kw,
 				&shrm->shm_mod_reset_req);
 	 }
 	if (fifo->reader_local_rptr == (fifo->end_addr_fifo-1)) {
@@ -529,7 +529,7 @@ u8 read_one_l2msg_audio(struct shrm_dev *shrm,
 		/* Fatal ERROR - should never happens */
 		dev_crit(shrm->dev, "Fatal ERROR - should never happen\n");
 		dev_info(shrm->dev, "Initiating a modem reset\n");
-		queue_work(shrm->shm_ac_wake_wq,
+		queue_kthread_work(&shrm->shm_ac_wake_kw,
 				&shrm->shm_mod_reset_req);
 	 }
 	if (fifo->reader_local_rptr == (fifo->end_addr_fifo-1)) {

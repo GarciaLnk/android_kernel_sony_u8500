@@ -123,4 +123,19 @@
 #define PRCM_RESOUTN_SET_OFFSET 0x214
 #define PRCM_RESOUTN_CLR_OFFSET 0x218
 
+/* APE - Modem Registers */
+#define PRCM_HOSTACCESS_REQ	0x334
+/* APE - Modem register bit maipulation */
+#define PRCM_HOSTACCESS_REQ_BIT BIT(0)
+#define PRCM_APE_ACK		0x49c
+#define PRCM_APE_ACK_BIT	0x01
+
+/* Watchdog - mtimer registers */
+#define PRCM_TIMER0_RTOS_COMP1_OFFSET	0x4C
+#define PRCM_TIMER0_RTOS_COUNTER_OFFSET	0x40
+#define PRCM_TIMER0_IRQ_EN_SET_OFFSET	0x70
+#define PRCM_TIMER0_IRQ_EN_CLR_OFFSET	0x6C
+#define PRCM_TIMER0_IRQ_RTOS1_SET	0x08
+#define PRCM_TIMER0_IRQ_RTOS1_CLR	0x08
+
 #endif

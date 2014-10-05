@@ -80,6 +80,8 @@ source "drivers/staging/rts_pstor/Kconfig"
 
 source "drivers/staging/frontier/Kconfig"
 
+source "drivers/staging/android/Kconfig"
+
 source "drivers/staging/pohmelfs/Kconfig"
 
 source "drivers/staging/phison/Kconfig"
@@ -172,12 +174,16 @@ source "drivers/staging/nvec/Kconfig"
 
 source "drivers/staging/cg2900/Kconfig"
 
-source "drivers/staging/cw1200/Kconfig"
+#source "drivers/staging/cw1200/Kconfig"
 
 source "drivers/staging/mmio/Kconfig"
 
 source "drivers/staging/nmf-cm/Kconfig"
 
 source "drivers/staging/camera_flash/Kconfig"
+
+source "drivers/staging/pasr/Kconfig"
+
+source "drivers/staging/taos/Kconfig"
 
 endif # STAGING

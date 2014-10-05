@@ -14,30 +14,9 @@
 #include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/err.h>
-#include <linux/slab.h>
-
-#include <linux/regulator/consumer.h>
 
 #include <video/mcde_display.h>
 #include <video/mcde_display-sony_acx424akp_dsi.h>
-
-#define RESET_DELAY_MS		11
-#define RESET_LOW_DELAY_US	20
-#define SLEEP_OUT_DELAY_MS	140
-#define IO_REGU			"vddi"
-#define IO_REGU_MIN		1600000
-#define IO_REGU_MAX		3300000
-
-struct device_info {
-	int reset_gpio;
-	struct mcde_port port;
-	struct regulator *regulator;
-};
-
-static inline struct device_info *get_drvdata(struct mcde_display_device *ddev)
-{
-	return (struct device_info *)dev_get_drvdata(&ddev->dev);
-}
 
 static int display_read_deviceid(struct mcde_display_device *dev, u16 *id)
 {
@@ -79,163 +58,132 @@ out:
 	return 0;
 }
 
-static int power_on(struct mcde_display_device *dev)
+static int sony_acx424akp_platform_enable(struct mcde_display_device *dev)
 {
-	struct device_info *di = get_drvdata(dev);
+	struct mcde_display_sony_acx424akp_platform_data *pdata =
+		dev->dev.platform_data;
 
 	dev_dbg(&dev->dev, "%s: Reset & power on sony display\n", __func__);
 
-	regulator_enable(di->regulator);
-	gpio_set_value_cansleep(di->reset_gpio, 0);
-	udelay(RESET_LOW_DELAY_US);
-	gpio_set_value_cansleep(di->reset_gpio, 1);
-	msleep(RESET_DELAY_MS);
+	if (pdata->regulator) {
+		if (regulator_enable(pdata->regulator) < 0) {
+			dev_err(&dev->dev, "%s:Failed to enable regulator\n"
+				, __func__);
+			return -EINVAL;
+		}
+	}
+	if (pdata->reset_gpio)
+		gpio_set_value(pdata->reset_gpio, pdata->reset_high);
+	msleep(pdata->reset_delay);	/* as per sony lcd spec */
+	if (pdata->reset_gpio)
+		gpio_set_value(pdata->reset_gpio, !pdata->reset_high);
+	msleep(pdata->reset_low_delay);	/* as per sony lcd spec */
+	if (pdata->reset_gpio)
+		gpio_set_value(pdata->reset_gpio, pdata->reset_high);
+	msleep(pdata->reset_delay);	/* as per sony lcd spec */
 
 	return 0;
 }
 
-static int power_off(struct mcde_display_device *dev)
+static int sony_acx424akp_platform_disable(struct mcde_display_device *dev)
 {
-	struct device_info *di = get_drvdata(dev);
+	struct mcde_display_sony_acx424akp_platform_data *pdata =
+		dev->dev.platform_data;
 
 	dev_dbg(&dev->dev, "%s:Reset & power off sony display\n", __func__);
 
-	regulator_disable(di->regulator);
-
-	return 0;
-}
-
-static int display_on(struct mcde_display_device *ddev)
-{
-	int ret;
-
-	dev_dbg(&ddev->dev, "Display on sony display\n");
-
-	ret = mcde_dsi_dcs_write(ddev->chnl_state, DCS_CMD_EXIT_SLEEP_MODE,
-								NULL, 0);
-	if (ret)
-		return ret;
-	msleep(SLEEP_OUT_DELAY_MS);
-	return mcde_dsi_dcs_write(ddev->chnl_state, DCS_CMD_SET_DISPLAY_ON,
-								NULL, 0);
-}
-
-static int display_off(struct mcde_display_device *ddev)
-{
-	int ret;
-
-	dev_dbg(&ddev->dev, "Display off sony display\n");
-
-	ret = mcde_dsi_dcs_write(ddev->chnl_state, DCS_CMD_SET_DISPLAY_OFF,
-								NULL, 0);
-	if (ret)
-		return ret;
-
-	return mcde_dsi_dcs_write(ddev->chnl_state, DCS_CMD_ENTER_SLEEP_MODE,
-								NULL, 0);
-}
-
-static int sony_acx424akp_set_scan_mode(struct mcde_display_device *ddev,
-		enum mcde_display_power_mode power_mode)
-{
-	int ret = 0;
-	u8 param[MCDE_MAX_DSI_DIRECT_CMD_WRITE];
-
-	dev_dbg(&ddev->dev, "%s:Set Power mode\n", __func__);
-
-	/* 180 rotation for SONY ACX424AKP display */
-	if (ddev->power_mode == MCDE_DISPLAY_PM_STANDBY) {
-		param[0] = 0xAA;
-		ret = mcde_dsi_dcs_write(ddev->chnl_state, 0xf3, param, 1);
-		if (ret)
-			return ret;
-
-		param[0] = 0x00;
-		param[1] = 0x00;
-		ret = mcde_dsi_generic_write(ddev->chnl_state, param, 3);
-		if (ret)
-			return ret;
-
-		param[0] = 0xC9;
-		param[1] = 0x01;
-		ret = mcde_dsi_generic_write(ddev->chnl_state, param, 3);
-		if (ret)
-			return ret;
-
-		param[0] = 0xA2;
-		param[1] = 0x00;
-		ret = mcde_dsi_generic_write(ddev->chnl_state, param, 3);
-		if (ret)
-			return ret;
-
-		param[0] = 0xFF;
-		param[1] = 0xAA;
-		ret = mcde_dsi_generic_write(ddev->chnl_state, param, 3);
-		if (ret)
-			return ret;
+	if (pdata->regulator) {
+		if (regulator_disable(pdata->regulator) < 0) {
+			dev_err(&dev->dev, "%s:Failed to disable regulator\n"
+				, __func__);
+			return -EINVAL;
+		}
 	}
-	return ret;
+	return 0;
 }
 
 static int sony_acx424akp_set_power_mode(struct mcde_display_device *ddev,
 	enum mcde_display_power_mode power_mode)
 {
 	int ret = 0;
+	struct mcde_display_sony_acx424akp_platform_data *pdata =
+		ddev->dev.platform_data;
 
 	dev_dbg(&ddev->dev, "%s:Set Power mode\n", __func__);
 
 	/* OFF -> STANDBY */
 	if (ddev->power_mode == MCDE_DISPLAY_PM_OFF &&
-					power_mode != MCDE_DISPLAY_PM_OFF) {
-		ret = power_on(ddev);
-		if (ret)
-			return ret;
+		power_mode != MCDE_DISPLAY_PM_OFF) {
+
+		if (ddev->platform_enable) {
+			ret = ddev->platform_enable(ddev);
+			if (ret)
+				return ret;
+		}
+
 		ddev->power_mode = MCDE_DISPLAY_PM_STANDBY;
 	}
 
 	/* STANDBY -> ON */
 	if (ddev->power_mode == MCDE_DISPLAY_PM_STANDBY &&
-					power_mode == MCDE_DISPLAY_PM_ON) {
+		power_mode == MCDE_DISPLAY_PM_ON) {
 
-		ret = display_on(ddev);
+		ret = mcde_dsi_dcs_write(ddev->chnl_state,
+		DCS_CMD_EXIT_SLEEP_MODE, NULL, 0);
 		if (ret)
 			return ret;
+
+		msleep(pdata->sleep_out_delay);
+
+		ret = mcde_dsi_dcs_write(ddev->chnl_state,
+			DCS_CMD_SET_DISPLAY_ON, NULL, 0);
+		if (ret)
+			return ret;
+
 		ddev->power_mode = MCDE_DISPLAY_PM_ON;
+		goto set_power_and_exit;
 	}
 	/* ON -> STANDBY */
 	else if (ddev->power_mode == MCDE_DISPLAY_PM_ON &&
-					power_mode <= MCDE_DISPLAY_PM_STANDBY) {
-
-		ret = display_off(ddev);
+		power_mode <= MCDE_DISPLAY_PM_STANDBY) {
+		ret = mcde_dsi_dcs_write(ddev->chnl_state,
+			DCS_CMD_SET_DISPLAY_OFF, NULL, 0);
 		if (ret)
 			return ret;
+
+		ret = mcde_dsi_dcs_write(ddev->chnl_state,
+			DCS_CMD_ENTER_SLEEP_MODE, NULL, 0);
+		if (ret)
+			return ret;
+
 		ddev->power_mode = MCDE_DISPLAY_PM_STANDBY;
 	}
 
-	/* STANDBY -> OFF */
+	/* SLEEP -> OFF */
 	if (ddev->power_mode == MCDE_DISPLAY_PM_STANDBY &&
-					power_mode == MCDE_DISPLAY_PM_OFF) {
-		ret = power_off(ddev);
-		if (ret)
-			return ret;
+		power_mode == MCDE_DISPLAY_PM_OFF) {
+		if (ddev->platform_disable) {
+			ret = ddev->platform_disable(ddev);
+			if (ret)
+				return ret;
+		}
 		ddev->power_mode = MCDE_DISPLAY_PM_OFF;
 	}
 
-	mcde_chnl_set_power_mode(ddev->chnl_state, ddev->power_mode);
-	return sony_acx424akp_set_scan_mode(ddev, power_mode);
+set_power_and_exit:
+	ret = mcde_chnl_set_power_mode(ddev->chnl_state, ddev->power_mode);
+	return ret;
 }
 
 static int __devinit sony_acx424akp_probe(struct mcde_display_device *dev)
 {
 	int ret = 0;
-	u16 id = 0;
-	struct device_info *di;
-	struct mcde_port *port;
+	u16 id;
 	struct mcde_display_sony_acx424akp_platform_data *pdata =
 		dev->dev.platform_data;
 
 	if (pdata == NULL || !pdata->reset_gpio) {
-		dev_err(&dev->dev, "Invalid platform data\n");
+		dev_err(&dev->dev, "%s:Platform data missing\n", __func__);
 		return -EINVAL;
 	}
 
@@ -246,11 +194,22 @@ static int __devinit sony_acx424akp_probe(struct mcde_display_device *dev)
 	port = dev->port;
 	di->reset_gpio = pdata->reset_gpio;
 	di->port.type = MCDE_PORTTYPE_DSI;
+	di->port.dcs_addr_mode.normal = 0x00;
+	di->port.dcs_addr_mode.hor_flip = 0x40;
 	di->port.mode = MCDE_PORTMODE_CMD;
 	di->port.pixel_format = MCDE_PORTPIXFMT_DSI_24BPP;
-	di->port.sync_src = MCDE_SYNCSRC_BTA;
+	di->port.sync_src = dev->port->sync_src;
+	if (dev->port->sync_src == MCDE_SYNCSRC_TE0 ||
+				dev->port->sync_src == MCDE_SYNCSRC_TE1) {
+		di->port.vsync_polarity = VSYNC_ACTIVE_HIGH;
+		di->port.vsync_clock_div = 0;
+		di->port.vsync_min_duration = 0;
+		di->port.vsync_max_duration = 0;
+	}
+	di->port.frame_trig = dev->port->frame_trig;
 	di->port.phy.dsi.num_data_lanes = 2;
 	di->port.link = port->link;
+	di->port.phy.dsi.host_eot_gen = true;
 	/* TODO: Move UI to mcde_hw.c when clk_get_rate(dsi) is done */
 	di->port.phy.dsi.ui = 9;
 
@@ -265,71 +224,99 @@ static int __devinit sony_acx424akp_probe(struct mcde_display_device *dev)
 		di->regulator = NULL;
 		goto regulator_get_failed;
 	}
-	ret = regulator_set_voltage(di->regulator, IO_REGU_MIN, IO_REGU_MAX);
-	if (WARN_ON(ret))
-		goto regulator_voltage_failed;
 
-	dev->set_power_mode = sony_acx424akp_set_power_mode;
-
-	dev->port = &di->port;
-	dev->native_x_res = 480;
-	dev->native_y_res = 854;
-	dev_set_drvdata(&dev->dev, di);
-
-	/*
-	* When u-boot has display a startup screen.
-	* U-boot has turned on display power however the
-	* regulator framework does not know about that
-	* This is the case here, the display driver has to
-	* enable the regulator for the display.
-	*/
-	if (dev->power_mode == MCDE_DISPLAY_PM_STANDBY) {
-		(void) regulator_enable(di->regulator);
-	} else if (dev->power_mode == MCDE_DISPLAY_PM_OFF) {
-		power_on(dev);
-		dev->power_mode = MCDE_DISPLAY_PM_STANDBY;
+	if (!dev->platform_enable && !dev->platform_disable) {
+		pdata->sony_acx424akp_platform_enable = true;
+		if (pdata->reset_gpio) {
+			ret = gpio_request(pdata->reset_gpio, NULL);
+			if (ret) {
+				dev_warn(&dev->dev,
+					"%s:Failed to request gpio %d\n",
+					__func__, pdata->reset_gpio);
+				goto gpio_request_failed;
+			}
+			gpio_direction_output(pdata->reset_gpio,
+				!pdata->reset_high);
+		}
+		if (pdata->regulator_id) {
+			pdata->regulator = regulator_get(NULL,
+				pdata->regulator_id);
+			if (IS_ERR(pdata->regulator)) {
+				ret = PTR_ERR(pdata->regulator);
+				dev_warn(&dev->dev,
+					"%s:Failed to get regulator '%s'\n",
+					__func__, pdata->regulator_id);
+				pdata->regulator = NULL;
+				goto regulator_get_failed;
+			}
+			regulator_set_voltage(pdata->regulator,
+					pdata->min_supply_voltage,
+					pdata->max_supply_voltage);
+			/*
+			* When u-boot has display a startup screen.
+			* U-boot has turned on display power however the
+			* regulator framework does not know about that
+			* This is the case here, the display driver has to
+			* enable the regulator for the display.
+			*/
+			if (dev->power_mode == MCDE_DISPLAY_PM_STANDBY) {
+				ret = regulator_enable(pdata->regulator);
+				if (ret < 0) {
+					dev_err(&dev->dev,
+					"%s:Failed to enable regulator\n"
+					, __func__);
+					goto regulator_enable_failed;
+				}
+			}
+		}
 	}
 
+	/* TODO: Remove when DSI send command uses interrupts */
+	dev->prepare_for_update = NULL;
+	dev->platform_enable = sony_acx424akp_platform_enable,
+	dev->platform_disable = sony_acx424akp_platform_disable,
+	dev->set_power_mode = sony_acx424akp_set_power_mode;
+
 	ret = display_read_deviceid(dev, &id);
-	if (ret)
-		goto read_id_failed;
 
 	switch (id) {
 	case DISPLAY_SONY_ACX424AKP:
 		pdata->disp_panel = DISPLAY_SONY_ACX424AKP;
-		dev_info(&dev->dev,
-			"Sony ACX424AKP display (ID 0x%.4X) probed\n", id);
-		break;
+		dev_info(&dev->dev, "Sony ACX424AKP display (ID 0x%.4X) \
+								probed\n", id);
+		goto out;
+
 	default:
 		pdata->disp_panel = DISPLAY_NONE;
-		dev_info(&dev->dev,
-			"Display not recognized (ID 0x%.4X) probed\n", id);
-		goto read_id_failed;
+		dev_warn(&dev->dev, "Display not recognized\n");
+		break;
 	}
 
-	return 0;
-
-read_id_failed:
-regulator_voltage_failed:
-	regulator_put(di->regulator);
+regulator_enable_failed:
 regulator_get_failed:
-	gpio_free(di->reset_gpio);
+	if (pdata->sony_acx424akp_platform_enable && pdata->reset_gpio)
+		gpio_free(pdata->reset_gpio);
 gpio_request_failed:
-	kfree(di);
+out:
 	return ret;
 }
 
 static int __devexit sony_acx424akp_remove(struct mcde_display_device *dev)
 {
-	struct device_info *di = get_drvdata(dev);
+	struct mcde_display_sony_acx424akp_platform_data *pdata =
+		dev->dev.platform_data;
 
 	dev->set_power_mode(dev, MCDE_DISPLAY_PM_OFF);
 
-	regulator_put(di->regulator);
-	gpio_direction_input(di->reset_gpio);
-	gpio_free(di->reset_gpio);
+	if (!pdata->sony_acx424akp_platform_enable)
+		return 0;
 
-	kfree(di);
+	if (pdata->regulator)
+		regulator_put(pdata->regulator);
+	if (pdata->reset_gpio) {
+		gpio_direction_input(pdata->reset_gpio);
+		gpio_free(pdata->reset_gpio);
+	}
 
 	return 0;
 }
@@ -344,8 +331,6 @@ static int sony_acx424akp_resume(struct mcde_display_device *ddev)
 	if (ret < 0)
 		dev_warn(&ddev->dev, "%s:Failed to resume display\n"
 			, __func__);
-	ddev->set_synchronized_update(ddev,
-					ddev->get_synchronized_update(ddev));
 	return ret;
 }
 

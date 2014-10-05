@@ -34,20 +34,7 @@
 #define AB5500_1_0	0x20
 #define AB5500_1_1	0x21
 #define AB5500_2_0	0x24
-
-/* AB8500 CIDs*/
-#define AB8500_CUTEARLY	0x00
-#define AB8500_CUT1P0	0x10
-#define AB8500_CUT1P1	0x11
-#define AB8500_CUT2P0	0x20
-#define AB8500_CUT3P0	0x30
-
-/* AB8500 CIDs*/
-#define AB8500_CUT1P0	0x10
-#define AB8500_CUT1P1	0x11
-#define AB8500_CUT2P0	0x20
-#define AB8500_CUT3P0	0x30
-#define AB8500_CUT3P3	0x33
+#define AB5500_2_1	0x25
 
 /*
  * AB3100, EVENTA1, A2 and A3 event register flags
@@ -240,6 +227,7 @@ int abx500_mask_and_set_register_interruptible(struct device *dev, u8 bank,
 int abx500_get_chip_id(struct device *dev);
 int abx500_event_registers_startup_state_get(struct device *dev, u8 *event);
 int abx500_startup_irq_enabled(struct device *dev, unsigned int irq);
+void abx500_dump_all_banks(void);
 
 #define abx500_get	abx500_get_register_interruptible
 #define abx500_set	abx500_set_register_interruptible
@@ -256,6 +244,7 @@ struct abx500_ops {
 	int (*mask_and_set_register) (struct device *, u8, u8, u8, u8);
 	int (*event_registers_startup_state_get) (struct device *, u8 *);
 	int (*startup_irq_enabled) (struct device *, unsigned int);
+	void (*dump_all_banks) (struct device *);
 };
 
 /* Battery driver related data */
@@ -309,6 +298,7 @@ struct abx500_fg;
  * @accu_high_curr:		FG accumulation time in high current mode
  * @high_curr_threshold:	High current threshold, in mA
  * @lowbat_threshold:		Low battery threshold, in mV
+ * @overbat_threshold:		Over battery threshold, in mV
  */
 struct abx500_fg_parameters {
 	int recovery_sleep_timer;
@@ -321,6 +311,7 @@ struct abx500_fg_parameters {
 	int accu_high_curr;
 	int high_curr_threshold;
 	int lowbat_threshold;
+	int overbat_threshold;
 };
 
 /**
@@ -435,7 +426,8 @@ struct abx500_bm_charger_parameters {
  * @abx500_adc_therm	placement of thermistor, batctrl or battemp adc
  * @chg_unknown_bat	flag to enable charging of unknown batteries
  * @enable_overshoot	flag to enable VBAT overshoot control
- * @fg_res		resistance of FG resistor in mOhm
+ * @auto_trig		flag to enable auto adc trigger
+ * @fg_res		resistance of FG resistor in 0.1mOhm
  * @n_btypes		number of elements in array bat_type
  * @batt_id		index of the identified battery in array bat_type
  * @interval_charging	charge alg cycle period time when charging (sec)
@@ -460,6 +452,7 @@ struct abx500_bm_data {
 	bool no_maintenance;
 	bool chg_unknown_bat;
 	bool enable_overshoot;
+	bool auto_trig;
 	enum abx500_adc_therm adc_therm;
 	int fg_res;
 	int n_btypes;

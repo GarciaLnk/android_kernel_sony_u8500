@@ -18,7 +18,7 @@
 
 #define to_overlay(x) container_of(x, struct mcde_overlay, kobj)
 
-void overlay_release(struct kobject *kobj)
+static void overlay_relase(struct kobject *kobj)
 {
 	struct mcde_overlay *ovly = to_overlay(kobj);
 
@@ -26,22 +26,13 @@ void overlay_release(struct kobject *kobj)
 }
 
 struct kobj_type ovly_type = {
-	.release = overlay_release,
+	.release = overlay_relase,
 };
 
 static int apply_overlay(struct mcde_overlay *ovly,
 				struct mcde_overlay_info *info, bool force)
 {
 	int ret = 0;
-	if (ovly->ddev->invalidate_area) {
-		/* TODO: transform ovly coord to screen coords (vmode):
-		 * add offset
-		 */
-		struct mcde_rectangle dirty = info->dirty;
-		mutex_lock(&ovly->ddev->display_lock);
-		ret = ovly->ddev->invalidate_area(ovly->ddev, &dirty);
-		mutex_unlock(&ovly->ddev->display_lock);
-	}
 
 	if (ovly->info.paddr != info->paddr || force)
 		mcde_ovly_set_source_buf(ovly->state, info->paddr);
@@ -115,20 +106,9 @@ int mcde_dss_enable_display(struct mcde_display_device *ddev)
 		goto display_failed;
 	}
 
-	ret = ddev->set_synchronized_update(ddev,
-					ddev->get_synchronized_update(ddev));
+	ret = ddev->set_rotation(ddev, ddev->get_rotation(ddev));
 	if (ret < 0)
-		dev_warn(&ddev->dev, "Failed to set sync\n");
-
-	ret = mcde_chnl_enable_synchronized_update(ddev->chnl_state,
-		ddev->synchronized_update);
-	if (ret < 0) {
-		dev_warn(&ddev->dev,
-			"%s:Failed to enable synchronized update\n",
-			__func__);
-		goto enable_sync_failed;
-	}
-	/* TODO: call driver for all defaults like sync_update above */
+		dev_warn(&ddev->dev, "Failed to set rotation\n");
 
 	dev_dbg(&ddev->dev, "Display enabled, chnl=%d\n",
 					ddev->chnl_id);
@@ -137,8 +117,6 @@ int mcde_dss_enable_display(struct mcde_display_device *ddev)
 
 	return 0;
 
-enable_sync_failed:
-	ddev->set_power_mode(ddev, MCDE_DISPLAY_PM_OFF);
 display_failed:
 	mcde_chnl_disable(ddev->chnl_state);
 	mutex_unlock(&ddev->display_lock);
@@ -267,7 +245,7 @@ int mcde_dss_update_overlay(struct mcde_overlay *ovly, bool tripple_buffer)
 	dev_vdbg(&ovly->ddev->dev, "Overlay update, chnl=%d\n",
 							ovly->ddev->chnl_id);
 
-	if (!ovly->state || !ovly->ddev->update || !ovly->ddev->invalidate_area)
+	if (!ovly->state || !ovly->ddev->update)
 		return -EINVAL;
 
 	mutex_lock(&ovly->ddev->display_lock);
@@ -280,8 +258,6 @@ int mcde_dss_update_overlay(struct mcde_overlay *ovly, bool tripple_buffer)
 	ret = ovly->ddev->update(ovly->ddev, tripple_buffer);
 	if (ret)
 		goto update_failed;
-
-	ret = ovly->ddev->invalidate_area(ovly->ddev, NULL);
 
 power_mode_off:
 update_failed:
@@ -340,22 +316,23 @@ EXPORT_SYMBOL(mcde_dss_try_video_mode);
 int mcde_dss_set_video_mode(struct mcde_display_device *ddev,
 	struct mcde_video_mode *vmode)
 {
-	int ret;
+	int ret = 0;
 	struct mcde_video_mode old_vmode;
 
 	mutex_lock(&ddev->display_lock);
+	/* Do not perform set_video_mode if power mode is off */
+	if (ddev->get_power_mode(ddev) == MCDE_DISPLAY_PM_OFF)
+		goto power_mode_off;
+
 	ddev->get_video_mode(ddev, &old_vmode);
-	if (memcmp(vmode, &old_vmode, sizeof(old_vmode)) == 0) {
-		ret = 0;
+	if (memcmp(vmode, &old_vmode, sizeof(old_vmode)) == 0)
 		goto same_video_mode;
-	}
 
 	ret = ddev->set_video_mode(ddev, vmode);
 	if (ret)
 		goto set_video_mode_failed;
 
-	if (ddev->invalidate_area)
-		ret = ddev->invalidate_area(ddev, NULL);
+power_mode_off:
 same_video_mode:
 set_video_mode_failed:
 	mutex_unlock(&ddev->display_lock);
@@ -434,35 +411,30 @@ enum mcde_display_rotation mcde_dss_get_rotation(
 }
 EXPORT_SYMBOL(mcde_dss_get_rotation);
 
-int mcde_dss_set_synchronized_update(struct mcde_display_device *ddev,
-	bool enable)
+int mcde_dss_wait_for_vsync(struct mcde_display_device *ddev, s64 *timestamp)
 {
 	int ret;
+
+	/*
+	 * Do not take the display_lock so that other dss functions can
+	 * be called from another thread.
+	 */
+	mutex_lock(&ddev->vsync_lock); /* Protect against multi-thread usage */
+	ret = ddev->wait_for_vsync(ddev, timestamp);
+	mutex_unlock(&ddev->vsync_lock);
+	return ret;
+}
+EXPORT_SYMBOL(mcde_dss_wait_for_vsync);
+
+bool mcde_dss_secure_output(struct mcde_display_device *ddev)
+{
+	bool ret;
 	mutex_lock(&ddev->display_lock);
-	ret = ddev->set_synchronized_update(ddev, enable);
-	if (ret)
-		goto sync_update_failed;
-
-	if (ddev->chnl_state)
-		mcde_chnl_enable_synchronized_update(ddev->chnl_state, enable);
-	mutex_unlock(&ddev->display_lock);
-	return 0;
-
-sync_update_failed:
+	ret = ddev->secure_output();
 	mutex_unlock(&ddev->display_lock);
 	return ret;
 }
-EXPORT_SYMBOL(mcde_dss_set_synchronized_update);
-
-bool mcde_dss_get_synchronized_update(struct mcde_display_device *ddev)
-{
-	int ret;
-	mutex_lock(&ddev->display_lock);
-	ret = ddev->get_synchronized_update(ddev);
-	mutex_unlock(&ddev->display_lock);
-	return ret;
-}
-EXPORT_SYMBOL(mcde_dss_get_synchronized_update);
+EXPORT_SYMBOL(mcde_dss_secure_output);
 
 int __init mcde_dss_init(void)
 {

@@ -5,6 +5,7 @@
  * Copyright (C) 2005-2006 by Texas Instruments
  * Copyright (C) 2006-2007 Nokia Corporation
  * Copyright (C) 2009 MontaVista Software, Inc. <source@mvista.com>
+ * Copyright (C) 2012 Sony Mobile Communications AB
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -403,7 +404,21 @@ static void txstate(struct musb *musb, struct musb_request *req)
 					csr |= (MUSB_TXCSR_DMAENAB
 							| MUSB_TXCSR_DMAMODE
 							| MUSB_TXCSR_MODE);
-					if (!musb_ep->hb_mult)
+					/*
+					 * Enable Autoset according to table
+					 * below
+					 * ************************************
+					 * bulk_split hb_mult	Autoset_Enable
+					 * ************************************
+					 *	0	0	Yes(Normal)
+					 *	0	>0	No(High BW ISO)
+					 *	1	0	Yes(HS bulk)
+					 *	1	>0	Yes(FS bulk)
+					 */
+					if (!musb_ep->hb_mult ||
+						(musb_ep->hb_mult &&
+						 can_bulk_split(musb,
+						    musb_ep->type)))
 						csr |= MUSB_TXCSR_AUTOSET;
 				}
 				csr &= ~MUSB_TXCSR_P_UNDERRUN;
@@ -576,6 +591,15 @@ void musb_g_tx(struct musb *musb, u8 epnum)
 
 		if (request->actual == request->length) {
 			musb_g_giveback(musb_ep, request, 0);
+			/*
+			 * In the giveback function the MUSB lock is
+			 * released and acquired after sometime. During
+			 * this time period the INDEX register could get
+			 * changed by gadget_queue function. Reselect the
+			 * INDEX to be sure we are reading/modifying the
+			 * right registers
+			 */
+			musb_ep_select(mbase, epnum);
 			req = musb_ep->desc ? next_request(musb_ep) : NULL;
 			if (!req) {
 				dev_dbg(musb->controller, "%s idle now\n",
@@ -986,6 +1010,15 @@ void musb_g_rx(struct musb *musb, u8 epnum)
 		}
 #endif
 		musb_g_giveback(musb_ep, request, 0);
+		/*
+		* In the giveback function the MUSB lock is
+		* released and acquired after sometime. During
+		* this time period the INDEX register could get
+		* changed by gadget_queue function. Reselect the
+		* INDEX to be sure we are reading/modifying the
+		* right registers
+		*/
+		musb_ep_select(mbase, epnum);
 
 		req = next_request(musb_ep);
 		if (!req)
@@ -1082,6 +1115,12 @@ static int musb_gadget_enable(struct usb_ep *ep,
 		/* REVISIT if can_bulk_split(), use by updating "tmp";
 		 * likewise high bandwidth periodic tx
 		 */
+		/* Set the TXMAXP register correctly for Bulk IN
+		 * endpoints in device mode
+		 */
+		if (can_bulk_split(musb, musb_ep->type))
+			musb_ep->hb_mult = (hw_ep->max_packet_sz_tx /
+						musb_ep->packet_sz) - 1;
 		/* Set TXMAXP with the FIFO size of the endpoint
 		 * to disable double buffering mode.
 		 */
@@ -1323,7 +1362,7 @@ static int musb_gadget_queue(struct usb_ep *ep, struct usb_request *req,
 	spin_lock_irqsave(&musb->lock, lockflags);
 
 	/* don't queue if the ep is down */
-	if (!musb_ep->desc) {
+	if (!musb_ep || !musb_ep->desc) {
 		dev_dbg(musb->controller, "req %p queued to %s while ep %s\n",
 				req, ep->name, "disabled");
 		status = -ESHUTDOWN;
@@ -1627,7 +1666,9 @@ static int musb_gadget_wakeup(struct usb_gadget *gadget)
 		}
 
 		spin_unlock_irqrestore(&musb->lock, flags);
+#ifndef CONFIG_USB_OTG_20
 		otg_start_srp(musb->xceiv);
+#endif
 		spin_lock_irqsave(&musb->lock, flags);
 
 		/* Block idling for at least 1s */
@@ -1733,6 +1774,14 @@ static int musb_gadget_pullup(struct usb_gadget *gadget, int is_on)
 	return 0;
 }
 
+static struct usb_ep *musb_gadget_configure_ep(struct usb_gadget *gadget,
+		u8 type, struct usb_endpoint_descriptor *desc)
+{
+	struct musb	*musb = gadget_to_musb(gadget);
+
+	return musb_platform_configure_ep(musb, type, desc);
+}
+
 static const struct usb_gadget_ops musb_gadget_operations = {
 	.get_frame		= musb_gadget_get_frame,
 	.wakeup			= musb_gadget_wakeup,
@@ -1740,6 +1789,7 @@ static const struct usb_gadget_ops musb_gadget_operations = {
 	/* .vbus_session		= musb_gadget_vbus_session, */
 	.vbus_draw		= musb_gadget_vbus_draw,
 	.pullup			= musb_gadget_pullup,
+	.configure_ep		= musb_gadget_configure_ep,
 };
 
 /* ----------------------------------------------------------------------- */
@@ -2149,6 +2199,9 @@ void musb_g_suspend(struct musb *musb)
 			spin_lock(&musb->lock);
 		}
 		break;
+	case OTG_STATE_B_HOST:
+		dev_dbg(musb->controller, "B_HOST. Revisit\n");
+		break;
 	default:
 		/* REVISIT if B_HOST, clear DEVCTL.HOSTREQ;
 		 * A_PERIPHERAL may need care too
@@ -2171,7 +2224,14 @@ void musb_g_disconnect(struct musb *musb)
 	u8	devctl = musb_readb(mregs, MUSB_DEVCTL);
 
 	dev_dbg(musb->controller, "devctl %02x\n", devctl);
-
+#ifdef CONFIG_USB_OTG_20
+	/*
+	 * OTG 2.0 Compliance
+	 * In host mode, do not do a gadget_disconnect
+	 */
+	if (is_host_enabled(musb) && !is_otg_enabled(musb))
+		return; /* fail safe */
+#endif
 	/* clear HR */
 	musb_writeb(mregs, MUSB_DEVCTL, devctl & MUSB_DEVCTL_SESSION);
 

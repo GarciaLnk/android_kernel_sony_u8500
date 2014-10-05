@@ -12,7 +12,6 @@
 #include <linux/spinlock.h>
 #include <linux/semaphore.h>
 #include <linux/dmaengine.h>
-#include <linux/i2s/i2s.h>
 #include <linux/irqreturn.h>
 #include <linux/bitops.h>
 #include <plat/ste_dma40.h>
@@ -131,6 +130,53 @@ struct msp_protocol_desc {
 	u32 total_clocks_for_one_frame;
 };
 
+enum i2s_direction_t {
+	I2S_DIRECTION_TX = 0,
+	I2S_DIRECTION_RX = 1,
+	I2S_DIRECTION_BOTH = 2
+};
+
+enum i2s_transfer_mode_t {
+	I2S_TRANSFER_MODE_SINGLE_DMA = 0,
+	I2S_TRANSFER_MODE_CYCLIC_DMA = 1,
+	I2S_TRANSFER_MODE_INF_LOOPBACK = 2,
+	I2S_TRANSFER_MODE_NON_DMA = 4,
+};
+
+struct i2s_message {
+	enum i2s_direction_t i2s_direction;
+	void *txdata;
+	void *rxdata;
+	size_t txbytes;
+	size_t rxbytes;
+	int dma_flag;
+	int tx_offset;
+	int rx_offset;
+	/* cyclic dma */
+	bool cyclic_dma;
+	dma_addr_t buf_addr;
+	size_t buf_len;
+	size_t period_len;
+};
+
+enum i2s_flag {
+	DISABLE_ALL = 0,
+	DISABLE_TRANSMIT = 1,
+	DISABLE_RECEIVE = 2,
+};
+
+struct i2s_controller {
+	struct module *owner;
+	unsigned int id;
+	unsigned int class;
+	const struct i2s_algorithm *algo; /* the algorithm to access the bus */
+	void *data;
+	struct mutex bus_lock;
+	struct device dev; /* the controller device */
+	char name[48];
+};
+#define to_i2s_controller(d) container_of(d, struct i2s_controller, dev)
+
 /**
  * struct trans_data - MSP transfer data structure used during xfer.
  * @message: i2s message.
@@ -187,9 +233,6 @@ struct trans_data {
  * @def_elem_len: Flag to indicate whether default element length is to be used
  * or should be changed acc to data size defined by user at run time.
  * @iodelay: value for the MSP_IODLY register
- * @handler: callback handler in case of interrupt or dma.
- * @tx_callback_data: Callback data for transmit.
- * @rx_callback_data: Callback data for receive.
  *
  * Main Msp configuration data structure used by i2s client driver to fill
  * various info like data size, frequency etc.
@@ -221,10 +264,6 @@ struct msp_config {
 	enum msp_data_size data_size;
 	unsigned int def_elem_len;
 	unsigned int iodelay;
-	void (*handler) (void *data);
-	void *tx_callback_data;
-	void *rx_callback_data;
-
 };
 
 /*** Protocols ***/
@@ -360,7 +399,7 @@ enum msp_mode {
 #define MSP_FRAME_SIZE_AUTO -1
 
 
-#define MSP_DR 		0x00
+#define MSP_DR		0x00
 #define MSP_GCR		0x04
 #define MSP_TCF		0x08
 #define MSP_RCF		0x0c
@@ -370,21 +409,21 @@ enum msp_mode {
 
 #define MSP_IMSC	0x20
 #define MSP_RIS		0x24
-#define MSP_MIS 	0x28
+#define MSP_MIS		0x28
 #define MSP_ICR		0x2c
 #define MSP_MCR		0x30
-#define MSP_RCV 	0x34
-#define MSP_RCM 	0x38
+#define MSP_RCV		0x34
+#define MSP_RCM		0x38
 
 #define MSP_TCE0	0x40
 #define MSP_TCE1	0x44
-#define MSP_TCE2 	0x48
-#define MSP_TCE3 	0x4c
+#define MSP_TCE2	0x48
+#define MSP_TCE3	0x4c
 
 #define MSP_RCE0	0x60
 #define MSP_RCE1	0x64
 #define MSP_RCE2	0x68
-#define MSP_RCE3 	0x6c
+#define MSP_RCE3	0x6c
 #define MSP_IODLY	0x70
 
 #define MSP_ITCR	0x80
@@ -394,13 +433,13 @@ enum msp_mode {
 
 #define MSP_PID0	0xfe0
 #define MSP_PID1	0xfe4
-#define MSP_PID2 	0xfe8
+#define MSP_PID2	0xfe8
 #define MSP_PID3	0xfec
 
 #define MSP_CID0	0xff0
-#define MSP_CID1 	0xff4
+#define MSP_CID1	0xff4
 #define MSP_CID2	0xff8
-#define MSP_CID3 	0xffc
+#define MSP_CID3	0xffc
 
 /* Single or dual phase mode */
 enum msp_phase_mode {
@@ -645,15 +684,19 @@ enum msp_expand_mode {
 #define TDMAE_SHIFT		1
 
 /* Interrupt Register */
-#define RECEIVE_SERVICE_INT         BIT(0)
-#define RECEIVE_OVERRUN_ERROR_INT   BIT(1)
-#define RECEIVE_FRAME_SYNC_ERR_INT  BIT(2)
-#define RECEIVE_FRAME_SYNC_INT      BIT(3)
-#define TRANSMIT_SERVICE_INT        BIT(4)
-#define TRANSMIT_UNDERRUN_ERR_INT   BIT(5)
-#define TRANSMIT_FRAME_SYNC_ERR_INT BIT(6)
-#define TRANSMIT_FRAME_SYNC_INT     BIT(7)
-#define ALL_INT                     0x000000ff
+#define RECEIVE_SERVICE_INT		BIT(0)
+#define RECEIVE_OVERRUN_ERROR_INT	BIT(1)
+#define RECEIVE_FRAME_SYNC_ERR_INT	BIT(2)
+#define RECEIVE_FRAME_SYNC_INT		BIT(3)
+#define TRANSMIT_SERVICE_INT		BIT(4)
+#define TRANSMIT_UNDERRUN_ERR_INT	BIT(5)
+#define TRANSMIT_FRAME_SYNC_ERR_INT	BIT(6)
+#define TRANSMIT_FRAME_SYNC_INT		BIT(7)
+#define ALL_INT				0x000000ff
+
+/* MSP test control register */
+#define MSP_ITCR_ITEN			BIT(0)
+#define MSP_ITCR_TESTFIFO		BIT(1)
 
 /*
  *  Protocol configuration values I2S:
@@ -663,8 +706,8 @@ enum msp_expand_mode {
 {							\
 	MSP_SINGLE_PHASE,				\
 	MSP_SINGLE_PHASE,				\
-	MSP_PHASE2_START_MODE_IMEDIATE, 		\
-	MSP_PHASE2_START_MODE_IMEDIATE, 		\
+	MSP_PHASE2_START_MODE_IMEDIATE,			\
+	MSP_PHASE2_START_MODE_IMEDIATE,			\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_FRAME_LENGTH_1,				\
@@ -678,9 +721,9 @@ enum msp_expand_mode {
 	MSP_DELAY_1,					\
 	MSP_DELAY_1,					\
 	MSP_RISING_EDGE,				\
-	MSP_RISING_EDGE,				\
-	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
-	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
+	MSP_FALLING_EDGE,				\
+	MSP_FRAME_SYNC_POL_ACTIVE_LOW,			\
+	MSP_FRAME_SYNC_POL_ACTIVE_LOW,			\
 	MSP_HWS_NO_SWAP,				\
 	MSP_HWS_NO_SWAP,				\
 	MSP_COMPRESS_MODE_LINEAR,			\
@@ -697,8 +740,8 @@ enum msp_expand_mode {
 {							\
 	MSP_DUAL_PHASE,				\
 	MSP_DUAL_PHASE,				\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_FRAME_LENGTH_1,				\
@@ -711,7 +754,7 @@ enum msp_expand_mode {
 	MSP_ELEM_LENGTH_16,				\
 	MSP_DELAY_0,					\
 	MSP_DELAY_0,					\
-	MSP_FALLING_EDGE,				\
+	MSP_RISING_EDGE,				\
 	MSP_FALLING_EDGE,				\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
@@ -732,8 +775,8 @@ enum msp_expand_mode {
 {							\
 	MSP_SINGLE_PHASE,				\
 	MSP_SINGLE_PHASE,				\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_FRAME_LENGTH_1,				\
@@ -746,7 +789,7 @@ enum msp_expand_mode {
 	MSP_ELEM_LENGTH_8,				\
 	MSP_DELAY_0,					\
 	MSP_DELAY_0,					\
-	MSP_FALLING_EDGE,				\
+	MSP_RISING_EDGE,				\
 	MSP_RISING_EDGE,				\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
@@ -770,8 +813,8 @@ enum msp_expand_mode {
 {							\
 	MSP_DUAL_PHASE,				\
 	MSP_DUAL_PHASE,				\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_FRAME_LENGTH_1,				\
@@ -784,7 +827,7 @@ enum msp_expand_mode {
 	MSP_ELEM_LENGTH_20,				\
 	MSP_DELAY_1,					\
 	MSP_DELAY_1,					\
-	MSP_FALLING_EDGE,				\
+	MSP_RISING_EDGE,				\
 	MSP_RISING_EDGE,				\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
@@ -804,8 +847,8 @@ enum msp_expand_mode {
 {							\
 	MSP_SINGLE_PHASE,				\
 	MSP_SINGLE_PHASE,				\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_FRAME_LENGTH_1,				\
@@ -818,7 +861,7 @@ enum msp_expand_mode {
 	MSP_ELEM_LENGTH_8,				\
 	MSP_DELAY_1,					\
 	MSP_DELAY_1,					\
-	MSP_RISING_EDGE,				\
+	MSP_FALLING_EDGE,				\
 	MSP_FALLING_EDGE,				\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
@@ -838,8 +881,8 @@ enum msp_expand_mode {
 {							\
 	MSP_SINGLE_PHASE,				\
 	MSP_SINGLE_PHASE,				\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
-	MSP_PHASE2_START_MODE_FRAME_SYNC, 		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
+	MSP_PHASE2_START_MODE_FRAME_SYNC,		\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_BTF_MS_BIT_FIRST,				\
 	MSP_FRAME_LENGTH_1,				\
@@ -852,7 +895,7 @@ enum msp_expand_mode {
 	MSP_ELEM_LENGTH_8,				\
 	MSP_DELAY_1,					\
 	MSP_DELAY_1,					\
-	MSP_RISING_EDGE,				\
+	MSP_FALLING_EDGE,				\
 	MSP_FALLING_EDGE,				\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
 	MSP_FRAME_SYNC_POL_ACTIVE_HIGH,			\
@@ -879,7 +922,7 @@ enum msp_expand_mode {
 #define MAX_MSP_BACKUP_REGS 36
 
 enum enum_i2s_controller {
-	MSP_0_I2S_CONTROLLER = 1,
+	MSP_0_I2S_CONTROLLER = 0,
 	MSP_1_I2S_CONTROLLER,
 	MSP_2_I2S_CONTROLLER,
 	MSP_3_I2S_CONTROLLER,
@@ -897,22 +940,13 @@ enum enum_i2s_controller {
  * @lock: semaphore lock acquired while configuring msp.
  * @dma_cfg_tx: TX DMA configuration
  * @dma_cfg_rx: RX DMA configuration
- * @tx_pipeid: TX DMA channel
- * @rx_pipeid: RX DMA channel
  * @msp_state: Current state of msp.
- * @read: Function pointer for read, u8_msp_read,u16_msp_read,u32_msp_read.
- * @write: Function pointer for write, u8_msp_write,u16_msp_write,u32_msp_write.
- * @transfer: Function pointer for type of transfer i.e dma,polling or interrupt
- * @xfer_data: MSP's transfer data structure. Contains info about current xfer.
  * @plat_init: MSP's initialization function.
  * @plat_exit: MSP's Exit function.
- * @notify_timer: Timer used in Polling mode to prevent hang.
- * @polling_flag: Flag used in error handling while polling.
  * @def_elem_len: Flag indicates whether default elem len to be used in
  * protocol_desc or not.
  * @reg_enabled: Flag indicates whether regulator has been enabled or not.
  * @vape_opp_constraint: 1 if constraint is applied to have vape at 100OPP; 0 otherwise
- * @infinite: true if an infinite transfer has been configured
  *
  * Main Msp private data structure to be used to store various info of a
  * particular MSP.Longer description
@@ -923,22 +957,15 @@ struct msp {
 	int msp_io_error;
 	void __iomem *registers;
 	enum msp_data_size actual_data_size;
+	struct device *dev;
 	int irq;
 	struct i2s_controller *i2s_cont;
 	struct semaphore lock;
 	struct stedma40_chan_cfg *dma_cfg_rx;
 	struct stedma40_chan_cfg *dma_cfg_tx;
-	struct dma_chan *tx_pipeid;
-	struct dma_chan *rx_pipeid;
 	enum msp_state msp_state;
-	void (*read) (struct trans_data *xfer_data);
-	void (*write) (struct trans_data *xfer_data);
-	int (*transfer) (struct msp *msp, struct i2s_message *message);
-	struct trans_data xfer_data;
 	int (*plat_init) (void);
 	int (*plat_exit) (void);
-	struct timer_list notify_timer;
-	int polling_flag;
 	int def_elem_len;
 	struct clk *clk;
 	unsigned int direction;
@@ -947,7 +974,6 @@ struct msp {
 	int loopback_enable;
 	u32 backup_regs[MAX_MSP_BACKUP_REGS];
 	int vape_opp_constraint;
-	bool infinite;
 };
 
 /**

@@ -52,6 +52,7 @@ obj-$(CONFIG_TELCLOCK)		+= tlclk.o
 
 ifdef CONFIG_PHONET
 obj-$(CONFIG_U8500_SHRM)	+= shrm_char.o
+obj-$(CONFIG_MODEM_M6718_SPI)	+= m6718_modem_char.o
 endif
 
 obj-$(CONFIG_MWAVE)		+= mwave/
@@ -62,6 +63,7 @@ obj-$(CONFIG_IPMI_HANDLER)	+= ipmi/
 obj-$(CONFIG_HANGCHECK_TIMER)	+= hangcheck-timer.o
 obj-$(CONFIG_TCG_TPM)		+= tpm/
 
+obj-$(CONFIG_DCC_TTY)		+= dcc_tty.o
 obj-$(CONFIG_PS3_FLASH)		+= ps3flash.o
 obj-$(CONFIG_RAMOOPS)		+= ramoops.o
 

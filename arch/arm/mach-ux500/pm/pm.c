@@ -11,7 +11,9 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
-#include <linux/gpio/nomadik.h>
+#include <linux/mfd/dbx500-prcmu.h>
+
+#include <plat/gpio-nomadik.h>
 
 #include <asm/hardware/gic.h>
 #include <asm/processor.h>
@@ -26,26 +28,28 @@
 #define PRCM_ARM_WFI_STANDBY_CPU1_WFI 0x10
 
 /* Dual A9 core interrupt management unit registers */
-#define PRCM_A9_MASK_REQ	(_PRCMU_BASE + 0x328)
+#define PRCM_A9_MASK_REQ	0x328
 #define PRCM_A9_MASK_REQ_PRCM_A9_MASK_REQ	0x1
-#define PRCM_A9_MASK_ACK	(_PRCMU_BASE + 0x32c)
+#define PRCM_A9_MASK_ACK	0x32c
 
-#define PRCM_ARMITMSK31TO0	(_PRCMU_BASE + 0x11c)
-#define PRCM_ARMITMSK63TO32	(_PRCMU_BASE + 0x120)
-#define PRCM_ARMITMSK95TO64	(_PRCMU_BASE + 0x124)
-#define PRCM_ARMITMSK127TO96	(_PRCMU_BASE + 0x128)
-#define PRCM_POWER_STATE_VAL	(_PRCMU_BASE + 0x25C)
-#define PRCM_ARMITVAL31TO0	(_PRCMU_BASE + 0x260)
-#define PRCM_ARMITVAL63TO32	(_PRCMU_BASE + 0x264)
-#define PRCM_ARMITVAL95TO64	(_PRCMU_BASE + 0x268)
-#define PRCM_ARMITVAL127TO96	(_PRCMU_BASE + 0x26C)
+#define PRCM_ARMITMSK31TO0	0x11c
+#define PRCM_ARMITMSK63TO32	0x120
+#define PRCM_ARMITMSK95TO64	0x124
+#define PRCM_ARMITMSK127TO96	0x128
+#define PRCM_POWER_STATE_VAL	0x25C
+#define PRCM_ARMITVAL31TO0	0x260
+#define PRCM_ARMITVAL63TO32	0x264
+#define PRCM_ARMITVAL95TO64	0x268
+#define PRCM_ARMITVAL127TO96	0x26C
 
 /* ARM WFI Standby signal register */
-#define PRCM_ARM_WFI_STANDBY    (_PRCMU_BASE + 0x130)
+#define PRCM_ARM_WFI_STANDBY    0x130
 
 /* IO force */
-#define PRCM_IOCR		(_PRCMU_BASE + 0x310)
+#define PRCM_IOCR		0x310
 #define PRCM_IOCR_IOFORCE			0x1
+
+int ux500_console_uart_gpio_pin = CONFIG_UX500_CONSOLE_UART_GPIO_PIN;
 
 static u32 u8500_gpio_banks[] = {U8500_GPIOBANK0_BASE,
 				 U8500_GPIOBANK1_BASE,
@@ -76,11 +80,11 @@ inline int ux500_pm_arm_on_ext_clk(bool leave_arm_pll_on)
 /* Decouple GIC from the interrupt bus */
 void ux500_pm_gic_decouple(void)
 {
-	writel(readl(PRCM_A9_MASK_REQ) | PRCM_A9_MASK_REQ_PRCM_A9_MASK_REQ,
-		PRCM_A9_MASK_REQ);
+	prcmu_write_masked(PRCM_A9_MASK_REQ,
+			   PRCM_A9_MASK_REQ_PRCM_A9_MASK_REQ,
+			   PRCM_A9_MASK_REQ_PRCM_A9_MASK_REQ);
 
-	while (!readl(PRCM_A9_MASK_REQ))
-		cpu_relax();
+	(void)prcmu_read(PRCM_A9_MASK_REQ);
 
 	/* TODO: Use the ack bit when possible */
 	udelay(GIC_FREEZE_DELAY); /* Wait for the GIC to freeze */
@@ -89,8 +93,9 @@ void ux500_pm_gic_decouple(void)
 /* Recouple GIC with the interrupt bus */
 void ux500_pm_gic_recouple(void)
 {
-	writel((readl(PRCM_A9_MASK_REQ) & ~PRCM_A9_MASK_REQ_PRCM_A9_MASK_REQ),
-	       PRCM_A9_MASK_REQ);
+	prcmu_write_masked(PRCM_A9_MASK_REQ,
+			   PRCM_A9_MASK_REQ_PRCM_A9_MASK_REQ,
+			   0);
 
 	/* TODO: Use the ack bit when possible */
 }
@@ -125,8 +130,8 @@ bool ux500_pm_prcmu_pending_interrupt(void)
 
 	for (i = 0; i < GIC_NUMBER_SPI_REGS; i++) { /* There are 4 registers */
 
-		it = readl(PRCM_ARMITVAL31TO0 + i * 4);
-		im = readl(PRCM_ARMITMSK31TO0 + i * 4);
+		it = prcmu_read(PRCM_ARMITVAL31TO0 + i * 4);
+		im = prcmu_read(PRCM_ARMITMSK31TO0 + i * 4);
 
 		if (it & im)
 			return true; /* There is a pending interrupt */
@@ -138,9 +143,13 @@ bool ux500_pm_prcmu_pending_interrupt(void)
 void ux500_pm_prcmu_set_ioforce(bool enable)
 {
 	if (enable)
-		writel(readl(PRCM_IOCR) | PRCM_IOCR_IOFORCE, PRCM_IOCR);
+		prcmu_write_masked(PRCM_IOCR,
+				   PRCM_IOCR_IOFORCE,
+				   PRCM_IOCR_IOFORCE);
 	else
-		writel(readl(PRCM_IOCR) & ~PRCM_IOCR_IOFORCE, PRCM_IOCR);
+		prcmu_write_masked(PRCM_IOCR,
+				   PRCM_IOCR_IOFORCE,
+				   0);
 }
 
 void ux500_pm_prcmu_copy_gic_settings(void)
@@ -152,7 +161,7 @@ void ux500_pm_prcmu_copy_gic_settings(void)
 		/* +1 due to skip STI and PPI */
 		er = readl_relaxed(__io_address(U8500_GIC_DIST_BASE) +
 			   GIC_DIST_ENABLE_SET + (i + 1) * 4);
-		writel(er, PRCM_ARMITMSK31TO0 + i * 4);
+		prcmu_write(PRCM_ARMITMSK31TO0 + i * 4, er);
 	}
 }
 
@@ -196,36 +205,15 @@ bool ux500_pm_other_cpu_wfi(void)
 {
 	if (smp_processor_id()) {
 		/* We are CPU 1 => check if CPU0 is in WFI */
-		if (readl(PRCM_ARM_WFI_STANDBY) &
+		if (prcmu_read(PRCM_ARM_WFI_STANDBY) &
 		    PRCM_ARM_WFI_STANDBY_CPU0_WFI)
 			return true;
 	} else {
 		/* We are CPU 0 => check if CPU1 is in WFI */
-		if (readl(PRCM_ARM_WFI_STANDBY) &
+		if (prcmu_read(PRCM_ARM_WFI_STANDBY) &
 		    PRCM_ARM_WFI_STANDBY_CPU1_WFI)
 			return true;
 	}
 
 	return false;
-}
-
-/* PRCM_ACK_MB0_AP_PWRSTTR_STATUS */
-#define DB8500_PRCMU_STATUS_REGISTER	0x801b8e08
-#define DB5500_PRCMU_STATUS_REGISTER	0x80168f38
-
-enum prcmu_idle_stat ux500_pm_prcmu_idle_stat(void)
-{
-	u32 val;
-	void __iomem *prcmu_status_reg;
-
-	if (cpu_is_u8500())
-		prcmu_status_reg = __io_address(DB8500_PRCMU_STATUS_REGISTER);
-	else if (cpu_is_u5500())
-		prcmu_status_reg = __io_address(DB5500_PRCMU_STATUS_REGISTER);
-	else
-		ux500_unknown_soc();
-
-	val = readl(prcmu_status_reg) & 0xff;
-
-	return (enum prcmu_idle_stat)val;
 }

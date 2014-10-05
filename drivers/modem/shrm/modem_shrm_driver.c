@@ -603,11 +603,41 @@ int u8500_shrm_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct shrm_dev *shrm = platform_get_drvdata(pdev);
+	struct message_queue *q;
+	struct isadev_context *isa_dev;
 	int err;
+	int idx;
 
 	dev_dbg(&pdev->dev, "%s called...\n", __func__);
 	dev_dbg(&pdev->dev, "ca_wake_req_state = %x\n",
 						get_ca_wake_req_state());
+
+	/*
+	 * Is there are any messages unread in the RPC queue, dont suspend
+	 * as these are real time and modem expects response within 1sec
+	 * else will end up in a crash.
+	 */
+	idx = shrm_get_cdev_index(RPC_MESSAGING);
+	isa_dev = &shrm->isa_context->isadev[idx];
+	q = &isa_dev->dl_queue;
+	if (!list_empty(&q->msg_list)) {
+		dev_info(shrm->dev, "Some RPC msg unread = %d\n",
+				get_size_of_new_msg(q));
+		return -EBUSY;
+	}
+	/*
+	 * Is there are any messages unread in the Security queue, dont suspend
+	 * as these are real time and modem expects response within 1sec
+	 * else will end up in a crash.
+	 */
+	idx = shrm_get_cdev_index(SECURITY_MESSAGING);
+	isa_dev = &shrm->isa_context->isadev[idx];
+	q = &isa_dev->dl_queue;
+	if (!list_empty(&q->msg_list)) {
+		dev_info(shrm->dev, "Some Security msg unread = %d\n",
+				get_size_of_new_msg(q));
+		return -EBUSY;
+	}
 
 	/* if ca_wake_req is high, prevent system suspend */
 	if (!get_ca_wake_req_state()) {

@@ -14,11 +14,7 @@
 #include <linux/amba/bus.h>
 #include <linux/pm.h>
 #include <linux/gpio.h>
-#include <linux/gpio/nomadik.h>
-
-#include <video/mcde_display.h>
-#include <video/mcde_display-av8100.h>
-#include <video/mcde_fb.h>
+#include <plat/gpio-nomadik.h>
 
 #include <mach/hardware.h>
 #include <mach/pm.h>
@@ -56,6 +52,7 @@ dbx500_add_amba_device(const char *name, resource_size_t base,
 	ret = amba_device_register(dev, &iomem_resource);
 	if (ret) {
 		kfree(dev);
+		dev_err(&dev->dev, "failed to register amba device %s\n", name);
 		return ERR_PTR(ret);
 	}
 
@@ -167,65 +164,3 @@ void dbx500_add_gpios(resource_size_t *base, int num, int irq,
 		dbx500_add_gpio(i, base[i], irq, pdata);
 	}
 }
-
-void hdmi_fb_onoff(struct mcde_display_device *ddev,
-		bool enable, u8 cea, u8 vesa_cea_nr)
-{
-	struct fb_info *fbi;
-	u16 w, h;
-	u16 vw, vh;
-	u32 rotate = FB_ROTATE_UR;
-	struct display_driver_data *driver_data = dev_get_drvdata(&ddev->dev);
-
-	dev_dbg(&ddev->dev, "%s\n", __func__);
-	dev_dbg(&ddev->dev, "en:%d cea:%d nr:%d\n", enable, cea, vesa_cea_nr);
-
-	if (enable) {
-		if (ddev->enabled) {
-			dev_dbg(&ddev->dev, "Display is already enabled.\n");
-			return;
-		}
-
-		/* Create fb */
-		if (ddev->fbi == NULL) {
-			/* Note: change when dynamic buffering is available */
-			int buffering = 2;
-
-			/* Get default values */
-			mcde_dss_get_native_resolution(ddev, &w, &h);
-			vw = w;
-			vh = h * buffering;
-
-			if (vesa_cea_nr != 0)
-				ddev->ceanr_convert(ddev, cea, vesa_cea_nr,
-						buffering, &w, &h, &vw, &vh);
-
-			fbi = mcde_fb_create(ddev, w, h, vw, vh,
-				ddev->default_pixel_format, rotate);
-
-			if (IS_ERR(fbi)) {
-				dev_warn(&ddev->dev,
-					"Failed to create fb for display %s\n",
-							ddev->name);
-				goto hdmi_fb_onoff_end;
-			} else {
-				dev_info(&ddev->dev,
-					"Framebuffer created (%s)\n",
-							ddev->name);
-			}
-			driver_data->fbdevname = (char *)dev_name(fbi->dev);
-		}
-	} else {
-		if (!ddev->enabled) {
-			dev_dbg(&ddev->dev, "Display %s is already disabled.\n",
-					ddev->name);
-			return;
-		}
-		mcde_fb_destroy(ddev);
-	}
-
-hdmi_fb_onoff_end:
-	return;
-}
-EXPORT_SYMBOL(hdmi_fb_onoff);
-

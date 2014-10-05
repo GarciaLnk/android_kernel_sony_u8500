@@ -11,6 +11,8 @@
 #ifndef STM_H
 #define STM_H
 
+#include <linux/types.h>
+
 #define STM_DEV_NAME "stm"
 
 /* One single channel mapping */
@@ -64,7 +66,10 @@ enum stm_connection_type {
 	STM_DEFAULT_CONNECTION = 1,
 	STM_STE_MODEM_ON_MIPI34_NONE_ON_MIPI60 = 2,
 	STM_STE_APE_ON_MIPI34_NONE_ON_MIPI60 = 3,
-	STM_STE_MODEM_ON_MIPI34_APE_ON_MIPI60 = 4
+	STM_STE_MODEM_ON_MIPI34_APE_ON_MIPI60 = 4,
+	STM_STE_MODEM_ON_MICROSD = 5,
+	STM_STE_APE_ON_MICROSD = 6,
+	STM_STE_INVALID_CONNECTION = 0xff
 };
 
 #ifdef __KERNEL__

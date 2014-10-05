@@ -37,14 +37,17 @@ static LIST_HEAD(ab5500_fg_list);
 #define FG_ACC_RESET_ON_READ		0x08
 #define EN_READOUT_MASK			0x01
 #define EN_READOUT			0x01
+#define EN_ACC_RESET_ON_READ		0x08
+#define ACC_RESET_ON_READ		0x08
 #define RESET				0x00
 #define EOC_52_mA			0x04
 #define MILLI_TO_MICRO			1000
 #define FG_LSB_IN_MA			770
-#define QLSB_NANO_AMP_HOURS_X10		1129
+#define QLSB_NANO_AMP_HOURS_X100	5353
 #define SEC_TO_SAMPLE(S)		(S * 4)
 #define NBR_AVG_SAMPLES			20
 #define LOW_BAT_CHECK_INTERVAL		(2 * HZ)
+#define FG_PERIODIC_START_INTERVAL	(250 * HZ)/1000 /* 250 msec */
 
 #define VALID_CAPACITY_SEC		(45 * 60) /* 45 minutes */
 
@@ -161,6 +164,7 @@ struct ab5500_fg_flags {
  * @fg_wq:		Work queue for running the FG algorithm
  * @fg_periodic_work:	Work to run the FG algorithm periodically
  * @fg_low_bat_work:	Work to check low bat condition
+ * @fg_reinit_work:	Work to reset and re-initialize fuel gauge
  * @fg_work:		Work to run the FG algorithm instantly
  * @fg_acc_cur_work:	Work to read the FG accumulator
  * @cc_lock:		Mutex for locking the CC
@@ -196,6 +200,7 @@ struct ab5500_fg {
 	struct workqueue_struct *fg_wq;
 	struct delayed_work fg_periodic_work;
 	struct delayed_work fg_low_bat_work;
+	struct delayed_work fg_reinit_work;
 	struct work_struct fg_work;
 	struct delayed_work fg_acc_cur_work;
 	struct mutex cc_lock;
@@ -217,6 +222,11 @@ static enum power_supply_property ab5500_fg_props[] = {
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
 };
+
+/* Function Prototype */
+static int ab5500_fg_bat_v_trig(int mux);
+
+static int prev_samples, prev_val;
 
 struct ab5500_fg *ab5500_fg_get(void)
 {
@@ -281,6 +291,29 @@ static int ab5500_fg_add_cap_sample(struct ab5500_fg *di, int sample)
 
 	return avg->avg;
 }
+
+/**
+ * ab5500_fg_clear_cap_samples() - Clear average filter
+ * @di:                pointer to the ab5500_fg structure
+ *
+ * The capacity filter is is reset to zero.
+ */
+static void ab5500_fg_clear_cap_samples(struct ab5500_fg *di)
+{
+	int i;
+	struct ab5500_fg_avg_cap *avg = &di->avg_cap;
+
+	avg->pos = 0;
+	avg->nbr_samples = 0;
+	avg->sum = 0;
+	avg->avg = 0;
+
+	for (i = 0; i < NBR_AVG_SAMPLES; i++) {
+		avg->samples[i] = 0;
+		avg->time_stamps[i] = 0;
+	}
+}
+
 
 /**
  * ab5500_fg_fill_cap_sample() - Fill average filter
@@ -373,11 +406,6 @@ static int ab5500_fg_inst_curr(struct ab5500_fg *di)
 	}
 
 	mutex_lock(&di->cc_lock);
-	/*
-	 * Since there is no interrupt for this, just wait for 250ms
-	 * 250ms is one sample conversion time with 32.768 Khz RTC clock
-	 */
-	msleep(250);
 
 	/* Enable read request */
 	ret = abx500_mask_and_set_register_interruptible(di->dev,
@@ -450,7 +478,7 @@ static void ab5500_fg_acc_cur_timer_expired(unsigned long data)
  */
 static void ab5500_fg_acc_cur_work(struct work_struct *work)
 {
-	int val;
+	int val, raw_val, sample;
 	int ret;
 	u8 low, med, high, cnt_low, cnt_high;
 
@@ -470,6 +498,11 @@ static void ab5500_fg_acc_cur_work(struct work_struct *work)
 		goto exit;
 	/* If charging read charging registers for accumulated values */
 	if (di->flags.charging) {
+		ret = abx500_mask_and_set_register_interruptible(di->dev,
+			AB5500_BANK_FG_BATTCOM_ACC, AB5500_FG_CONTROL_A,
+			ACC_RESET_ON_READ, EN_ACC_RESET_ON_READ);
+		if (ret < 0)
+			goto exit;
 		/* Read CC Sample conversion value Low and high */
 		ret = abx500_get_register_interruptible(di->dev,
 			AB5500_BANK_FG_BATTCOM_ACC,
@@ -497,9 +530,19 @@ static void ab5500_fg_acc_cur_work(struct work_struct *work)
 			AB5500_FG_VAL_COUNT1, &cnt_high);
 		if (ret < 0)
 			goto exit;
+		ret = abx500_mask_and_set_register_interruptible(di->dev,
+			AB5500_BANK_FG_BATTCOM_ACC, AB5500_FG_CONTROL_A,
+			ACC_RESET_ON_READ, RESET);
+		if (ret < 0)
+			goto exit;
 		queue_delayed_work(di->fg_wq, &di->fg_acc_cur_work,
 				di->bat->interval_charging * HZ);
 	} else { /* discharging */
+		ret = abx500_mask_and_set_register_interruptible(di->dev,
+			AB5500_BANK_FG_BATTCOM_ACC, AB5500_FG_CONTROL_A,
+			ACC_RESET_ON_READ, EN_ACC_RESET_ON_READ);
+		if (ret < 0)
+			goto exit;
 		/* Read CC Sample conversion value Low and high */
 		ret = abx500_get_register_interruptible(di->dev,
 			AB5500_BANK_FG_BATTCOM_ACC,
@@ -527,19 +570,48 @@ static void ab5500_fg_acc_cur_work(struct work_struct *work)
 			AB5500_FG_VAL_COUNT1, &cnt_high);
 		if (ret < 0)
 			goto exit;
+		ret = abx500_mask_and_set_register_interruptible(di->dev,
+			AB5500_BANK_FG_BATTCOM_ACC, AB5500_FG_CONTROL_A,
+			ACC_RESET_ON_READ, RESET);
+		if (ret < 0)
+			goto exit;
 		queue_delayed_work(di->fg_wq, &di->fg_acc_cur_work,
 				di->bat->interval_not_charging * HZ);
 	}
 	di->fg_samples = (cnt_low | (cnt_high << 8));
+	/*
+	 * TODO: Workaround due to the hardware issue that accumulator is not
+	 * reset after setting reset_on_read bit and reading the accumulator
+	 * Registers.
+	 */
+	if (prev_samples > di->fg_samples) {
+		/* overflow has occured */
+		sample = (0xFFFF - prev_samples) + di->fg_samples;
+	} else
+		sample = di->fg_samples - prev_samples;
+	prev_samples = di->fg_samples;
+	di->fg_samples = sample;
 	val = (low | (med << 8) | (high << 16));
+	/*
+	 * TODO: Workaround due to the hardware issue that accumulator is not
+	 * reset after setting reset_on_read bit and reading the accumulator
+	 * Registers.
+	 */
+	if (prev_val > val)
+		raw_val = (0xFFFFFF - prev_val) + val;
+	else
+		raw_val = val - prev_val;
+	prev_val = val;
+	val = raw_val;
 
 	if (di->fg_samples) {
-		di->accu_charge = (val * QLSB_NANO_AMP_HOURS_X10)/10000;
+		di->accu_charge = (val * QLSB_NANO_AMP_HOURS_X100)/100000;
 		di->avg_curr = (val * FG_LSB_IN_MA) / (di->fg_samples * 1000);
 	} else
 		dev_err(di->dev,
 			"samples is zero, using previous calculated average current\n");
 	di->flags.conv_done = true;
+	di->calib_state = AB5500_FG_CALIB_END;
 
 	mutex_unlock(&di->cc_lock);
 
@@ -1319,9 +1391,11 @@ static void ab5500_fg_low_bat_work(struct work_struct *work)
 		 */
 		queue_delayed_work(di->fg_wq, &di->fg_low_bat_work,
 			round_jiffies(LOW_BAT_CHECK_INTERVAL));
+		power_supply_changed(&di->fg_psy);
 	} else {
 		di->flags.low_bat = false;
 		dev_warn(di->dev, "Battery voltage OK again\n");
+		power_supply_changed(&di->fg_psy);
 	}
 
 	/* This is needed to dispatch LOW_BAT */
@@ -1367,8 +1441,6 @@ static int ab5500_fg_get_property(struct power_supply *psy,
 	union power_supply_propval *val)
 {
 	struct ab5500_fg *di;
-	int i, tbl_size;
-	struct abx500_v_to_cap *tbl;
 
 	di = to_ab5500_fg_device_info(psy);
 
@@ -1427,20 +1499,7 @@ static int ab5500_fg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CAPACITY:
 		if (di->flags.batt_unknown && !di->bat->chg_unknown_bat)
 			val->intval = 100;
-		else if (di->bat->bat_type[di->bat->batt_id].v_to_cap_tbl) {
-			tbl = di->bat->bat_type[di->bat->batt_id].v_to_cap_tbl,
-			tbl_size = di->bat->bat_type[
-				di->bat->batt_id].n_v_cap_tbl_elements;
-
-			for (i = 0; i < tbl_size; ++i) {
-				if (di->vbat < tbl[i].voltage &&
-						di->vbat > tbl[i+1].voltage) {
-					di->v_to_cap = tbl[i].capacity;
-					break;
-				}
-			}
-			val->intval = di->v_to_cap;
-		} else
+		else
 			val->intval = di->bat_cap.prev_percent;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
@@ -1541,33 +1600,6 @@ static int ab5500_fg_get_ext_psy_data(struct device *dev, void *data)
 	return 0;
 }
 
-static int ab5500_fg_bat_v_trig(int mux)
-{
-	struct ab5500_fg *di = ab5500_fg_get();
-
-	/* check if the battery voltage is below low threshold */
-	if (di->vbat < 2700) {
-		dev_warn(di->dev, "Battery voltage is below LOW threshold\n");
-		di->flags.low_bat_delay = true;
-		/*
-		 * Start a timer to check LOW_BAT again after some time
-		 * This is done to avoid shutdown on single voltage dips
-		 */
-		queue_delayed_work(di->fg_wq, &di->fg_low_bat_work,
-			round_jiffies(LOW_BAT_CHECK_INTERVAL));
-	}
-	/* check if battery votlage is above OVV */
-	else if (di->vbat > 4200) {
-		dev_dbg(di->dev, "Battery OVV\n");
-		di->flags.bat_ovv = true;
-
-		power_supply_changed(&di->fg_psy);
-	} else
-		return -EINVAL;
-
-	return 0;
-}
-
 /**
  * ab5500_fg_init_hw_registers() - Set up FG related registers
  * @di:		pointer to the ab5500_fg structure
@@ -1587,8 +1619,8 @@ static int ab5500_fg_init_hw_registers(struct ab5500_fg *di)
 
 	auto_ip->mux = MAIN_BAT_V;
 	auto_ip->freq = MS500;
-	auto_ip->min = 2700;
-	auto_ip->max = 4200;
+	auto_ip->min = di->bat->fg_params->lowbat_threshold;
+	auto_ip->max = di->bat->fg_params->overbat_threshold;
 	auto_ip->auto_adc_callback = ab5500_fg_bat_v_trig;
 	di->gpadc_auto = auto_ip;
 	ret = ab5500_gpadc_convert_auto(di->gpadc, di->gpadc_auto);
@@ -1599,6 +1631,39 @@ static int ab5500_fg_init_hw_registers(struct ab5500_fg *di)
 	ret = abx500_set_register_interruptible(di->dev,
 			AB5500_BANK_FG_BATTCOM_ACC, AB5500_FG_EOC, EOC_52_mA);
 	return ret;
+}
+
+static int ab5500_fg_bat_v_trig(int mux)
+{
+	struct ab5500_fg *di = ab5500_fg_get();
+
+	di->vbat = ab5500_gpadc_convert(di->gpadc, MAIN_BAT_V);
+
+	/* check if the battery voltage is below low threshold */
+	if (di->vbat < di->bat->fg_params->lowbat_threshold) {
+		dev_warn(di->dev, "Battery voltage is below LOW threshold\n");
+		di->flags.low_bat_delay = true;
+		/*
+		 * Start a timer to check LOW_BAT again after some time
+		 * This is done to avoid shutdown on single voltage dips
+		 */
+		queue_delayed_work(di->fg_wq, &di->fg_low_bat_work,
+			round_jiffies(LOW_BAT_CHECK_INTERVAL));
+		power_supply_changed(&di->fg_psy);
+	}
+	/* check if battery votlage is above OVV */
+	else if (di->vbat > di->bat->fg_params->overbat_threshold) {
+		dev_warn(di->dev, "Battery OVV\n");
+		di->flags.bat_ovv = true;
+
+		power_supply_changed(&di->fg_psy);
+	} else
+		dev_err(di->dev,
+			"Invalid gpadc auto trigger for battery voltage\n");
+
+	kfree(di->gpadc_auto);
+	ab5500_fg_init_hw_registers(di);
+	return 0;
 }
 
 /**
@@ -1616,6 +1681,50 @@ static void ab5500_fg_external_power_changed(struct power_supply *psy)
 
 	class_for_each_device(power_supply_class, NULL,
 		&di->fg_psy, ab5500_fg_get_ext_psy_data);
+}
+
+/**
+ * abab5500_fg_reinit_work() - work to reset the FG algorithm
+ * @work:      pointer to the work_struct structure
+ *
+ * Used to reset the current battery capacity to be able to
+ * retrigger a new voltage base capacity calculation. For
+ * test and verification purpose.
+ */
+static void ab5500_fg_reinit_work(struct work_struct *work)
+{
+	struct ab5500_fg *di = container_of(work, struct ab5500_fg,
+			fg_reinit_work.work);
+
+	if (di->flags.calibrate == false) {
+		dev_dbg(di->dev, "Resetting FG state machine to init.\n");
+		ab5500_fg_clear_cap_samples(di);
+		ab5500_fg_calc_cap_discharge_voltage(di, true);
+		ab5500_fg_charge_state_to(di, AB5500_FG_CHARGE_INIT);
+		ab5500_fg_discharge_state_to(di, AB5500_FG_DISCHARGE_INIT);
+		queue_delayed_work(di->fg_wq, &di->fg_periodic_work, 0);
+
+	} else {
+		dev_err(di->dev,
+			"Residual offset calibration ongoing retrying..\n");
+		/* Wait one second until next try*/
+		queue_delayed_work(di->fg_wq, &di->fg_reinit_work,
+							round_jiffies(1));
+	}
+}
+
+/**
+ * ab5500_fg_reinit() - forces FG algorithm to reinitialize with current values
+ *
+ * This function can be used to force the FG algorithm to recalculate a new
+ * voltage based battery capacity.
+ */
+void ab5500_fg_reinit(void)
+{
+	struct ab5500_fg *di = ab5500_fg_get();
+	/* User won't be notified if a null pointer returned. */
+	if (di != NULL)
+		queue_delayed_work(di->fg_wq, &di->fg_reinit_work, 0);
 }
 
 #if defined(CONFIG_PM)
@@ -1710,6 +1819,8 @@ static int __devinit ab5500_fg_probe(struct platform_device *pdev)
 		ret = -EINVAL;
 		goto free_device_info;
 	}
+	/* powerup fg to start sampling */
+	ab5500_fg_coulomb_counter(di, true);
 
 	di->fg_psy.name = "ab5500_fg";
 	di->fg_psy.type = POWER_SUPPLY_TYPE_BATTERY;
@@ -1746,6 +1857,10 @@ static int __devinit ab5500_fg_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK_DEFERRABLE(&di->fg_acc_cur_work,
 			ab5500_fg_acc_cur_work);
 
+	/* Init work for reinitialising the fg algorithm */
+	INIT_DELAYED_WORK_DEFERRABLE(&di->fg_reinit_work,
+			ab5500_fg_reinit_work);
+
 	/* Work delayed Queue to run the state machine */
 	INIT_DELAYED_WORK_DEFERRABLE(&di->fg_periodic_work,
 		ab5500_fg_periodic_work);
@@ -1774,13 +1889,12 @@ static int __devinit ab5500_fg_probe(struct platform_device *pdev)
 	}
 
 	di->fg_samples = SEC_TO_SAMPLE(di->bat->fg_params->init_timer);
-	ab5500_fg_coulomb_counter(di, true);
 
 	/* Initilialize avg current timer */
 	init_timer(&di->avg_current_timer);
 	di->avg_current_timer.function = ab5500_fg_acc_cur_timer_expired;
 	di->avg_current_timer.data = (unsigned long) di;
-	di->avg_current_timer.expires = 60 * HZ;;
+	di->avg_current_timer.expires = 60 * HZ;
 	if (!timer_pending(&di->avg_current_timer))
 		add_timer(&di->avg_current_timer);
 	else
@@ -1792,8 +1906,10 @@ static int __devinit ab5500_fg_probe(struct platform_device *pdev)
 	di->flags.calibrate = true;
 	di->calib_state = AB5500_FG_CALIB_INIT;
 	/* Run the FG algorithm */
-	queue_delayed_work(di->fg_wq, &di->fg_periodic_work, 0);
-	queue_delayed_work(di->fg_wq, &di->fg_acc_cur_work, 0);
+	queue_delayed_work(di->fg_wq, &di->fg_periodic_work,
+			FG_PERIODIC_START_INTERVAL);
+	queue_delayed_work(di->fg_wq, &di->fg_acc_cur_work,
+			FG_PERIODIC_START_INTERVAL);
 
 	dev_info(di->dev, "probe success\n");
 	return ret;

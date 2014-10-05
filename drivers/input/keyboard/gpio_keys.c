@@ -25,6 +25,7 @@
 #include <linux/gpio_keys.h>
 #include <linux/workqueue.h>
 #include <linux/gpio.h>
+#include <linux/pm_runtime.h>
 
 struct gpio_button_data {
 	struct gpio_keys_button *button;
@@ -39,6 +40,8 @@ struct gpio_keys_drvdata {
 	struct input_dev *input;
 	struct mutex disable_lock;
 	unsigned int n_buttons;
+	bool enabled;
+	bool enable_after_suspend;
 	int (*enable)(struct device *dev);
 	void (*disable)(struct device *dev);
 	struct gpio_button_data data[0];
@@ -434,6 +437,8 @@ static int gpio_keys_open(struct input_dev *input)
 {
 	struct gpio_keys_drvdata *ddata = input_get_drvdata(input);
 
+	pm_runtime_get_sync(input->dev.parent);
+	ddata->enabled = true;
 	return ddata->enable ? ddata->enable(input->dev.parent) : 0;
 }
 
@@ -443,6 +448,8 @@ static void gpio_keys_close(struct input_dev *input)
 
 	if (ddata->disable)
 		ddata->disable(input->dev.parent);
+	ddata->enabled = false;
+	pm_runtime_put(input->dev.parent);
 }
 
 static int __devinit gpio_keys_probe(struct platform_device *pdev)
@@ -468,6 +475,7 @@ static int __devinit gpio_keys_probe(struct platform_device *pdev)
 	ddata->n_buttons = pdata->nbuttons;
 	ddata->enable = pdata->enable;
 	ddata->disable = pdata->disable;
+	ddata->enabled = false;
 	mutex_init(&ddata->disable_lock);
 
 	platform_set_drvdata(pdev, ddata);
@@ -483,6 +491,8 @@ static int __devinit gpio_keys_probe(struct platform_device *pdev)
 	input->id.vendor = 0x0001;
 	input->id.product = 0x0001;
 	input->id.version = 0x0100;
+
+	pm_runtime_enable(&pdev->dev);
 
 	/* Enable auto repeat feature of Linux input subsystem */
 	if (pdata->rep)
@@ -555,6 +565,8 @@ static int __devexit gpio_keys_remove(struct platform_device *pdev)
 	struct input_dev *input = ddata->input;
 	int i;
 
+	pm_runtime_disable(&pdev->dev);
+
 	sysfs_remove_group(&pdev->dev.kobj, &gpio_keys_attr_group);
 
 	device_init_wakeup(&pdev->dev, 0);
@@ -578,6 +590,7 @@ static int __devexit gpio_keys_remove(struct platform_device *pdev)
 static int gpio_keys_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
+	struct gpio_keys_drvdata *ddata = platform_get_drvdata(pdev);
 	struct gpio_keys_platform_data *pdata = pdev->dev.platform_data;
 	int i;
 
@@ -589,6 +602,10 @@ static int gpio_keys_suspend(struct device *dev)
 				enable_irq_wake(irq);
 			}
 		}
+	} else {
+		ddata->enable_after_suspend = ddata->enabled;
+		if (ddata->enabled && ddata->disable)
+			ddata->disable(&pdev->dev);
 	}
 
 	return 0;
@@ -611,6 +628,11 @@ static int gpio_keys_resume(struct device *dev)
 
 		gpio_keys_report_event(&ddata->data[i]);
 	}
+
+	if (!device_may_wakeup(&pdev->dev) && ddata->enable_after_suspend
+	    && ddata->enable)
+		ddata->enable(&pdev->dev);
+
 	input_sync(ddata->input);
 
 	return 0;

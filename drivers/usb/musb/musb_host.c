@@ -42,6 +42,7 @@
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
+#include <linux/highmem.h>
 
 #include "musb_core.h"
 #include "musb_host.h"
@@ -213,6 +214,70 @@ static struct musb_qh *musb_ep_get_qh(struct musb_hw_ep *ep, int is_in)
 }
 
 /*
+ * Wrapper for musb_write_fifo that will map pages in scatterlist as
+ * needed.
+ */
+static void musb_sg_write_fifo(struct musb_hw_ep *hw_ep, u16 length,
+			       struct scatterlist *sg, size_t offset)
+{
+	struct page *page;
+	size_t off, count, len;
+	u8 *ptr;
+
+	BUG_ON(offset + length > sg->length);
+
+	page = sg_page(sg) + (offset >> PAGE_SHIFT);
+	off = offset;
+	count = length;
+
+	do {
+		len = PAGE_SIZE - (off & ~PAGE_MASK);
+		if (len > count)
+			len = count;
+
+		ptr = kmap_atomic(page, KM_IRQ0);
+		musb_write_fifo(hw_ep, len, ptr + (off & ~PAGE_MASK));
+		kunmap_atomic(ptr, KM_IRQ0);
+
+		count -= len;
+		off += len;
+		page++;
+	} while (count > 0);
+}
+
+/*
+ * Wrapper for musb_read_fifo that will map pages in scatterlist as
+ * needed.
+ */
+static void musb_sg_read_fifo(struct musb_hw_ep *hw_ep, u16 length,
+			      struct scatterlist *sg, size_t offset)
+{
+	struct page *page;
+	size_t off, count, len;
+	u8 *ptr;
+
+	BUG_ON(offset + length > sg->length);
+
+	page = sg_page(sg) + (offset >> PAGE_SHIFT);
+	off = offset;
+	count = length;
+
+	do {
+		len = PAGE_SIZE - (off & ~PAGE_MASK);
+		if (len > count)
+			len = count;
+
+		ptr = kmap_atomic(page, KM_IRQ0);
+		musb_read_fifo(hw_ep, len, ptr + (off & ~PAGE_MASK));
+		kunmap_atomic(ptr, KM_IRQ0);
+
+		count -= len;
+		off += len;
+		page++;
+	} while (count > 0);
+}
+
+/*
  * Start the URB at the front of an endpoint's queue
  * end must be claimed from the caller.
  *
@@ -253,7 +318,7 @@ musb_start_urb(struct musb *musb, int is_in, struct musb_qh *qh)
 		break;
 	default:		/* bulk, interrupt */
 		/* actual_length may be nonzero on retry paths */
-		buf = urb->transfer_buffer + urb->actual_length;
+		offset = urb->actual_length;
 		len = urb->transfer_buffer_length - urb->actual_length;
 	}
 
@@ -461,16 +526,15 @@ static bool
 musb_host_packet_rx(struct musb *musb, struct urb *urb, u8 epnum, u8 iso_err)
 {
 	u16			rx_count;
-	u8			*buf;
 	u16			csr;
 	bool			done = false;
 	u32			length;
+	size_t			offset;
 	int			do_flush = 0;
 	struct musb_hw_ep	*hw_ep = musb->endpoints + epnum;
 	void __iomem		*epio = hw_ep->regs;
 	struct musb_qh		*qh = hw_ep->in_qh;
 	int			pipe = urb->pipe;
-	void			*buffer = urb->transfer_buffer;
 
 	/* musb_ep_select(mbase, epnum); */
 	rx_count = musb_readw(epio, MUSB_RXCOUNT);
@@ -489,7 +553,7 @@ musb_host_packet_rx(struct musb *musb, struct urb *urb, u8 epnum, u8 iso_err)
 		}
 
 		d = urb->iso_frame_desc + qh->iso_idx;
-		buf = buffer + d->offset;
+		offset = d->offset;
 		length = d->length;
 		if (rx_count > length) {
 			if (status == 0) {
@@ -509,7 +573,7 @@ musb_host_packet_rx(struct musb *musb, struct urb *urb, u8 epnum, u8 iso_err)
 		done = (++qh->iso_idx >= urb->number_of_packets);
 	} else {
 		/* non-isoch */
-		buf = buffer + qh->offset;
+		offset = qh->offset;
 		length = urb->transfer_buffer_length - qh->offset;
 		if (rx_count > length) {
 			if (urb->status == -EINPROGRESS)
@@ -533,7 +597,12 @@ musb_host_packet_rx(struct musb *musb, struct urb *urb, u8 epnum, u8 iso_err)
 			urb->status = -EREMOTEIO;
 	}
 
-	musb_read_fifo(hw_ep, length, buf);
+	if (urb->transfer_buffer) /* Simple case */
+		musb_read_fifo(hw_ep, length, urb->transfer_buffer + offset);
+	else if (urb->sg)	  /* Unmapped highmem buffer */
+		musb_sg_read_fifo(hw_ep, length, urb->sg, offset);
+	else			  /* Buffer missing */
+		panic("Invalid destination buffer");
 
 	csr = musb_readw(epio, MUSB_RXCSR);
 	csr |= MUSB_RXCSR_H_WZC_BITS;
@@ -640,7 +709,17 @@ static bool musb_tx_dma_program(struct dma_controller *dma,
 		mode = 1;
 		csr |= MUSB_TXCSR_DMAMODE | MUSB_TXCSR_DMAENAB;
 		/* autoset shouldn't be set in high bandwidth */
-		if (qh->hb_mult == 1)
+		/*
+		 * Enable Autoset according to table
+		 * below
+		 * bulk_split hb_mult	Autoset_Enable
+		 *	0	1	Yes(Normal)
+		 *	0	>1	No(High BW ISO)
+		 *	1	1	Yes(HS bulk)
+		 *	1	>1	Yes(FS bulk)
+		 */
+		if (qh->hb_mult == 1 || (qh->hb_mult > 1 &&
+					can_bulk_split(hw_ep->musb, qh->type)))
 			csr |= MUSB_TXCSR_AUTOSET;
 	} else {
 		mode = 0;
@@ -787,6 +866,13 @@ static void musb_ep_program(struct musb *musb, u8 epnum,
 		/* protocol/endpoint/interval/NAKlimit */
 		if (epnum) {
 			musb_writeb(epio, MUSB_TXTYPE, qh->type_reg);
+			/*
+			 * Set the TXMAXP register correctly for Bulk OUT
+			 * endpoints in host mode
+			 */
+			if (can_bulk_split(musb, qh->type))
+				qh->hb_mult = hw_ep->max_packet_sz_tx
+						/ packet_sz;
 			if (musb->double_buffer_not_ok)
 				musb_writew(epio, MUSB_TXMAXP,
 						hw_ep->max_packet_sz_tx);
@@ -817,7 +903,14 @@ static void musb_ep_program(struct musb *musb, u8 epnum,
 			/* Unmap the buffer so that CPU can use it */
 			usb_hcd_unmap_urb_for_dma(musb_to_hcd(musb), urb);
 			qh->segsize = load_count;
-			musb_write_fifo(hw_ep, load_count, buf);
+			if (buf)	  /* Simple case */
+				musb_write_fifo(hw_ep, load_count,
+						buf + offset);
+			else if (urb->sg) /* Unmapped highmem buffer */
+				musb_sg_write_fifo(hw_ep, load_count,
+						   urb->sg, offset);
+			else		  /* Missing buffer */
+				panic("Invalid source buffer");
 		}
 
 		/* re-enable interrupt */
@@ -910,7 +1003,14 @@ static bool musb_h_ep0_continue(struct musb *musb, u16 len, struct urb *urb)
 
 		/* Unmap the buffer so that CPU can use it */
 		usb_hcd_unmap_urb_for_dma(musb_to_hcd(musb), urb);
-		musb_read_fifo(hw_ep, fifo_count, fifo_dest);
+
+		if (urb->transfer_buffer) /* Simple case */
+			musb_read_fifo(hw_ep, fifo_count, fifo_dest);
+		else if (urb->sg)	  /* Unmapped highmem buffer */
+			musb_sg_read_fifo(hw_ep, fifo_count, urb->sg,
+					  urb->actual_length);
+		else			  /* Missing buffer */
+			panic("Invalid destination buffer");
 
 		urb->actual_length += fifo_count;
 		if (len < qh->maxpacket) {
@@ -951,7 +1051,14 @@ static bool musb_h_ep0_continue(struct musb *musb, u16 len, struct urb *urb)
 					fifo_dest);
 			/* Unmap the buffer so that CPU can use it */
 			usb_hcd_unmap_urb_for_dma(musb_to_hcd(musb), urb);
-			musb_write_fifo(hw_ep, fifo_count, fifo_dest);
+
+			if (urb->transfer_buffer) /* Simple case */
+				musb_write_fifo(hw_ep, fifo_count, fifo_dest);
+			else if (urb->sg)	  /* Unmapped highmem buffer */
+				musb_sg_write_fifo(hw_ep, fifo_count, urb->sg,
+						   urb->actual_length);
+			else			  /* Missing buffer */
+				panic("Invalid source buffer");
 
 			urb->actual_length += fifo_count;
 			more = true;
@@ -1169,7 +1276,6 @@ void musb_host_tx(struct musb *musb, u8 epnum)
 		} while ((tx_csr & MUSB_TXCSR_TXPKTRDY) != 0);
 		dev_dbg(musb->controller, "TXPKTRDY Cleared. Continue...\n");
 
-		return;
 	} else if (tx_csr & MUSB_TXCSR_H_NAKTIMEOUT) {
 		dev_dbg(musb->controller, "TX end=%d device not responding\n", epnum);
 
@@ -1357,7 +1463,14 @@ void musb_host_tx(struct musb *musb, u8 epnum)
 		length = qh->maxpacket;
 	/* Unmap the buffer so that CPU can use it */
 	usb_hcd_unmap_urb_for_dma(musb_to_hcd(musb), urb);
-	musb_write_fifo(hw_ep, length, urb->transfer_buffer + offset);
+
+	if (urb->transfer_buffer) /* Simple case */
+		musb_write_fifo(hw_ep, length, urb->transfer_buffer + offset);
+	else if (urb->sg)	  /* Unmapped highmem buffer */
+		musb_sg_write_fifo(hw_ep, length, urb->sg, offset);
+	else			  /* Missing buffer */
+		panic("Invalid source buffer");
+
 	qh->segsize = length;
 
 	musb_ep_select(mbase, epnum);

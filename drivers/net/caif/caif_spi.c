@@ -621,10 +621,8 @@ static int cfspi_init(struct net_device *dev)
 	}
 
 	/* Allocate DMA buffers. */
-	cfspi->xfer.va_tx[0] = dma_alloc(&cfspi->xfer.pa_tx[0]);
-	if (!cfspi->xfer.va_tx[0]) {
-		printk(KERN_WARNING
-		       "CFSPI: failed to allocate dma TX buffer.\n");
+	cfspi->xfer.va_tx = dma_alloc(&cfspi->xfer.pa_tx);
+	if (!cfspi->xfer.va_tx) {
 		res = -ENODEV;
 		goto err_dma_alloc_tx_0;
 	}
@@ -632,8 +630,6 @@ static int cfspi_init(struct net_device *dev)
 	cfspi->xfer.va_rx = dma_alloc(&cfspi->xfer.pa_rx);
 
 	if (!cfspi->xfer.va_rx) {
-		printk(KERN_WARNING
-		       "CFSPI: failed to allocate dma TX buffer.\n");
 		res = -ENODEV;
 		goto err_dma_alloc_rx;
 	}

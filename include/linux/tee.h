@@ -76,6 +76,7 @@
  */
 #define TEE_STA_GET_PRODUCT_CONFIG		10
 #define TEE_STA_SET_L2CC_PREFETCH_CTRL_REGISTER 11
+#define TEE_STA_OPEN_SHARED_MEMORY 39
 
 /* Flags indicating run-time environment */
 #define TEE_RT_FLAGS_NORMAL		0x00000000
@@ -160,6 +161,7 @@ struct tee_context {};
  * @err: Error code (as in Global Platform TEE Client API spec)
  * @origin: Origin for the error code (also from spec).
  * @id: Implementation defined type, 0 if not used.
+ * @vaddr: Virtual address for the memrefs.
  * @ta: The trusted application.
  * @uuid: The uuid for the trusted application.
  * @cmd: The command to be executed in the trusted application.
@@ -179,6 +181,7 @@ struct tee_session {
 	uint32_t err;
 	uint32_t origin;
 	uint32_t id;
+	uint32_t *vaddr[TEEC_CONFIG_PAYLOAD_REF_COUNT];
 	void *ta;
 	struct tee_uuid *uuid;
 	unsigned int cmd;
@@ -199,6 +202,20 @@ struct tee_session {
 struct tee_read {
 	unsigned int err; /* return value */
 	unsigned int origin; /* error origin */
+};
+
+/**
+ * struct ta_addr - Struct that acts as a helper struct when it comes to
+ * allocating physically contigous memory.
+ *
+ * @paddr: Represents the physical address of a buffer.
+ * @vaddr: Represents the virtual address of a buffer.
+ * @alloc: A pointer to the hwmem allocation structure.
+ */
+struct ta_addr {
+	void *paddr;
+	void *vaddr;
+	struct hwmem_alloc *alloc;
 };
 
 /**

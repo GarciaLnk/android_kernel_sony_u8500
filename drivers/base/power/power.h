@@ -12,6 +12,11 @@ static inline void pm_runtime_remove(struct device *dev) {}
 
 #ifdef CONFIG_PM_SLEEP
 
+struct dpm_drv_wd_data {
+	struct device *dev;
+	struct task_struct *tsk;
+};
+
 /* kernel/power/main.c */
 extern int pm_async_enabled;
 
@@ -29,6 +34,8 @@ extern void device_pm_remove(struct device *);
 extern void device_pm_move_before(struct device *, struct device *);
 extern void device_pm_move_after(struct device *, struct device *);
 extern void device_pm_move_last(struct device *);
+extern void (*device_pm_set_timout_handler(void (*new_fun)(unsigned long)))
+	(unsigned long);
 
 #else /* !CONFIG_PM_SLEEP */
 
@@ -49,6 +56,8 @@ static inline void device_pm_move_before(struct device *deva,
 static inline void device_pm_move_after(struct device *deva,
 					struct device *devb) {}
 static inline void device_pm_move_last(struct device *dev) {}
+static void (*device_pm_set_timout_handler(void (*new_fun)(unsigned long)))
+	(unsigned long) {}
 
 #endif /* !CONFIG_PM_SLEEP */
 

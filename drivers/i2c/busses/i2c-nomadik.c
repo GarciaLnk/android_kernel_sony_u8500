@@ -23,6 +23,8 @@
 #include <linux/io.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pm_runtime.h>
+#include <linux/gpio.h>
+#include <linux/delay.h>
 
 #include <plat/i2c.h>
 
@@ -276,14 +278,25 @@ exit:
 /**
  * load_i2c_mcr_reg() - load the MCR register
  * @dev: private data of controller
+ * @flags: message flags
  */
-static u32 load_i2c_mcr_reg(struct nmk_i2c_dev *dev)
+static u32 load_i2c_mcr_reg(struct nmk_i2c_dev *dev, u16 flags)
 {
 	u32 mcr = 0;
+	unsigned short slave_adr_3msb_bits;
 
-	/* 7-bit address transaction */
-	mcr |= GEN_MASK(1, I2C_MCR_AM, 12);
 	mcr |= GEN_MASK(dev->cli.slave_adr, I2C_MCR_A7, 1);
+
+	if (unlikely(flags & I2C_M_TEN)) {
+		/* 10-bit address transaction */
+		mcr |= GEN_MASK(2, I2C_MCR_AM, 12);
+		/* Get the top 3 bits */
+		slave_adr_3msb_bits = (dev->cli.slave_adr >> 7) & 0x7;
+		mcr |= GEN_MASK(slave_adr_3msb_bits, I2C_MCR_EA10, 8);
+	} else {
+		/* 7-bit address transaction */
+		mcr |= GEN_MASK(1, I2C_MCR_AM, 12);
+	}
 
 	/* start byte procedure not applied */
 	mcr |= GEN_MASK(0, I2C_MCR_SB, 11);
@@ -381,19 +394,20 @@ static void setup_i2c_controller(struct nmk_i2c_dev *dev)
 /**
  * read_i2c() - Read from I2C client device
  * @dev: private data of I2C Driver
+ * @flags: message flags
  *
  * This function reads from i2c client device when controller is in
  * master mode. There is a completion timeout. If there is no transfer
  * before timeout error is returned.
  */
-static int read_i2c(struct nmk_i2c_dev *dev)
+static int read_i2c(struct nmk_i2c_dev *dev, u16 flags)
 {
 	u32 status = 0;
 	u32 mcr;
 	u32 irq_mask = 0;
 	int timeout;
 
-	mcr = load_i2c_mcr_reg(dev);
+	mcr = load_i2c_mcr_reg(dev, flags);
 	writel(mcr, dev->virtbase + I2C_MCR);
 
 	/* load the current CR value */
@@ -459,17 +473,18 @@ static void fill_tx_fifo(struct nmk_i2c_dev *dev, int no_bytes)
 /**
  * write_i2c() - Write data to I2C client.
  * @dev: private data of I2C Driver
+ * @flags: message flags
  *
  * This function writes data to I2C client
  */
-static int write_i2c(struct nmk_i2c_dev *dev)
+static int write_i2c(struct nmk_i2c_dev *dev, u16 flags)
 {
 	u32 status = 0;
 	u32 mcr;
 	u32 irq_mask = 0;
 	int timeout;
 
-	mcr = load_i2c_mcr_reg(dev);
+	mcr = load_i2c_mcr_reg(dev, flags);
 
 	writel(mcr, dev->virtbase + I2C_MCR);
 
@@ -538,11 +553,11 @@ static int nmk_i2c_xfer_one(struct nmk_i2c_dev *dev, u16 flags)
 	if (flags & I2C_M_RD) {
 		/* read operation */
 		dev->cli.operation = I2C_READ;
-		status = read_i2c(dev);
+		status = read_i2c(dev, flags);
 	} else {
 		/* write operation */
 		dev->cli.operation = I2C_WRITE;
-		status = write_i2c(dev);
+		status = write_i2c(dev, flags);
 	}
 
 	if (status || (dev->result)) {
@@ -628,13 +643,17 @@ static int nmk_i2c_xfer(struct i2c_adapter *i2c_adap,
 
 	dev->busy = true;
 
-	if (dev->regulator)
-		regulator_enable(dev->regulator);
+	/* Ugly fix to enable level shifter which connects
+	 * so340010 device with i2c bus: to keep bus alive
+	 * level shifter can be triggered only when there is no
+	 * any activity on a bus and only for this device
+	 */
+	if (msgs->addr == 0x2c) {
+		gpio_set_value(209, 1);
+		udelay(10);
+	}
+
 	pm_runtime_get_sync(&dev->pdev->dev);
-
-	clk_enable(dev->clk);
-
-	dev->busy = true;
 
 	status = init_hw(dev);
 	if (status)
@@ -646,13 +665,6 @@ static int nmk_i2c_xfer(struct i2c_adapter *i2c_adap,
 		setup_i2c_controller(dev);
 
 		for (i = 0; i < num_msgs; i++) {
-			if (unlikely(msgs[i].flags & I2C_M_TEN)) {
-				dev_err(&dev->pdev->dev,
-					"10 bit addressing not supported\n");
-
-				status = -EINVAL;
-				goto out;
-			}
 			dev->cli.slave_adr	= msgs[i].addr;
 			dev->cli.buffer		= msgs[i].buf;
 			dev->cli.count		= msgs[i].len;
@@ -668,10 +680,13 @@ static int nmk_i2c_xfer(struct i2c_adapter *i2c_adap,
 	}
 
 out:
-	clk_disable(dev->clk);
-	pm_runtime_put_sync(&dev->pdev->dev);
-	if (dev->regulator)
-		regulator_disable(dev->regulator);
+
+	/* bootom half of ugly fix described above */
+	if (msgs->addr == 0x2c) {
+		gpio_set_value(209, 0);
+		udelay(10);
+	}
+	pm_runtime_put(&dev->pdev->dev);
 
 	dev->busy = false;
 
@@ -793,7 +808,7 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 		if (dev->cli.count) {
 			dev->result = -EIO;
 			dev_err(&dev->pdev->dev,
-				"%lu bytes still remain to bexfered\n",
+				"%lu bytes still remain to be xfered\n",
 				dev->cli.count);
 			(void) init_hw(dev);
 		}
@@ -861,9 +876,9 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 
 
 #ifdef CONFIG_PM
-static int nmk_i2c_suspend(struct device *dev)
+
+static int nmk_i2c_suspend(struct platform_device *pdev, pm_message_t state)
 {
-	struct platform_device *pdev = to_platform_device(dev);
 	struct nmk_i2c_dev *nmk_i2c = platform_get_drvdata(pdev);
 
 	if (nmk_i2c->busy)
@@ -872,14 +887,43 @@ static int nmk_i2c_suspend(struct device *dev)
 	return 0;
 }
 
-static int nmk_i2c_resume(struct device *dev)
+static int nmk_i2c_suspend_noirq(struct device *dev)
 {
+	struct nmk_i2c_dev *nmk_i2c =
+		platform_get_drvdata(to_platform_device(dev));
+
+	if (nmk_i2c->busy)
+		return -EBUSY;
+
 	return 0;
 }
+
 #else
 #define nmk_i2c_suspend	NULL
-#define nmk_i2c_resume	NULL
+#define nmk_i2c_suspend_noirq NULL
 #endif
+
+static int nmk_i2c_runtime_suspend(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct nmk_i2c_dev *nmk_i2c = platform_get_drvdata(pdev);
+
+	clk_disable(nmk_i2c->clk);
+	if (nmk_i2c->regulator)
+		regulator_disable(nmk_i2c->regulator);
+	return 0;
+}
+
+static int nmk_i2c_runtime_resume(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct nmk_i2c_dev *nmk_i2c = platform_get_drvdata(pdev);
+
+	if (nmk_i2c->regulator)
+		regulator_enable(nmk_i2c->regulator);
+	clk_enable(nmk_i2c->clk);
+	return 0;
+}
 
 /*
  * We use noirq so that we suspend late and resume before the wakeup interrupt
@@ -887,13 +931,14 @@ static int nmk_i2c_resume(struct device *dev)
  * there has been a regular pm runtime resume (via pm_runtime_get_sync()).
  */
 static const struct dev_pm_ops nmk_i2c_pm = {
-	.suspend_noirq	= nmk_i2c_suspend,
-	.resume_noirq	= nmk_i2c_resume,
+	SET_RUNTIME_PM_OPS(nmk_i2c_runtime_suspend, nmk_i2c_runtime_resume,
+			   NULL)
+	.suspend_noirq	= nmk_i2c_suspend_noirq,
 };
 
 static unsigned int nmk_i2c_functionality(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL | I2C_FUNC_10BIT_ADDR;
 }
 
 static const struct i2c_algorithm nmk_i2c_algo = {

@@ -1,6 +1,7 @@
 /*
  *  Copyright (C) 2009-2011 ST-Ericsson SA
  *  Copyright (C) 2009 STMicroelectronics
+ *  Copyright (C) 2012 Sony Mobile Communications AB
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -19,11 +20,11 @@
 #include <linux/debugfs.h>
 #include <linux/module.h>
 #include <linux/gpio.h>
-#include <linux/gpio/nomadik.h>
-#include <linux/mfd/ab8500/sysctrl.h>
+#include <linux/mfd/abx500/ux500_sysctrl.h>
 #include <linux/workqueue.h>
 #include <linux/regulator/consumer.h>
 
+#include <plat/gpio-nomadik.h>
 #include <plat/pincfg.h>
 
 #include <mach/hardware.h>
@@ -32,12 +33,15 @@
 #include "clock.h"
 #include "pins-db8500.h"
 #include "product.h"
+#include "prcc.h"
 
+static DEFINE_MUTEX(soc0_pll_mutex);
 static DEFINE_MUTEX(soc1_pll_mutex);
 static DEFINE_MUTEX(sysclk_mutex);
 static DEFINE_MUTEX(ab_ulpclk_mutex);
 static DEFINE_MUTEX(ab_intclk_mutex);
 static DEFINE_MUTEX(clkout0_mutex);
+static DEFINE_MUTEX(dsi_pll_mutex);
 
 static struct delayed_work sysclk_disable_work;
 
@@ -65,17 +69,7 @@ static int request_sysclk(bool enable)
 
 static int sysclk_enable(struct clk *clk)
 {
-	static bool swat_enable;
 	int r;
-
-	if (!swat_enable) {
-		r = ab8500_sysctrl_set(AB8500_SWATCTRL,
-			AB8500_SWATCTRL_SWATENABLE);
-		if (r)
-			return r;
-
-		swat_enable = true;
-	}
 
 	r = request_sysclk(true);
 	if (r)
@@ -141,8 +135,8 @@ static int ab_ulpclk_enable(struct clk *clk)
 		AB8500_SYSULPCLKCTRL1_ULPCLKREQ);
 	if (unlikely(err))
 		goto enable_error;
-	/* Unknown/undocumented PLL locking time => wait 1 ms. */
-	mdelay(1);
+	/* Undocumented PLL locking time. According to AMS team, > 8 ms */
+	usleep_range(8000, 9000);
 	return 0;
 
 enable_error:
@@ -328,7 +322,7 @@ static int clkout1_enable(struct clk *clk)
 	r = regulator_enable(clk->regulator);
 	if (r)
 		goto regulator_failed;
-	r = prcmu_config_clkout(1, PRCMU_CLKSRC_SYSCLK, 4);
+	r = prcmu_config_clkout(1, PRCMU_CLKSRC_SYSCLK, 2);
 	if (r)
 		goto config_failed;
 	r = nmk_config_pin(GPIO228_CLKOUT2, false);
@@ -395,8 +389,9 @@ static struct clkops clkout1_ops = {
 
 static struct clk soc0_pll = {
 	.name = "soc0_pll",
-	.ops = &pll_ops,
+	.ops = &prcmu_clk_ops,
 	.cg_sel = PRCMU_PLLSOC0,
+	.mutex = &soc0_pll_mutex,
 };
 
 static struct clk soc1_pll = {
@@ -528,6 +523,51 @@ static DEF_PRCMU_CLK(rngclk, PRCMU_RNGCLK, 19200000);
 static DEF_PRCMU_CLK(uiccclk, PRCMU_UICCCLK, 48000000);
 static DEF_PRCMU_CLK(timclk, PRCMU_TIMCLK, 2400000);
 static DEF_PRCMU_CLK(sdmmcclk, PRCMU_SDMMCCLK, 50000000);
+
+static struct clk dsi_pll = {
+	.name = "dsi_pll",
+	.ops = &prcmu_scalable_clk_ops,
+	.cg_sel = PRCMU_PLLDSI,
+	.parent = &hdmiclk,
+	.mutex = &dsi_pll_mutex,
+};
+
+static struct clk dsi0clk = {
+	.name = "dsi0clk",
+	.ops = &prcmu_scalable_clk_ops,
+	.cg_sel = PRCMU_DSI0CLK,
+	.parent = &dsi_pll,
+	.mutex = &dsi_pll_mutex,
+};
+
+static struct clk dsi1clk = {
+	.name = "dsi1clk",
+	.ops = &prcmu_scalable_clk_ops,
+	.cg_sel = PRCMU_DSI1CLK,
+	.parent = &dsi_pll,
+	.mutex = &dsi_pll_mutex,
+};
+
+static struct clk dsi0escclk = {
+	.name = "dsi0escclk",
+	.ops = &prcmu_scalable_clk_ops,
+	.cg_sel = PRCMU_DSI0ESCCLK,
+	.parent = &tvclk,
+};
+
+static struct clk dsi1escclk = {
+	.name = "dsi1escclk",
+	.ops = &prcmu_scalable_clk_ops,
+	.cg_sel = PRCMU_DSI1ESCCLK,
+	.parent = &tvclk,
+};
+
+static struct clk dsi2escclk = {
+	.name = "dsi2escclk",
+	.ops = &prcmu_scalable_clk_ops,
+	.cg_sel = PRCMU_DSI2ESCCLK,
+	.parent = &tvclk,
+};
 
 /* PRCC PClocks */
 
@@ -711,14 +751,13 @@ static struct clk_lookup u8500_clocks[] = {
 	CLK_LOOKUP(ulp38m4, NULL, "ulp38m4"),
 	CLK_LOOKUP(sysclk, NULL, "sysclk"),
 	CLK_LOOKUP(rtc32k, NULL, "clk32k"),
+	CLK_LOOKUP(rtc32k, "rtc-pl031", NULL),
 	CLK_LOOKUP(sysclk, "ab8500-usb.0", "sysclk"),
 	CLK_LOOKUP(sysclk, "ab8500-codec.0", "sysclk"),
 	CLK_LOOKUP(ab_ulpclk, "ab8500-codec.0", "ulpclk"),
 	CLK_LOOKUP(ab_intclk, "ab8500-codec.0", "intclk"),
 	CLK_LOOKUP(audioclk, "ab8500-codec.0", "audioclk"),
 	CLK_LOOKUP(ab_intclk, "ab8500-pwm.1", NULL),
-	CLK_LOOKUP(ab_intclk, "ab8500-pwm.2", NULL),
-	CLK_LOOKUP(ab_intclk, "ab8500-pwm.3", NULL),
 
 	CLK_LOOKUP(clkout0, "pri-cam", NULL),
 	CLK_LOOKUP(clkout1, "3-005c", NULL),
@@ -749,29 +788,44 @@ static struct clk_lookup u8500_clocks[] = {
 	CLK_LOOKUP(apetraceclk, "apetrace", NULL),
 	CLK_LOOKUP(mcdeclk, "mcde", NULL),
 	CLK_LOOKUP(mcdeclk, "mcde", "mcde"),
+	CLK_LOOKUP(mcdeclk, "dsilink.0", "dsisys"),
+	CLK_LOOKUP(mcdeclk, "dsilink.1", "dsisys"),
+	CLK_LOOKUP(mcdeclk, "dsilink.2", "dsisys"),
 	CLK_LOOKUP(ipi2cclk, "ipi2", NULL),
 	CLK_LOOKUP(dmaclk, "dma40.0", NULL),
 	CLK_LOOKUP(b2r2clk, "b2r2", NULL),
-	CLK_LOOKUP(b2r2clk, "b2r2_bus", NULL),
+	CLK_LOOKUP(b2r2clk, "b2r2_core", NULL),
 	CLK_LOOKUP(b2r2clk, "U8500-B2R2.0", NULL),
 	CLK_LOOKUP(tvclk, "tv", NULL),
 	CLK_LOOKUP(tvclk, "mcde", "tv"),
+	CLK_LOOKUP(dsi0escclk, "dsilink.0", "dsilp0"),
+	CLK_LOOKUP(dsi1escclk, "dsilink.1", "dsilp1"),
+	CLK_LOOKUP(dsi2escclk, "dsilink.2", "dsilp2"),
 	CLK_LOOKUP(msp1clk, "MSP1", NULL),
 	CLK_LOOKUP(dsialtclk, "dsialt", NULL),
 	CLK_LOOKUP(sspclk, "SSP", NULL),
 	CLK_LOOKUP(rngclk, "rngclk", NULL),
 	CLK_LOOKUP(uiccclk, "uicc", NULL),
+	CLK_LOOKUP(dsi0clk, "mcde", "dsihs0"),
+	CLK_LOOKUP(dsi1clk, "mcde", "dsihs1"),
+	CLK_LOOKUP(dsi_pll, "mcde", "dsihs2"),
+	CLK_LOOKUP(dsi0escclk, "mcde", "dsilp0"),
+	CLK_LOOKUP(dsi1escclk, "mcde", "dsilp1"),
+	CLK_LOOKUP(dsi2escclk, "mcde", "dsilp2"),
+	CLK_LOOKUP(dsi0clk, "dsilink.0", "dsihs0"),
+	CLK_LOOKUP(dsi1clk, "dsilink.1", "dsihs1"),
+	CLK_LOOKUP(dsi_pll, "dsilink.2", "dsihs2"),
 
 	/* PERIPH 1 */
 	CLK_LOOKUP(p1_msp3_clk, "msp3", NULL),
-	CLK_LOOKUP(p1_msp3_clk, "MSP_I2S.3", NULL),
+	CLK_LOOKUP(p1_msp3_clk, "ux500-msp-i2s.3", NULL),
 	CLK_LOOKUP(p1_msp3_kclk, "ab8500-codec.0", "msp3-kernel"),
 	CLK_LOOKUP(p1_pclk11, "ab8500-codec.0", "msp3-bus"),
 	CLK_LOOKUP(p1_uart0_clk, "uart0", NULL),
 	CLK_LOOKUP(p1_uart1_clk, "uart1", NULL),
 	CLK_LOOKUP(p1_i2c1_clk, "nmk-i2c.1", NULL),
 	CLK_LOOKUP(p1_msp0_clk, "msp0", NULL),
-	CLK_LOOKUP(p1_msp0_clk, "MSP_I2S.0", NULL),
+	CLK_LOOKUP(p1_msp0_clk, "ux500-msp-i2s.0", NULL),
 	CLK_LOOKUP(p1_sdi0_clk, "sdi0", NULL),
 	CLK_LOOKUP(p1_i2c2_clk, "nmk-i2c.2", NULL),
 	CLK_LOOKUP(p1_slimbus0_clk, "slimbus0", NULL),
@@ -779,7 +833,7 @@ static struct clk_lookup u8500_clocks[] = {
 	CLK_LOOKUP(p1_pclk9, "gpio.1", NULL),
 	CLK_LOOKUP(p1_pclk9, "gpioblock0", NULL),
 	CLK_LOOKUP(p1_msp1_clk, "msp1", NULL),
-	CLK_LOOKUP(p1_msp1_clk, "MSP_I2S.1", NULL),
+	CLK_LOOKUP(p1_msp1_clk, "ux500-msp-i2s.1", NULL),
 	CLK_LOOKUP(p1_msp1_kclk, "ab8500-codec.0", "msp1-kernel"),
 	CLK_LOOKUP(p1_pclk4, "ab8500-codec.0", "msp1-bus"),
 	CLK_LOOKUP(p1_pclk7, "spi3", NULL),
@@ -792,7 +846,7 @@ static struct clk_lookup u8500_clocks[] = {
 	CLK_LOOKUP(p2_pclk3, "pwl", NULL),
 	CLK_LOOKUP(p2_sdi4_clk, "sdi4", NULL),
 	CLK_LOOKUP(p2_msp2_clk, "msp2", NULL),
-	CLK_LOOKUP(p2_msp2_clk, "MSP_I2S.2", NULL),
+	CLK_LOOKUP(p2_msp2_clk, "ux500-msp-i2s.2", NULL),
 	CLK_LOOKUP(p2_sdi1_clk, "sdi1", NULL),
 	CLK_LOOKUP(p2_sdi3_clk, "sdi3", NULL),
 	CLK_LOOKUP(p2_pclk8, "spi0", NULL),
@@ -862,6 +916,10 @@ static void sysclk_init_disable(struct work_struct *not_used)
 				goto err_sysclk;
 		}
 	}
+	/* Disable SWAT  */
+	if (ab8500_sysctrl_clear(AB8500_SWATCTRL, AB8500_SWATCTRL_SWATENABLE))
+		goto err_swat;
+
 	goto unlock_and_exit;
 
 err_sysclk:
@@ -877,146 +935,173 @@ unlock_and_exit:
 }
 
 static struct clk *db8500_dbg_clks[] __initdata = {
-        /* Clock sources */
-        &soc0_pll,
-        &soc1_pll,
-        &ddr_pll,
-        &ulp38m4,
-        &sysclk,
-        &rtc32k,
-        /* PRCMU clocks */
-        &sgaclk,
-        &uartclk,
-        &msp02clk,
-        &msp1clk,
-        &i2cclk,
-        &sdmmcclk,
-        &slimclk,
-        &per1clk,
-        &per2clk,
-        &per3clk,
-        &per5clk,
-        &per6clk,
-        &per7clk,
-        &lcdclk,
-        &bmlclk,
-        &hsitxclk,
-        &hsirxclk,
-        &hdmiclk,
-        &apeatclk,
-        &apetraceclk,
-        &mcdeclk,
-        &ipi2cclk,
-        &dsialtclk,
-        &dmaclk,
-        &b2r2clk,
-        &tvclk,
-        &sspclk,
-        &rngclk,
-        &uiccclk,
-        &sysclk2,
-        &clkout0,
-        &clkout1,
-        &p1_pclk0,
-        &p1_pclk1,
-        &p1_pclk2,
-        &p1_pclk3,
-        &p1_pclk4,
-        &p1_pclk5,
-        &p1_pclk6,
-        &p1_pclk7,
-        &p1_pclk8,
-        &p1_pclk9,
-        &p1_pclk10,
-        &p1_pclk11,
-        &p2_pclk0,
-        &p2_pclk1,
-        &p2_pclk2,
-        &p2_pclk3,
-        &p2_pclk4,
-        &p2_pclk5,
-        &p2_pclk6,
-        &p2_pclk7,
-        &p2_pclk8,
-        &p2_pclk9,
-        &p2_pclk10,
-        &p2_pclk11,
-        &p3_pclk0,
-        &p3_pclk1,
-        &p3_pclk2,
-        &p3_pclk3,
-        &p3_pclk4,
-        &p3_pclk5,
-        &p3_pclk6,
-        &p3_pclk7,
-        &p3_pclk8,
-        &p5_pclk0,
-        &p5_pclk1,
-        &p6_pclk0,
-        &p6_pclk1,
-        &p6_pclk2,
-        &p6_pclk3,
-        &p6_pclk4,
-        &p6_pclk5,
-        &p6_pclk6,
-        &p6_pclk7,
+	/* Clock sources */
+	&soc0_pll,
+	&soc1_pll,
+	&ddr_pll,
+	&ulp38m4,
+	&sysclk,
+	&rtc32k,
+	/* PRCMU clocks */
+	&sgaclk,
+	&uartclk,
+	&msp02clk,
+	&msp1clk,
+	&i2cclk,
+	&sdmmcclk,
+	&slimclk,
+	&per1clk,
+	&per2clk,
+	&per3clk,
+	&per5clk,
+	&per6clk,
+	&per7clk,
+	&lcdclk,
+	&bmlclk,
+	&hsitxclk,
+	&hsirxclk,
+	&hdmiclk,
+	&apeatclk,
+	&apetraceclk,
+	&mcdeclk,
+	&ipi2cclk,
+	&dsialtclk,
+	&dsi_pll,
+	&dsi0clk,
+	&dsi1clk,
+	&dsi0escclk,
+	&dsi1escclk,
+	&dsi2escclk,
+	&dmaclk,
+	&b2r2clk,
+	&tvclk,
+	&sspclk,
+	&rngclk,
+	&uiccclk,
+	&sysclk2,
+	&clkout0,
+	&clkout1,
+	&p1_pclk0,
+	&p1_pclk1,
+	&p1_pclk2,
+	&p1_pclk3,
+	&p1_pclk4,
+	&p1_pclk5,
+	&p1_pclk6,
+	&p1_pclk7,
+	&p1_pclk8,
+	&p1_pclk9,
+	&p1_pclk10,
+	&p1_pclk11,
+	&p2_pclk0,
+	&p2_pclk1,
+	&p2_pclk2,
+	&p2_pclk3,
+	&p2_pclk4,
+	&p2_pclk5,
+	&p2_pclk6,
+	&p2_pclk7,
+	&p2_pclk8,
+	&p2_pclk9,
+	&p2_pclk10,
+	&p2_pclk11,
+	&p3_pclk0,
+	&p3_pclk1,
+	&p3_pclk2,
+	&p3_pclk3,
+	&p3_pclk4,
+	&p3_pclk5,
+	&p3_pclk6,
+	&p3_pclk7,
+	&p3_pclk8,
+	&p5_pclk0,
+	&p5_pclk1,
+	&p6_pclk0,
+	&p6_pclk1,
+	&p6_pclk2,
+	&p6_pclk3,
+	&p6_pclk4,
+	&p6_pclk5,
+	&p6_pclk6,
+	&p6_pclk7,
 };
 
 /* List of clocks which might be enabled from the bootloader */
+
+/*
+ * SOC settings enable bus + kernel clocks of all periphs without
+ * properly configuring the parents of the kernel clocks for all units.
+ * Enable and Disable them all to get them into a known and working state.
+ */
 static struct clk *loader_enabled_clk[] __initdata = {
-	&p1_uart0_clk,	/* uart0 */
-	&p1_uart1_clk,	/* uart1 */
-	&p3_uart2_clk,	/* uart2 */
-	&p1_pclk9,	/* gpioblock0 */
-	&p2_pclk11,	/* gpioblock1 */
-	&p3_pclk8,	/* gpioblock2 */
-	&p5_pclk1,	/* gpioblock3 */
-	&p6_mtu0_clk,	/* mtu0 */
-	&p6_mtu1_clk,	/* mtu1 */
-	&p3_ssp0_clk,	/* ssp0 */
-	&p3_ssp1_clk,	/* ssp1 */
-	&p2_pclk8,	/* spi0 */
-	&p2_pclk2,	/* spi1 */
-	&p2_pclk1,	/* spi2 */
-	&p1_pclk7,	/* spi3 */
-	&p1_msp0_clk,	/* msp0 */
-	&p2_msp2_clk,	/* msp2 */
-	&p3_i2c0_clk,	/* nmk-i2c.0 */
-	&p1_i2c1_clk,	/* nmk-i2c.1 */
-	&p1_i2c2_clk,	/* nmk-i2c.2 */
-	&p2_i2c3_clk,	/* nmk-i2c.3 */
-	&p1_i2c4_clk,	/* nmk-i2c.4 */
-	&bmlclk,	/* bml */
-	&dsialtclk,	/* dsialt */
-	&hsirxclk,	/* hsirx */
-	&hsitxclk,	/* hsitx */
-	&ipi2cclk,	/* ipi2 */
-	&lcdclk,	/* mcde */
-	&per7clk,	/* PERIPH7 */
-	&b2r2clk,	/* b2r2_bus */
+	/* periph 1 */
+	&p1_uart0_clk,
+	&p1_uart1_clk,
+	&p1_i2c1_clk,
+	&p1_msp0_clk,
+	&p1_msp1_clk,
+	&p1_sdi0_clk,
+	&p1_i2c2_clk,
+	&p1_pclk7,		/* spi3 */
+	&p1_pclk9,		/* gpioctrl */
+	&p1_i2c4_clk,
+
+	/* periph 2 */
+	&p2_i2c3_clk,
+	&p2_pclk1,		/* spi2 */
+	&p2_pclk2,		/* spi1 */
+	/* pwl has an unknown kclk parent, ignore it */
+	&p2_sdi4_clk,
+	&p2_msp2_clk,
+	&p2_sdi1_clk,
+	&p2_sdi3_clk,
+	&p2_pclk8,		/* spi0 */
+	&p2_ssirx_kclk,		/* hsir kernel */
+	&p2_ssitx_kclk,		/* hsit kernel */
+	&p2_pclk9,		/* hsir bus */
+	&p2_pclk10,		/* hsit bus */
+	&p2_pclk11,		/* gpioctrl */
+	/* periph 3 */
+	&p3_pclk0,		/* fsmc */
+	&p3_ssp0_clk,
+	&p3_ssp1_clk,
+	&p3_i2c0_clk,
+	&p3_sdi2_clk,
+	&p3_ske_clk,
+	&p3_uart2_clk,
+	&p3_sdi5_clk,
+	&p3_pclk8,		/* gpio */
+	/* periph 5 */
+	&p5_pclk0,		/* usb */
+	&p5_pclk1,		/* gpio */
+	/* periph 6 */
+	/* Leave out rng, cryp0, hash0 and pka */
+	&p6_pclk4,		/* hash1 */
+	&p6_pclk5,		/* cr */
+	&p6_mtu0_clk,
+	&p6_mtu1_clk,
+	/* periph 7 */
+	&per7clk,		/* PERIPH7 */
+
+	&bmlclk,		/* BML */
+	&dsialtclk,		/* dsialt */
+	&hsirxclk,		/* hsirx */
+	&hsitxclk,		/* hsitx */
+	&ipi2cclk,		/* ipi2 */
+	&lcdclk,		/* mcde */
+	&b2r2clk,		/* b2r2_bus */
 };
 
 static int __init init_clock_states(void)
 {
-	unsigned int i = 0;
-
+	unsigned int i;
 	/*
-	 * Disable peripheral clocks enabled by bootloadr/defualt
+	 * Disable peripheral clocks enabled by bootloader/default
 	 * but without drivers
 	 */
 	for (i = 0; i < ARRAY_SIZE(loader_enabled_clk); i++)
 		if (!clk_enable(loader_enabled_clk[i]))
 			clk_disable(loader_enabled_clk[i]);
-
-	/*
-	 * The following clks are shared with secure world.
-	 * Currently this leads to a limitation where we need to
-	 * enable them at all times.
-	 */
-	clk_enable(&p6_pclk1);
-	clk_enable(&p6_pclk2);
-	clk_enable(&p6_pclk3);
-	clk_enable(&p6_rng_clk);
 
 	/*
 	 * APEATCLK and APETRACECLK are enabled at boot and needed
@@ -1038,14 +1123,46 @@ static int __init init_clock_states(void)
 }
 late_initcall(init_clock_states);
 
+static void __init configure_c2_clocks(void)
+{
+	sgaclk.parent = &soc0_pll;
+	sgaclk.mutex = &soc0_pll_mutex;
+}
+
 int __init db8500_clk_init(void)
 {
+	struct prcmu_fw_version *fw_version;
 
+	/*
+	 * Disable pwl's and slimbus' bus and kernel clocks without touching
+	 * any parents. Because for slimbus, the prcmu fw has not correctly
+	 * configured the clocks at boot and for pwl the kclk parent
+	 * is unknown.
+	 */
+
+	/* slimbus' bus and kernel clocks */
+	writel(1 << 8, __io_address(U8500_CLKRST1_BASE) + PRCC_PCKDIS);
+	writel(1 << 8, __io_address(U8500_CLKRST1_BASE) + PRCC_KCKDIS);
+	/* pwl's bus and kernel clocks */
+	writel(1 << 3, __io_address(U8500_CLKRST2_BASE) + PRCC_PCKDIS);
+	writel(1 << 1, __io_address(U8500_CLKRST2_BASE) + PRCC_KCKDIS);
+
+	fw_version = prcmu_get_fw_version();
+	if (fw_version != NULL)
+		switch (fw_version->project) {
+		case PRCMU_FW_PROJECT_U8500_C2:
+		case PRCMU_FW_PROJECT_U9500_C2:
+		case PRCMU_FW_PROJECT_U8520:
+		case PRCMU_FW_PROJECT_U8420:
+			configure_c2_clocks();
+			break;
+		default:
+			break;
+		}
 	clkdev_add_table(u8500_v2_sysclks,
 		      ARRAY_SIZE(u8500_v2_sysclks));
 	clkdev_add_table(u8500_clocks,
 		      ARRAY_SIZE(u8500_clocks));
-
 	return 0;
 }
 

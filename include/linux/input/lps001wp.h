@@ -35,7 +35,7 @@
 #define	LPS001WP_PRS_I2C_SADROOT	0x2E
 #define	LPS001WP_PRS_I2C_SAD_L		((LPS001WP_PRS_I2C_SADROOT<<1)|SAD0L)
 #define	LPS001WP_PRS_I2C_SAD_H		((LPS001WP_PRS_I2C_SADROOT<<1)|SAD0H)
-#define	LPS001WP_PRS_DEV_NAME		"lps001wp_prs_sysfs"
+#define	LPS001WP_PRS_DEV_NAME		"lps001wp_prs"
 
 /* input define mappings */
 #define ABS_PR		ABS_PRESSURE
@@ -63,6 +63,15 @@
 
 
 #ifdef __KERNEL__
+/**
+ * struct lps001wp_prs_platform_data - platform datastructure for lps001wp_prs
+ * @poll_interval: maximum polling interval
+ * @min_interval:  minimum polling interval
+ * @init: pointer to init function
+ * @exit: pointer to deinitialisation function
+ * @power_on: pointer to device enable function
+ * @power_off: pointer to device disable function
+ */
 struct lps001wp_prs_platform_data {
 
 	int poll_interval;
@@ -70,6 +79,8 @@ struct lps001wp_prs_platform_data {
 
 	int (*init)(void);
 	void (*exit)(void);
+	int (*power_on)(void);
+	int (*power_off)(void);
 
 };
 

@@ -428,6 +428,8 @@ static int tc3589x_suspend(struct device *dev)
 	int i, j;
 	int val;
 
+	disable_irq(client->irq);
+
 	/* Put the system to sleep mode */
 	if (!device_may_wakeup(&client->dev)) {
 		for (i = 0; i < ARRAY_SIZE(sleep_regs); i++) {
@@ -495,6 +497,9 @@ static int tc3589x_resume(struct device *dev)
 	} else {
 		disable_irq_wake(client->irq);
 	}
+
+	enable_irq(client->irq);
+
 out:
 	return ret;
 }

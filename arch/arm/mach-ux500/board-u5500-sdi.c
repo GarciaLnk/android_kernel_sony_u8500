@@ -51,6 +51,7 @@ static struct mmci_platform_data u5500_sdi0_data = {
 	.capabilities	= MMC_CAP_4_BIT_DATA |
 				MMC_CAP_8_BIT_DATA |
 				MMC_CAP_MMC_HIGHSPEED,
+	.capabilities2	= MMC_CAP2_NO_SLEEP_CMD,
 	.gpio_cd	= -1,
 	.gpio_wp	= -1,
 #ifdef CONFIG_STE_DMA40
@@ -66,8 +67,14 @@ static struct mmci_platform_data u5500_sdi0_data = {
 
 static int u5500_sdi1_ios_handler(struct device *dev, struct mmc_ios *ios)
 {
+	static int power_mode = -1;
+
+	if (power_mode == ios->power_mode)
+		return 0;
+
 	switch (ios->power_mode) {
 	case MMC_POWER_UP:
+		break;
 	case MMC_POWER_ON:
 		/*
 		 * Level shifter voltage should depend on vdd to when deciding
@@ -85,14 +92,15 @@ static int u5500_sdi1_ios_handler(struct device *dev, struct mmc_ios *ios)
 		break;
 	}
 
+	power_mode = ios->power_mode;
 	return 0;
 }
 
-#ifdef SD_WORKAROUND
+#ifdef CONFIG_STE_DMA40
 static struct stedma40_chan_cfg sdi1_dma_cfg_rx = {
 	.mode = STEDMA40_MODE_LOGICAL,
 	.dir = STEDMA40_PERIPH_TO_MEM,
-	.src_dev_type = DB5500_DMA_DEV25_SDMMC1_RX,
+	.src_dev_type = DB5500_DMA_DEV34_SDMMC1_RX,
 	.dst_dev_type = STEDMA40_DEV_DST_MEMORY,
 	.src_info.data_width = STEDMA40_WORD_WIDTH,
 	.dst_info.data_width = STEDMA40_WORD_WIDTH,
@@ -102,11 +110,12 @@ static struct stedma40_chan_cfg sdi1_dma_cfg_tx = {
 	.mode = STEDMA40_MODE_LOGICAL,
 	.dir = STEDMA40_MEM_TO_PERIPH,
 	.src_dev_type = STEDMA40_DEV_SRC_MEMORY,
-	.dst_dev_type = DB5500_DMA_DEV25_SDMMC1_TX,
+	.dst_dev_type = DB5500_DMA_DEV34_SDMMC1_TX,
 	.src_info.data_width = STEDMA40_WORD_WIDTH,
 	.dst_info.data_width = STEDMA40_WORD_WIDTH,
 };
 #endif
+
 static struct mmci_platform_data u5500_sdi1_data = {
 	.ios_handler    = u5500_sdi1_ios_handler,
 	.ocr_mask       = MMC_VDD_29_30,
@@ -117,12 +126,10 @@ static struct mmci_platform_data u5500_sdi1_data = {
 	.gpio_cd        = GPIO_SDMMC_CD,
 	.gpio_wp        = -1,
 	.cd_invert	= true,
-#ifdef SD_WORKAROUND
 #ifdef CONFIG_STE_DMA40
 	.dma_filter	= stedma40_filter,
 	.dma_rx_param	= &sdi1_dma_cfg_rx,
 	.dma_tx_param	= &sdi1_dma_cfg_tx,
-#endif
 #endif
 };
 
@@ -154,6 +161,7 @@ static struct mmci_platform_data u5500_sdi2_data = {
 	.capabilities	= MMC_CAP_4_BIT_DATA |
 				MMC_CAP_8_BIT_DATA |
 				MMC_CAP_MMC_HIGHSPEED,
+	.capabilities2	= MMC_CAP2_NO_SLEEP_CMD,
 	.gpio_cd	= -1,
 	.gpio_wp	= -1,
 #ifdef CONFIG_STE_DMA40
@@ -225,33 +233,16 @@ static void sdi1_configure(void)
 	gpio_direction_output(pin[1], 0);
 }
 
-#define SDI_PID_V1 0x00480180
-#define SDI_PID_V2 0x10480180
-#define BACKUPRAM_ROM_DEBUG_ADDR 0xFFC
-#define MMC_BLOCK_ID	0x20
 void __init u5500_sdi_init(void)
 {
-	u32 periphid = 0;
-	int mmc_blk = 0;
+	u32 periphid = 0x10480180;
 
-	if (cpu_is_u5500v1())
-		periphid = SDI_PID_V1;
-	else
-		periphid = SDI_PID_V2;
-
-	if (cpu_is_u5500v2())
-		/*
-		 * Fix me in 5500 v2.1
-		 * Dynamic detection of booting device by reading
-		 * ROM debug register from BACKUP RAM and register the
-		 * corresponding EMMC.
-		 * This is done due to wrong configuration of MMC0 clock
-		 * in ROM code for u5500 v2.
-		 */
-		mmc_blk = readl(__io_address(U5500_BACKUPRAM1_BASE) +
-					BACKUPRAM_ROM_DEBUG_ADDR);
-
-	if (mmc_blk & MMC_BLOCK_ID)
+	/*
+	 * Dynamic detection of booting device by reading
+	 * ROM debug register from BACKUP RAM and register the
+	 * corresponding EMMC.
+	 */
+	if (u5500_get_boot_mmc() == 2)
 		db5500_add_sdi2(&u5500_sdi2_data, periphid);
 	else
 		db5500_add_sdi0(&u5500_sdi0_data, periphid);

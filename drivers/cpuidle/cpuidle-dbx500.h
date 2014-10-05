@@ -1,13 +1,13 @@
 /*
- * Copyright (C) ST-Ericsson SA 2010
+ * Copyright (C) ST-Ericsson SA 2010-2012
  * Author: Rickard Andersson <rickard.andersson@stericsson.com> for
  *         ST-Ericsson. Loosly based on cpuidle.c by Sundar Iyer.
  * License terms: GNU General Public License (GPL) version 2
  *
  */
 
-#ifndef __CPUIDLE_H
-#define __CPUIDLE_H
+#ifndef __DBX500_CPUIDLE_H
+#define __DBX500_CPUIDLE_H
 
 #include <linux/cpuidle.h>
 

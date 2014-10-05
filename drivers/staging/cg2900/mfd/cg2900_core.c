@@ -55,7 +55,9 @@
  */
 #define CHIP_READY_TIMEOUT		(100)	/* ms */
 #define REVISION_READOUT_TIMEOUT	(500)	/* ms */
-#define SLEEP_TIMEOUT_MS		(10000)	/* ms */
+#define SLEEP_TIMEOUT_MS		(150)	/* ms */
+/* Timeout value to check CTS line for low power */
+#define READY_FOR_SLEEP_TIMEOUT_MS	(50)	/* ms */
 
 /**
  * enum boot_state - BOOT-state for CG2900 Core.
@@ -381,7 +383,8 @@ static void work_hw_registered(struct work_struct *work)
 		dev_err(dev->dev,
 			"Could not read out revision from the chip\n");
 		info->boot_state = BOOT_FAILED;
-		dev->t_cb.set_chip_power(dev, false);
+		if (dev->t_cb.set_chip_power)
+			dev->t_cb.set_chip_power(dev, false);
 		return;
 	}
 
@@ -595,16 +598,21 @@ EXPORT_SYMBOL_GPL(cg2900_deregister_trans_driver);
 
 /**
  * cg2900_get_sleep_timeout() - Return sleep timeout in jiffies.
+ * @check_sleep:	If we want to check whether chip has gone
+ * to sleep then use lesser timeout value
  *
  * Returns:
  *   Sleep timeout in jiffies. 0 means that sleep timeout shall not be used.
  */
-unsigned long cg2900_get_sleep_timeout(void)
+unsigned long cg2900_get_sleep_timeout(bool check_sleep)
 {
 	if (!sleep_timeout_ms)
 		return 0;
 
-	return msecs_to_jiffies(sleep_timeout_ms);
+	if (check_sleep)
+		return msecs_to_jiffies(READY_FOR_SLEEP_TIMEOUT_MS);
+	else
+		return msecs_to_jiffies(sleep_timeout_ms);
 }
 EXPORT_SYMBOL_GPL(cg2900_get_sleep_timeout);
 

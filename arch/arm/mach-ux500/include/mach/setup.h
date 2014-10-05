@@ -22,6 +22,10 @@ extern void __init ux500_init_devices(void);
 extern void __init u5500_init_devices(void);
 extern void __init u8500_init_devices(void);
 
+#ifdef CONFIG_CACHE_L2X0
+extern int __init ux500_l2x0_init(void);
+#endif
+
 extern void __init ux500_init_irq(void);
 
 extern void __init u5500_sdi_init(void);
@@ -50,6 +54,13 @@ extern struct sys_timer ux500_timer;
 	.pfn		= __phys_to_pfn(x),	\
 	.length		= sz,			\
 	.type		= MT_MEMORY,		\
+}
+
+#define __MEM_DEV_DESC_DB9540_ROM(x, sz) {		\
+	.virtual	= IO_ADDRESS_DB9540_ROM(x),	\
+	.pfn		= __phys_to_pfn(x),		\
+	.length		= sz,				\
+	.type		= MT_MEMORY,			\
 }
 
 #endif /*  __ASM_ARCH_SETUP_H */

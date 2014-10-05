@@ -1,5 +1,7 @@
 /*
  * Copyright (C) ST-Ericsson SA 2010
+ * Copyright (C) 2012 Sony Mobile Communications AB
+ *
  * Author: Pankaj Chauhan <pankaj.chauhan@stericsson.com> for ST-Ericsson.
  * License terms: GNU General Public License (GPL), version 2.
  */
@@ -16,9 +18,11 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
+#include <linux/mutex.h>
 #include <linux/workqueue.h>
 #include <linux/mfd/dbx500-prcmu.h>
-#include "mmio.h"
+#include <linux/mmio.h>
+#include <linux/ratelimit.h>
 
 #define ISP_REGION_IO				(0xE0000000)
 #define SIA_ISP_REG_ADDR			(0x521E4)
@@ -46,8 +50,6 @@
 #define XP70_ADDR_MASK			(0x00FFFFFF)
 
 #define CLOCK_ENABLE_DELAY		(0x2)
-
-#define MAX_PRCMU_QOS_APP		(0x64)
 
 #define ISP_WRITE_DATA_SIZE		(0x4)
 
@@ -103,6 +105,7 @@ struct mmio_info {
 	struct mmio_trace *trace_buffer;
 	struct delayed_work trace_work;
 	int trace_allowed;
+	struct mutex lock;
 };
 
 /*
@@ -110,6 +113,13 @@ struct mmio_info {
  * Declare it here so no code above can use it directly.
  */
 static struct mmio_info *info;
+
+/*
+ * static 1K buffer to do I/O write instead of kmalloc,
+ * no locking, caller can not have parallel use of
+ * MMIO_CAM_LOAD_XP70_FW and MMIO_CAM_ISP_WRITE ioctl's
+ */
+static u16 copybuff[512];
 
 /*
  * This function converts a given logical memory region size
@@ -232,86 +242,88 @@ static u32 t1_to_arm(u32 t1_addr, void __iomem *smia_base_address,
 	return SIA_ISP_MEM + (t1_addr & FW_TO_HOST_ADDR_MASK);
 }
 
-static int copy_user_buffer(void __iomem **dest_buf,
-			    void __iomem *src_buf, u32 size)
+static int write_user_buffer(struct mmio_info *info, u32 ioaddr,
+					void __iomem *src_buf, u32 size)
 {
+	u32 i, count, offset = 0;
+	u32 itval = 0;
+	u16 mem_page = 0;
 	int err = 0;
 
-	if (!src_buf)
+	if (!src_buf || !ioaddr) {
+		dev_err(info->dev, "invalid parameters: %p, 0x%x",
+				src_buf, ioaddr);
+
 		return -EINVAL;
-
-	*dest_buf = kmalloc(size, GFP_KERNEL);
-
-	if (!dest_buf) {
-		err = -ENOMEM;
-		goto nomem;
 	}
 
-	if (copy_from_user(*dest_buf, src_buf, size)) {
-		err = -EFAULT;
-		goto cp_failed;
+	for (offset = 0; offset < size; ) {
+
+		if ((size - offset) > sizeof(copybuff))
+			count = sizeof(copybuff);
+		else
+			count = (size - offset);
+
+		if (copy_from_user(copybuff, src_buf + offset, count)) {
+
+			dev_err(info->dev, "failed to copy user buffer"
+				" %p at offset=%d, count=%d\n",
+				src_buf, offset, count);
+
+			err = -EFAULT;
+			goto cp_failed;
+		}
+
+		for (i = 0; i < count; ) {
+			itval = t1_to_arm(ioaddr + offset,
+					info->siabase, &mem_page);
+			itval = ((u32) info->siabase) + itval;
+
+			writew(copybuff[i/2], itval);
+			offset += 2;
+			i = i + 2;
+		}
 	}
 
-	return err;
 cp_failed:
-	kfree(*dest_buf);
-nomem:
 	return err;
 }
+
 static int mmio_load_xp70_fw(struct mmio_info *info,
 			     struct xp70_fw_t *xp70_fw)
 {
-	u32 i = 0;
-	u32 offset = 0;
 	u32 itval = 0;
-	u16 mem_page = 0;
-	void __iomem *addr_split = NULL;
-	void __iomem *addr_data = NULL;
 	int err = 0;
 
 	if (xp70_fw->size_split != 0) {
-		err = copy_user_buffer(&addr_split, xp70_fw->addr_split,
-				       xp70_fw->size_split);
-
-		if (err)
+		/* if buff size is not as expected */
+		if (xp70_fw->size_split != L2_PSRAM_MEM_SIZE) {
+			dev_err(info->dev, "xp70_fw_t.size_split must be "
+				"%d bytes!\n", L2_PSRAM_MEM_SIZE);
+			err = -EINVAL;
 			goto err_exit;
+		}
 
 		writel(0x0, info->siabase + SIA_ISP_REG_ADDR);
 
 		/* Put the low 64k IRP firmware in ISP MCU L2 PSRAM */
-		for (i = PICTOR_IN_XP70_L2_MEM_BASE_ADDR;
-				i < (PICTOR_IN_XP70_L2_MEM_BASE_ADDR +
-				     L2_PSRAM_MEM_SIZE); i = i + 2) {
-			itval = t1_to_arm(i, info->siabase, &mem_page);
-			itval = ((u32) info->siabase) + itval;
-			/* Copy fw in L2 */
-			writew((*((u16 *) addr_split + offset++)), itval);
-		}
-
-		kfree(addr_split);
+		err = write_user_buffer(info, PICTOR_IN_XP70_L2_MEM_BASE_ADDR,
+					xp70_fw->addr_split,
+					L2_PSRAM_MEM_SIZE);
+		if (err)
+			goto err_exit;
 	}
 
 	if (xp70_fw->size_data != 0) {
-		mem_page = 0;
-		offset = 0;
-		err = copy_user_buffer(&addr_data, xp70_fw->addr_data,
-				       xp70_fw->size_data);
-
-		if (err)
-			goto err_exit;
 
 		writel(0x0, info->siabase + SIA_ISP_REG_ADDR);
 
-		for (i = PICTOR_IN_XP70_TCDM_MEM_BASE_ADDR;
-				i < (PICTOR_IN_XP70_TCDM_MEM_BASE_ADDR +
-				     (xp70_fw->size_data)); i = i + 2) {
-			itval = t1_to_arm(i, info->siabase, &mem_page);
-			itval = ((u32) info->siabase) + itval;
-			/* Copy fw data in TCDM */
-			writew((*((u16 *) addr_data + offset++)), itval);
-		}
+		err = write_user_buffer(info, PICTOR_IN_XP70_TCDM_MEM_BASE_ADDR,
+					xp70_fw->addr_data,
+					xp70_fw->size_data);
 
-		kfree(addr_data);
+		if (err)
+			goto err_exit;
 	}
 
 	if (xp70_fw->size_esram_ext != 0) {
@@ -431,16 +443,26 @@ static int mmio_cam_initboard(struct mmio_info *info)
 {
 	int err = 0;
 	err = prcmu_qos_add_requirement(PRCMU_QOS_APE_OPP, MMIO_NAME,
-					MAX_PRCMU_QOS_APP);
+					PRCMU_QOS_APE_OPP_MAX);
 
 	if (err) {
-		dev_err(info->dev, "Error adding PRCMU QoS requirement %d\n",
+		dev_err(info->dev, "Error adding PRCMU QoS APE OPP requirement %d\n",
+			err);
+		goto out;
+	}
+
+	err = prcmu_qos_add_requirement(PRCMU_QOS_DDR_OPP, MMIO_NAME,
+					PRCMU_QOS_DDR_OPP_MAX);
+
+	if (err) {
+		dev_err(info->dev, "Error adding PRCMU QoS DDR OPP requirement %d\n",
 			err);
 		goto out;
 	}
 
 	/* Configure xshutdown to be disabled by default */
 	err = mmio_enable_xshutdown_from_host(info, 0);
+	dev_dbg(info->dev, "%s: Main cam XRST controlled by ISP!\n", __func__);
 
 	if (err)
 		goto out;
@@ -454,6 +476,7 @@ out:
 static int mmio_cam_desinitboard(struct mmio_info *info)
 {
 	prcmu_qos_remove_requirement(PRCMU_QOS_APE_OPP, MMIO_NAME);
+	prcmu_qos_remove_requirement(PRCMU_QOS_DDR_OPP, MMIO_NAME);
 	return 0;
 }
 
@@ -461,29 +484,51 @@ static int mmio_isp_write(struct mmio_info *info,
 			  struct isp_write_t *isp_write_p)
 {
 	int err = 0, i;
-	void __iomem *data = NULL;
+	u32 __iomem *data = NULL;
 	void __iomem *addr = NULL;
 	u16 mem_page = 0;
+	u32 size, count, offset;
 
 	if (!isp_write_p->count) {
 		dev_warn(info->dev, "no data to write to isp\n");
 		return -EINVAL;
 	}
 
-	err = copy_user_buffer(&data, isp_write_p->data,
-			       isp_write_p->count * ISP_WRITE_DATA_SIZE);
+	size = isp_write_p->count * ISP_WRITE_DATA_SIZE;
+	data = (u32 *) copybuff;
 
-	if (err)
-		goto out;
+	for (offset = 0; offset < size; ) {
 
-	for (i = 0; i < isp_write_p->count; i++) {
-		addr = (void *)(info->siabase + t1_to_arm(isp_write_p->t1_dest
-				+ ISP_WRITE_DATA_SIZE * i,
-				info->siabase, &mem_page));
-		*((u32 *)addr) = *((u32 *)data + i);
+		/* 'offset' and 'size' and 'count' is in bytes */
+		if ((size - offset) > sizeof(copybuff))
+			count = sizeof(copybuff);
+		else
+			count = (size - offset);
+
+		if (copy_from_user(data, ((u8 *)isp_write_p->data) + offset,
+		    count)) {
+			dev_err(info->dev, "failed to copy user buffer"
+				" %p at offset=%d, count=%d\n",
+				isp_write_p->data, offset, count);
+
+			err = -EFAULT;
+			goto out;
+		}
+
+		/* index 'i' and 'offset' is in bytes */
+		for (i = 0; i < count; ) {
+			addr = (void *)(info->siabase + t1_to_arm(
+					isp_write_p->t1_dest
+					+ offset,
+					info->siabase, &mem_page));
+
+			*((u32 *)addr) = data[i/ISP_WRITE_DATA_SIZE];
+
+			offset += ISP_WRITE_DATA_SIZE;
+			i = i + ISP_WRITE_DATA_SIZE;
+		}
 	}
 
-	kfree(data);
 out:
 	return err;
 }
@@ -507,6 +552,7 @@ static int mmio_set_trace_buffer(struct mmio_info *info,
 		goto out;
 	}
 
+	mutex_lock(&info->lock);
 	if (info->trace_buffer) {
 		dev_info(info->dev, "unmap old buffer");
 		iounmap(info->trace_buffer);
@@ -518,7 +564,7 @@ static int mmio_set_trace_buffer(struct mmio_info *info,
 	if (!info->trace_buffer) {
 		dev_err(info->dev, "failed to map trace buffer\n");
 		ret = -ENOMEM;
-		goto out;
+		goto out_unlock;
 	}
 
 	dev_info(info->dev, "xp70 overwrite_cnt=%d (0x%x) blk_id=%d (0x%x)",
@@ -544,6 +590,8 @@ static int mmio_set_trace_buffer(struct mmio_info *info,
 				   msecs_to_jiffies(XP70_TIMEOUT_MSEC)))
 		dev_err(info->dev, "failed to schedule work\n");
 
+out_unlock:
+	mutex_unlock(&info->lock);
 out:
 	return ret;
 }
@@ -763,12 +811,13 @@ static int mmio_release(struct inode *node, struct file *filp)
 	info->pdata->config_xshutdown_pins(info->pdata, MMIO_DISABLE_XSHUTDOWN,
 					   -1);
 
+	mutex_lock(&info->lock);
 	if (info->trace_buffer) {
+		flush_delayed_work_sync(&info->trace_work);
 		iounmap(info->trace_buffer);
 		info->trace_buffer = NULL;
 	}
-
-	flush_delayed_work(&info->trace_work);
+	mutex_unlock(&info->lock);
 	return 0;
 }
 
@@ -794,6 +843,7 @@ static ssize_t xp70_data_show(struct device *device,
 	int size = 0;
 	int count = 0;
 	int first_index;
+	mutex_lock(&info->lock);
 	first_index = info->trace_status.prev_block_id + 1;
 
 	if (!info->trace_buffer || info->trace_buffer->block_id ==
@@ -859,6 +909,7 @@ static ssize_t xp70_data_show(struct device *device,
 	}
 
 out_unlock:
+	mutex_unlock(&info->lock);
 	return size;
 }
 
@@ -903,6 +954,7 @@ static void xp70_buffer_wqtask(struct work_struct *data)
 	int i;
 	int first_index = info->trace_status.prev_block_id + 1;
 	int count;
+	mutex_lock(&info->lock);
 
 	if (!info->trace_buffer)
 		goto out_err;
@@ -929,8 +981,7 @@ static void xp70_buffer_wqtask(struct work_struct *data)
 		first_index = info->trace_buffer->block_id + 1;
 		count = XP70_NB_BLOCK;
 
-		if (printk_ratelimit())
-			dev_info(info->dev, "XP70 trace overflow\n");
+		pr_info_ratelimited("XP70 trace overflow\n");
 	} else if (info->trace_buffer->block_id
 			>= info->trace_status.prev_block_id) {
 		count = info->trace_buffer->block_id -
@@ -945,8 +996,7 @@ static void xp70_buffer_wqtask(struct work_struct *data)
 
 	for (i = first_index; count; count--) {
 		if (i < 0 || i >= XP70_NB_BLOCK || count > XP70_NB_BLOCK) {
-			if (printk_ratelimit())
-				dev_info(info->dev, "trace index out-of-bounds"
+				pr_info_ratelimited("trace index out-of-bounds"
 					 "i=%d count=%d XP70_NB_BLOCK=%d\n",
 					 i, count, XP70_NB_BLOCK);
 
@@ -978,13 +1028,13 @@ static void xp70_buffer_wqtask(struct work_struct *data)
 		info->trace_buffer->overwrite_count;
 	info->trace_status.prev_block_id = info->trace_buffer->block_id;
 out:
-
 	/* Schedule work */
 	if (!schedule_delayed_work(&info->trace_work,
 				   msecs_to_jiffies(XP70_TIMEOUT_MSEC)))
 		dev_info(info->dev, "failed to schedule work\n");
 
 out_err:
+	mutex_unlock(&info->lock);
 	return;
 }
 
@@ -1023,6 +1073,7 @@ static int __devinit mmio_probe(struct platform_device *pdev)
 	info->misc_dev.name = MMIO_NAME;
 	info->misc_dev.fops = &mmio_fops;
 	info->misc_dev.parent = pdev->dev.parent;
+	mutex_init(&info->lock);
 	info->xshutdown_enabled = 0;
 	info->xshutdown_is_active_high = 0;
 	info->trace_allowed = 0;
@@ -1119,6 +1170,7 @@ static int __devexit mmio_remove(struct platform_device *pdev)
 	info->pdata->platform_exit(info->pdata);
 	iounmap(info->siabase);
 	iounmap(info->crbase);
+	mutex_destroy(&info->lock);
 	kfree(info);
 	info = NULL;
 	return 0;

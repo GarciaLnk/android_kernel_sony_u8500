@@ -18,6 +18,7 @@
 #include <mach/devices.h>
 
 #include <video/mcde.h>
+#include <video/nova_dsilink.h>
 #include <mach/db5500-regs.h>
 
 #include <linux/mfd/dbx500-prcmu.h>
@@ -54,7 +55,7 @@
 	{								\
 		.name		= "gpio",				\
 		.id		= block,				\
-		.num_resources 	= 3,					\
+		.num_resources	= 3,					\
 		.resource	= &u5500_gpio_resources[block * 3],	\
 		.dev = {						\
 			.platform_data = &u5500_gpio_data[block],	\
@@ -159,6 +160,36 @@ struct platform_device u5500_pwm3_device = {
 	.num_resources = ARRAY_SIZE(u5500_pwm3_resource),
 };
 
+static struct resource u5500_dsilink_resources[] = {
+	[0] = {
+		.name  = DSI_IO_AREA,
+		.start = U5500_DSI_LINK1_BASE,
+		.end   = U5500_DSI_LINK1_BASE + U5500_DSI_LINK_SIZE - 1,
+		.flags = IORESOURCE_MEM,
+	},
+	[1] = {
+		.name  = DSI_IO_AREA,
+		.start = U5500_DSI_LINK2_BASE,
+		.end   = U5500_DSI_LINK2_BASE + U5500_DSI_LINK_SIZE - 1,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
+struct platform_device u5500_dsilink_device[] = {
+	[0] = {
+		.name = "dsilink",
+		.id = 0,
+		.num_resources = 1,
+		.resource = &u5500_dsilink_resources[0],
+	},
+	[1] = {
+		.name = "dsilink",
+		.id = 1,
+		.num_resources = 1,
+		.resource = &u5500_dsilink_resources[1],
+	},
+};
+
 static struct resource mcde_resources[] = {
 	[0] = {
 		.name  = MCDE_IO_AREA,
@@ -202,10 +233,7 @@ static int mcde_platform_set_display_clocks(void)
 }
 
 static struct mcde_platform_data mcde_pdata = {
-	.num_dsilinks = 2,
 	.syncmux = 0x01,
-	.num_channels = 2,
-	.num_overlays = 3,
 	.regulator_mcde_epod_id = "vsupply",
 	.regulator_esram_epod_id = "v-esram12",
 #ifdef CONFIG_MCDE_DISPLAY_DSI
@@ -216,9 +244,13 @@ static struct mcde_platform_data mcde_pdata = {
 	.platform_set_clocks = mcde_platform_set_display_clocks,
 	.platform_enable_dsipll = mcde_platform_enable_dsipll,
 	.platform_disable_dsipll = mcde_platform_disable_dsipll,
+	/* TODO: Remove rotation buffers once ESRAM driver is completed */
+	.rotbuf1 = U8500_ESRAM_BASE + 0x20000 * 4 + 0x2000,
+	.rotbuf2 = U8500_ESRAM_BASE + 0x20000 * 4 + 0x11000,
+	.rotbufsize = 0xF000,
 };
 
-struct platform_device u5500_mcde_device = {
+struct platform_device ux500_mcde_device = {
 	.name = "mcde",
 	.id = -1,
 	.dev = {
@@ -226,6 +258,20 @@ struct platform_device u5500_mcde_device = {
 	},
 	.num_resources = ARRAY_SIZE(mcde_resources),
 	.resource = mcde_resources,
+};
+
+struct platform_device ux500_b2r2_blt_device = {
+	.name	= "b2r2_blt",
+	.id	= 0,
+	.dev	= {
+		.init_name = "b2r2_blt_init",
+		.coherent_dma_mask = ~0,
+	},
+};
+
+static struct b2r2_platform_data b2r2_platform_data = {
+	.regulator_id = "vsupply",
+	.clock_id = "b2r2",
 };
 
 static struct resource b2r2_resources[] = {
@@ -243,34 +289,15 @@ static struct resource b2r2_resources[] = {
 	},
 };
 
-struct platform_device u5500_b2r2_device = {
+struct platform_device ux500_b2r2_device = {
 	.name	= "b2r2",
 	.id	= 0,
 	.dev	= {
 		.init_name = "b2r2_bus",
+		.platform_data = &b2r2_platform_data,
 		.coherent_dma_mask = ~0,
 	},
 	.num_resources	= ARRAY_SIZE(b2r2_resources),
 	.resource	= b2r2_resources,
 };
 
-static struct resource u5500_thsens_resources[] = {
-	[0] = {
-		.name	= "IRQ_HOTMON_LOW",
-		.start  = IRQ_DB5500_PRCMU_TEMP_SENSOR_LOW,
-		.end    = IRQ_DB5500_PRCMU_TEMP_SENSOR_LOW,
-		.flags  = IORESOURCE_IRQ,
-	},
-	[1] = {
-		.name	= "IRQ_HOTMON_HIGH",
-		.start  = IRQ_DB5500_PRCMU_TEMP_SENSOR_HIGH,
-		.end    = IRQ_DB5500_PRCMU_TEMP_SENSOR_HIGH,
-		.flags  = IORESOURCE_IRQ,
-	},
-};
-
-struct platform_device u5500_thsens_device = {
-	.name           = "db5500_temp",
-	.resource       = u5500_thsens_resources,
-	.num_resources  = ARRAY_SIZE(u5500_thsens_resources),
-};

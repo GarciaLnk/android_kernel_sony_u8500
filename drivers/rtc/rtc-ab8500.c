@@ -46,6 +46,10 @@
 #define COUNTS_PER_SEC			(0xF000 / 60)
 #define AB8500_RTC_EPOCH		2000
 
+static struct rtc_device *ab8500_rtc;
+static struct delayed_work sync_work;
+static u32 resumed;
+
 static const u8 ab8500_rtc_time_regs[] = {
 	AB8500_RTC_WATCH_TMIN_HI_REG, AB8500_RTC_WATCH_TMIN_MID_REG,
 	AB8500_RTC_WATCH_TMIN_LOW_REG, AB8500_RTC_WATCH_TSECHI_REG,
@@ -88,22 +92,17 @@ static int ab8500_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	if (retval < 0)
 		return retval;
 
-	/* Early AB8500 chips will not clear the rtc read request bit */
-	if (abx500_get_chip_id(dev) == 0) {
+	/* Wait for some cycles after enabling the rtc read in ab8500 */
+	while (time_before(jiffies, timeout)) {
+		retval = abx500_get_register_interruptible(dev,
+			AB8500_RTC, AB8500_RTC_READ_REQ_REG, &value);
+		if (retval < 0)
+			return retval;
+
+		if (!(value & RTC_READ_REQUEST))
+			break;
+
 		mdelay(1);
-	} else {
-		/* Wait for some cycles after enabling the rtc read in ab8500 */
-		while (time_before(jiffies, timeout)) {
-			retval = abx500_get_register_interruptible(dev,
-				AB8500_RTC, AB8500_RTC_READ_REQ_REG, &value);
-			if (retval < 0)
-				return retval;
-
-			if (!(value & RTC_READ_REQUEST))
-				break;
-
-			mdelay(1);
-		}
 	}
 
 	/* Read the Watchtime registers */
@@ -252,7 +251,8 @@ static int ab8500_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alarm)
 	 * Needed due to Android believes all hw have a wake-up resolution
 	 * in seconds.
 	 */
-	mins++;
+	if (secs%60)
+		mins++;
 #endif
 	buf[2] = mins & 0xFF;
 	buf[1] = (mins >> 8) & 0xFF;
@@ -388,6 +388,44 @@ static const struct rtc_class_ops ab8500_rtc_ops = {
 	.alarm_irq_enable	= ab8500_rtc_irq_enable,
 };
 
+/* make it possible to update a 2nd rtc */
+void __attribute__((weak)) rtc_hctohc(struct rtc_time tm)
+{
+}
+
+static void ab8500_rtc_sync_work(struct work_struct *work)
+{
+	struct rtc_time r;
+	unsigned long t;
+	struct timespec ts, sys_ts;
+	struct timex adjust;
+
+	ab8500_rtc_read_time(ab8500_rtc->dev.parent, &r);
+	rtc_tm_to_time(&r, &t);
+	set_normalized_timespec(&ts, (time_t) t, 0);
+	getnstimeofday(&sys_ts);
+	/*
+	 * AB8500 RTC is more accurate then u8500 system clock.
+	 * Compensate for drift here but not if time differs more then 60s nor
+	 * when the drift is less than a second.
+	 * If diff is more then 60s then system time is considered changed
+	 * but not the rtc time and they should be kept different.
+	 */
+	if ((abs(ts.tv_sec - sys_ts.tv_sec) < 60) &&
+		(ts.tv_sec != sys_ts.tv_sec) && !resumed) {
+		adjust.offset = (ts.tv_sec - sys_ts.tv_sec) * 1000000;
+		adjust.modes = ADJ_OFFSET_SINGLESHOT;
+		do_adjtimex(&adjust);
+		rtc_hctohc(r);
+	} else if (resumed) {
+		do_settimeofday(&ts);
+		resumed = 0;
+		rtc_hctohc(r);
+	}
+	/* Once every minute to match calibration */
+	schedule_delayed_work(&sync_work, 60 * HZ);
+}
+
 static int __devinit ab8500_rtc_probe(struct platform_device *pdev)
 {
 	int err;
@@ -445,6 +483,10 @@ static int __devinit ab8500_rtc_probe(struct platform_device *pdev)
 		return err;
 	}
 
+	ab8500_rtc = rtc;
+	INIT_DELAYED_WORK_DEFERRABLE(&sync_work, ab8500_rtc_sync_work);
+	/* Once every minute to match calibration */
+	schedule_delayed_work(&sync_work, 60 * HZ);
 	return 0;
 }
 
@@ -462,6 +504,25 @@ static int __devexit ab8500_rtc_remove(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+static int ab8500_rtc_suspend(struct platform_device *pdev, pm_message_t state)
+{
+	cancel_delayed_work_sync(&sync_work);
+	return 0;
+}
+
+static int ab8500_rtc_resume(struct platform_device *pdev)
+{
+	/* Delay by 300ms to let resume finnish */
+	resumed = 1;
+	schedule_delayed_work(&sync_work, 3 * HZ / 10);
+	return 0;
+}
+#else
+#define ab8500_rtc_suspend NULL
+#define ab8500_rtc_resume NULL
+#endif
+
 static struct platform_driver ab8500_rtc_driver = {
 	.driver = {
 		.name = "ab8500-rtc",
@@ -469,6 +530,8 @@ static struct platform_driver ab8500_rtc_driver = {
 	},
 	.probe	= ab8500_rtc_probe,
 	.remove = __devexit_p(ab8500_rtc_remove),
+	.suspend = ab8500_rtc_suspend,
+	.resume = ab8500_rtc_resume,
 };
 
 static int __init ab8500_rtc_init(void)

@@ -40,6 +40,7 @@
 /* In SIM bank */
 #define AB5500_SIM_SUP		0x14
 
+#define AB5500_MBIAS1		0x00
 #define AB5500_MBIAS2		0x01
 
 #define AB5500_LDO_MODE_MASK		(0x3 << 4)
@@ -49,6 +50,8 @@
 #define AB5500_LDO_MODE_OFF		(0x0 << 4)
 #define AB5500_LDO_VOLT_MASK		0x07
 
+#define AB5500_MBIAS1_ENABLE		(0x1 << 1)
+#define AB5500_MBIAS1_MODE_MASK		(0x1 << 1)
 #define AB5500_MBIAS2_ENABLE		(0x1 << 1)
 #define AB5500_MBIAS2_VOLT_MASK		(0x1 << 2)
 #define AB5500_MBIAS2_MODE_MASK		(0x1 << 1)
@@ -57,9 +60,10 @@ struct ab5500_regulator {
 	struct regulator_desc desc;
 	const int *voltages;
 	int num_holes;
-	bool pwrctrl;
+	bool off_is_lowpower;
 	bool enabled;
 	int enable_time;
+	int load_lp_uA;
 	u8 bank;
 	u8 reg;
 	u8 mode;
@@ -103,8 +107,13 @@ static int ab5500_regulator_disable(struct regulator_dev *rdev)
 {
 	struct ab5500_regulators *ab5500 = rdev_get_drvdata(rdev);
 	struct ab5500_regulator *r = ab5500->regulator[rdev_get_id(rdev)];
-	u8 regval = r->pwrctrl ? AB5500_LDO_MODE_PWRCTRL : AB5500_LDO_MODE_OFF;
+	u8 regval;
 	int ret;
+
+	if (r->off_is_lowpower)
+		regval = AB5500_LDO_MODE_LOWPOWER;
+	else
+		regval = AB5500_LDO_MODE_OFF;
 
 	ret = abx500_mask_and_set(ab5500->dev, r->bank, r->reg,
 				  r->update_mask, regval);
@@ -125,6 +134,22 @@ static unsigned int ab5500_regulator_get_mode(struct regulator_dev *rdev)
 		return REGULATOR_MODE_IDLE;
 
 	return REGULATOR_MODE_NORMAL;
+}
+
+static unsigned int
+ab5500_regulator_get_optimum_mode(struct regulator_dev *rdev,
+				  int input_uV, int output_uV, int load_uA)
+{
+	struct ab5500_regulators *ab5500 = rdev_get_drvdata(rdev);
+	struct ab5500_regulator *r = ab5500->regulator[rdev_get_id(rdev)];
+	unsigned int mode;
+
+	if (load_uA <= r->load_lp_uA)
+		mode = REGULATOR_MODE_IDLE;
+	else
+		mode = REGULATOR_MODE_NORMAL;
+
+	return mode;
 }
 
 static int ab5500_regulator_set_mode(struct regulator_dev *rdev,
@@ -170,6 +195,12 @@ static int ab5500_regulator_is_enabled(struct regulator_dev *rdev)
 	case AB5500_LDO_MODE_OFF:
 		r->enabled = false;
 		break;
+	case AB5500_LDO_MODE_LOWPOWER:
+		if (r->off_is_lowpower) {
+			r->enabled = false;
+			break;
+		}
+		/* fall through */
 	default:
 		r->enabled = true;
 		break;
@@ -303,6 +334,7 @@ static struct regulator_ops ab5500_regulator_variable_ops = {
 	.list_voltage	= ab5500_regulator_list_voltage,
 	.set_mode	= ab5500_regulator_set_mode,
 	.get_mode	= ab5500_regulator_get_mode,
+	.get_optimum_mode = ab5500_regulator_get_optimum_mode,
 };
 
 static struct regulator_ops ab5500_regulator_fixed_ops = {
@@ -314,6 +346,7 @@ static struct regulator_ops ab5500_regulator_fixed_ops = {
 	.list_voltage	= ab5500_regulator_list_voltage,
 	.set_mode	= ab5500_regulator_set_mode,
 	.get_mode	= ab5500_regulator_get_mode,
+	.get_optimum_mode = ab5500_regulator_get_optimum_mode,
 };
 
 static const int ab5500_ldo_lg_voltages[] = {
@@ -353,6 +386,10 @@ static const int ab5500_bias2_voltages[] = {
 	[0x01] = 2200000,
 };
 
+static const int ab5500_bias1_voltages[] = {
+	[0x00] = 2000000,
+};
+
 static struct ab5500_regulator ab5500_regulators[] = {
 	[AB5500_LDO_L] = {
 		.desc = {
@@ -369,6 +406,7 @@ static struct ab5500_regulator ab5500_regulators[] = {
 		.voltages		= ab5500_ldo_lg_voltages,
 		.num_holes		= 2, /* 2 register values unused */
 		.enable_time		= 400,
+		.load_lp_uA		= 20000,
 		.mode			= AB5500_LDO_MODE_FULLPOWER,
 		.update_mask		= AB5500_LDO_MODE_MASK,
 		.update_val_normal	= AB5500_LDO_MODE_FULLPOWER,
@@ -390,6 +428,7 @@ static struct ab5500_regulator ab5500_regulators[] = {
 		.voltages		= ab5500_ldo_lg_voltages,
 		.num_holes		= 2, /* 2 register values unused */
 		.enable_time		= 400,
+		.load_lp_uA		= 20000,
 		.mode			= AB5500_LDO_MODE_FULLPOWER,
 		.update_mask		= AB5500_LDO_MODE_MASK,
 		.update_val_normal	= AB5500_LDO_MODE_FULLPOWER,
@@ -409,6 +448,7 @@ static struct ab5500_regulator ab5500_regulators[] = {
 		.reg			= AB5500_LDO_K_ST,
 		.voltages		= ab5500_ldo_kh_voltages,
 		.enable_time		= 400,
+		.load_lp_uA		= 20000,
 		.mode			= AB5500_LDO_MODE_FULLPOWER,
 		.update_mask		= AB5500_LDO_MODE_MASK,
 		.update_val_normal	= AB5500_LDO_MODE_FULLPOWER,
@@ -428,6 +468,7 @@ static struct ab5500_regulator ab5500_regulators[] = {
 		.reg			= AB5500_LDO_H_ST,
 		.voltages		= ab5500_ldo_kh_voltages,
 		.enable_time		= 400,
+		.load_lp_uA		= 20000,
 		.mode			= AB5500_LDO_MODE_FULLPOWER,
 		.update_mask		= AB5500_LDO_MODE_MASK,
 		.update_val_normal	= AB5500_LDO_MODE_FULLPOWER,
@@ -475,7 +516,7 @@ static struct ab5500_regulator ab5500_regulators[] = {
 	},
 	[AB5500_BIAS2] = {
 		.desc = {
-			.name		= "BIAS2",
+			.name		= "MBIAS2",
 			.id		= AB5500_BIAS2,
 			.ops		= &ab5500_regulator_variable_ops,
 			.type		= REGULATOR_VOLTAGE,
@@ -492,6 +533,24 @@ static struct ab5500_regulator ab5500_regulators[] = {
 		.update_val_idle	= AB5500_MBIAS2_ENABLE,
 		.voltage_mask		= AB5500_MBIAS2_VOLT_MASK,
 	},
+	[AB5500_BIAS1] = {
+		.desc = {
+			.name		= "MBIAS1",
+			.id		= AB5500_BIAS1,
+			.ops		= &ab5500_regulator_fixed_ops,
+			.type		= REGULATOR_VOLTAGE,
+			.owner		= THIS_MODULE,
+			.n_voltages	= ARRAY_SIZE(ab5500_bias1_voltages),
+		},
+		.bank			= AB5500_BANK_AUDIO_HEADSETUSB,
+		.reg			= AB5500_MBIAS1,
+		.voltages		= ab5500_bias1_voltages,
+		.enable_time		= 1000,
+		.mode			= AB5500_MBIAS1_ENABLE,
+		.update_mask		= AB5500_MBIAS1_MODE_MASK,
+		.update_val_normal	= AB5500_MBIAS1_ENABLE,
+		.update_val_idle	= AB5500_MBIAS1_ENABLE,
+	},
 };
 
 
@@ -499,6 +558,7 @@ static int __devinit ab5500_regulator_probe(struct platform_device *pdev)
 {
 	struct ab5500_platform_data *ppdata = pdev->dev.parent->platform_data;
 	struct ab5500_regulator_platform_data *pdata = ppdata->regulator;
+	struct ab5500_regulator_data *regdata;
 	struct ab5500_regulators *ab5500;
 	int err = 0;
 	int i;
@@ -511,12 +571,16 @@ static int __devinit ab5500_regulator_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ab5500->dev = &pdev->dev;
+	regdata = pdata->data;
 
 	platform_set_drvdata(pdev, ab5500);
 
 	for (i = 0; i < AB5500_NUM_REGULATORS; i++) {
 		struct ab5500_regulator *regulator = &ab5500_regulators[i];
 		struct regulator_dev *rdev;
+
+		if (regdata)
+			regulator->off_is_lowpower = regdata[i].off_is_lowpower;
 
 		ab5500->regulator[i] = regulator;
 

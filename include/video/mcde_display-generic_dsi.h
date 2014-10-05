@@ -20,6 +20,7 @@ struct mcde_display_generic_platform_data {
 	int reset_gpio;
 	bool reset_high;
 	const char *regulator_id;
+	const char *io_regulator_id;
 	int reset_delay; /* ms */
 	int sleep_out_delay; /* ms */
 	u32 ddb_id;

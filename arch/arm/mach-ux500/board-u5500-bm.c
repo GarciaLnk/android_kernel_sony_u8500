@@ -20,8 +20,8 @@
 /*
  * These are the defined batteries that uses a NTC and ID resistor placed
  * inside of the battery pack.
- * Note that the abx500_res_to_temp table must be strictly sorted by falling resistance
- * values to work.
+ * Note that the abx500_res_to_temp table must be strictly sorted by falling
+ * resistance values to work.
  */
 static struct abx500_res_to_temp temp_tbl_type1[] = {
 	{-20, 67400},
@@ -250,7 +250,7 @@ static const struct abx500_battery_type bat_type[] = {
 		.resis_high = 70000,
 		.resis_low = 8200,
 		.battery_resistance = 300,
-		.charge_full_design = 900,
+		.charge_full_design = 1500,
 		.nominal_voltage = 3600,
 		.termination_vol = 4150,
 		.termination_curr = 80,
@@ -437,7 +437,8 @@ static const struct abx500_fg_parameters fg = {
 	.accu_charging = 30,
 	.accu_high_curr = 30,
 	.high_curr_threshold = 50,
-	.lowbat_threshold = 3100,
+	.lowbat_threshold = 3560,
+	.overbat_threshold = 4400,
 };
 
 static const struct abx500_maxim_parameters maxi_params = {
@@ -472,7 +473,8 @@ struct abx500_bm_data ab5500_bm_data = {
 #endif
 	.chg_unknown_bat	= false,
 	.enable_overshoot	= false,
-	.fg_res			= 20,
+	.auto_trig		= true,
+	.fg_res			= 200,
 	.cap_levels		= &cap_levels,
 	.bat_type		= bat_type,
 	.n_btypes		= ARRAY_SIZE(bat_type),

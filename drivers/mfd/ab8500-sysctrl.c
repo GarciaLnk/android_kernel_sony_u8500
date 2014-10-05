@@ -12,7 +12,7 @@
 #include <linux/power_supply.h>
 #include <linux/mfd/ab8500.h>
 #include <linux/mfd/abx500.h>
-#include <linux/mfd/ab8500/sysctrl.h>
+#include <linux/mfd/abx500/ux500_sysctrl.h>
 #include <linux/time.h>
 #include <linux/hwmon.h>
 
@@ -134,6 +134,7 @@ int ab8500_sysctrl_read(u16 reg, u8 *value)
 	return abx500_get_register_interruptible(sysctrl_dev, bank,
 		(u8)(reg & 0xFF), value);
 }
+EXPORT_SYMBOL(ab8500_sysctrl_read);
 
 int ab8500_sysctrl_write(u16 reg, u8 mask, u8 value)
 {
@@ -149,16 +150,42 @@ int ab8500_sysctrl_write(u16 reg, u8 mask, u8 value)
 	return abx500_mask_and_set_register_interruptible(sysctrl_dev, bank,
 		(u8)(reg & 0xFF), mask, value);
 }
+EXPORT_SYMBOL(ab8500_sysctrl_write);
 
 static int __devinit ab8500_sysctrl_probe(struct platform_device *pdev)
 {
 	struct ab8500_platform_data *plat;
+	struct ab8500_sysctrl_platform_data *pdata;
 
 	sysctrl_dev = &pdev->dev;
 	plat = dev_get_platdata(pdev->dev.parent);
 	if (plat->pm_power_off)
 		pm_power_off = ab8500_power_off;
 	hwmon_notifier_register(&ab8500_notifier);
+
+	pdata = plat->sysctrl;
+
+	if (pdata) {
+		int ret;
+		int i;
+		int j;
+		for (i = AB8500_SYSCLKREQ1RFCLKBUF;
+				i <= AB8500_SYSCLKREQ8RFCLKBUF; i++) {
+			j = i - AB8500_SYSCLKREQ1RFCLKBUF;
+			ret = ab8500_sysctrl_write(i, 0xff,
+					pdata->initial_req_buf_config[j]);
+			dev_dbg(&pdev->dev,
+					"Setting SysClkReq%dRfClkBuf 0x%X\n",
+					j + 1,
+					pdata->initial_req_buf_config[j]);
+			if (ret < 0) {
+				dev_err(&pdev->dev,
+					"unable to set sysClkReq%dRfClkBuf: "
+					"%d\n", j + 1, ret);
+			}
+		}
+	}
+
 	return 0;
 }
 

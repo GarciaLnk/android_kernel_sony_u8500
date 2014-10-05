@@ -94,8 +94,26 @@ static t_interface_description* getInterfaceDescription(t_tmp_elfdescription *el
     // Search if interfane already loaded
     for(itf = interfaceList; itf != NULL; itf = itf->next) {
         if(itf->type == itfType) {
-            // TODO Sanity check
-
+	    if (itf->methodNumber != elfitf->methodNumber) {
+		    ERROR("When loading component template %s:\n\tNumber of methods in interface type %s\n\tdiffers from previous declaration: was %d, found %d\n",
+			  getElfHeaderReference(elftmp, (void*)elftmp->elfheader->templateName), itfType, itf->methodNumber, elfitf->methodNumber, 0, 0);
+		    //Do not fail for now for compatibility reason
+		    //goto out_itf_type;
+	    }
+	    if (cmIntensiveCheckState) {
+		    for(i = 0; i < itf->methodNumber; i++) {
+			    if (cm_StringCompare(itf->methodNames[i], getElfHeaderReference(elftmp, (void*)elfitf->methodNames[i]), MAX_INTERNAL_STRING_LENGTH) != 0) {
+				    ERROR("When loading component template %s:\n"
+					  "\tName of method number %d in interface type %s\n"
+					  "\tdiffers from previous declaration: previous name was %s, new name found is %s\n",
+					  getElfHeaderReference(elftmp, (void*)elftmp->elfheader->templateName), i,
+					  itfType, itf->methodNames[i],
+					  getElfHeaderReference(elftmp, (void*)elfitf->methodNames[i]), 0);
+				    //Do not fail for now for compatibility reason
+				    //goto out_itf_type;
+			    }
+		    }
+	    }
             itf->referenceCounter++;
             cm_StringRelease(itfType);
             return itf;
@@ -163,7 +181,7 @@ t_cm_error cm_ELF_CheckFile(
         t_elfdescription        **elfhandlePtr)
 {
     t_elfdescription        *elfhandle;
-    t_tmp_elfdescription    elftmp;
+    t_tmp_elfdescription    elftmp = {0,};
     t_cm_error error;
     t_uint32 version;
     t_uint32 compatibleVersion;
@@ -652,7 +670,7 @@ t_cm_error cm_ELF_LoadTemplate(
         return error;
 
     // Load each readonly segment
-    if((error = ELF64_loadSegment(elfhandle, sharedMemories, MEM_SHARABLE)) != CM_OK)
+    if((error = ELF64_loadSegment(elfhandle, MEM_SHARABLE)) != CM_OK)
         return error;
 
     return CM_OK;
@@ -678,7 +696,7 @@ t_cm_error cm_ELF_LoadInstance(
         return error;
 
     // Load each writable memory
-    if((error = ELF64_loadSegment(elfhandle, privateMemories, MEM_PRIVATE)) != CM_OK)
+    if((error = ELF64_loadSegment(elfhandle, MEM_PRIVATE)) != CM_OK)
         return error;
 
     return CM_OK;

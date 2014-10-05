@@ -11,6 +11,9 @@
 #ifndef __MCDE__H__
 #define __MCDE__H__
 
+#include "nova_dsilink.h"
+#include <linux/device.h>
+
 /* Physical interface types */
 enum mcde_port_type {
 	MCDE_PORTTYPE_DSI = 0,
@@ -39,69 +42,6 @@ enum mcde_chnl {
 	MCDE_CHNL_C1 = 3,
 };
 
-/* Channel path */
-#define MCDE_CHNLPATH(__chnl, __fifo, __type, __ifc, __link) \
-	(((__chnl) << 16) | ((__fifo) << 12) | \
-	 ((__type) << 8) | ((__ifc) << 4) | ((__link) << 0))
-enum mcde_chnl_path {
-	/* Channel A */
-	MCDE_CHNLPATH_CHNLA_FIFOA_DPI_0 = MCDE_CHNLPATH(MCDE_CHNL_A,
-		MCDE_FIFO_A, MCDE_PORTTYPE_DPI, 0, 0),
-	MCDE_CHNLPATH_CHNLA_FIFOA_DSI_IFC0_0 = MCDE_CHNLPATH(MCDE_CHNL_A,
-		MCDE_FIFO_A, MCDE_PORTTYPE_DSI, 0, 0),
-	MCDE_CHNLPATH_CHNLA_FIFOA_DSI_IFC0_1 = MCDE_CHNLPATH(MCDE_CHNL_A,
-		MCDE_FIFO_A, MCDE_PORTTYPE_DSI, 0, 1),
-	MCDE_CHNLPATH_CHNLA_FIFOC0_DSI_IFC0_2 = MCDE_CHNLPATH(MCDE_CHNL_A,
-		MCDE_FIFO_C0, MCDE_PORTTYPE_DSI, 0, 2),
-	MCDE_CHNLPATH_CHNLA_FIFOC0_DSI_IFC1_0 = MCDE_CHNLPATH(MCDE_CHNL_A,
-		MCDE_FIFO_C0, MCDE_PORTTYPE_DSI, 1, 0),
-	MCDE_CHNLPATH_CHNLA_FIFOC0_DSI_IFC1_1 = MCDE_CHNLPATH(MCDE_CHNL_A,
-		MCDE_FIFO_C0, MCDE_PORTTYPE_DSI, 1, 1),
-	MCDE_CHNLPATH_CHNLA_FIFOA_DSI_IFC1_2 = MCDE_CHNLPATH(MCDE_CHNL_A,
-		MCDE_FIFO_A, MCDE_PORTTYPE_DSI, 1, 2),
-	/* Channel B */
-	MCDE_CHNLPATH_CHNLB_FIFOB_DPI_1 = MCDE_CHNLPATH(MCDE_CHNL_B,
-		MCDE_FIFO_B, MCDE_PORTTYPE_DPI, 0, 1),
-	MCDE_CHNLPATH_CHNLB_FIFOB_DSI_IFC0_0 = MCDE_CHNLPATH(MCDE_CHNL_B,
-		MCDE_FIFO_B, MCDE_PORTTYPE_DSI, 0, 0),
-	MCDE_CHNLPATH_CHNLB_FIFOB_DSI_IFC0_1 = MCDE_CHNLPATH(MCDE_CHNL_B,
-		MCDE_FIFO_B, MCDE_PORTTYPE_DSI, 0, 1),
-	MCDE_CHNLPATH_CHNLB_FIFOC1_DSI_IFC0_2 = MCDE_CHNLPATH(MCDE_CHNL_B,
-		MCDE_FIFO_C1, MCDE_PORTTYPE_DSI, 0, 2),
-	MCDE_CHNLPATH_CHNLB_FIFOC1_DSI_IFC1_0 = MCDE_CHNLPATH(MCDE_CHNL_B,
-		MCDE_FIFO_C1, MCDE_PORTTYPE_DSI, 1, 0),
-	MCDE_CHNLPATH_CHNLB_FIFOC1_DSI_IFC1_1 = MCDE_CHNLPATH(MCDE_CHNL_B,
-		MCDE_FIFO_C1, MCDE_PORTTYPE_DSI, 1, 1),
-	MCDE_CHNLPATH_CHNLB_FIFOB_DSI_IFC1_2 = MCDE_CHNLPATH(MCDE_CHNL_B,
-		MCDE_FIFO_B, MCDE_PORTTYPE_DSI, 1, 2),
-	/* Channel C0 */
-	MCDE_CHNLPATH_CHNLC0_FIFOA_DSI_IFC0_0 = MCDE_CHNLPATH(MCDE_CHNL_C0,
-		MCDE_FIFO_A, MCDE_PORTTYPE_DSI, 0, 0),
-	MCDE_CHNLPATH_CHNLC0_FIFOA_DSI_IFC0_1 = MCDE_CHNLPATH(MCDE_CHNL_C0,
-		MCDE_FIFO_A, MCDE_PORTTYPE_DSI, 0, 1),
-	MCDE_CHNLPATH_CHNLC0_FIFOC0_DSI_IFC0_2 = MCDE_CHNLPATH(MCDE_CHNL_C0,
-		MCDE_FIFO_C0, MCDE_PORTTYPE_DSI, 0, 2),
-	MCDE_CHNLPATH_CHNLC0_FIFOC0_DSI_IFC1_0 = MCDE_CHNLPATH(MCDE_CHNL_C0,
-		MCDE_FIFO_C0, MCDE_PORTTYPE_DSI, 1, 0),
-	MCDE_CHNLPATH_CHNLC0_FIFOC0_DSI_IFC1_1 = MCDE_CHNLPATH(MCDE_CHNL_C0,
-		MCDE_FIFO_C0, MCDE_PORTTYPE_DSI, 1, 1),
-	MCDE_CHNLPATH_CHNLC0_FIFOA_DSI_IFC1_2 = MCDE_CHNLPATH(MCDE_CHNL_C0,
-		MCDE_FIFO_A, MCDE_PORTTYPE_DSI, 1, 2),
-	/* Channel C1 */
-	MCDE_CHNLPATH_CHNLC1_FIFOB_DSI_IFC0_0 = MCDE_CHNLPATH(MCDE_CHNL_C1,
-		MCDE_FIFO_B, MCDE_PORTTYPE_DSI, 0, 0),
-	MCDE_CHNLPATH_CHNLC1_FIFOB_DSI_IFC0_1 = MCDE_CHNLPATH(MCDE_CHNL_C1,
-		MCDE_FIFO_B, MCDE_PORTTYPE_DSI, 0, 1),
-	MCDE_CHNLPATH_CHNLC1_FIFOC1_DSI_IFC0_2 = MCDE_CHNLPATH(MCDE_CHNL_C1,
-		MCDE_FIFO_C1, MCDE_PORTTYPE_DSI, 0, 2),
-	MCDE_CHNLPATH_CHNLC1_FIFOC1_DSI_IFC1_0 = MCDE_CHNLPATH(MCDE_CHNL_C1,
-		MCDE_FIFO_C1, MCDE_PORTTYPE_DSI, 1, 0),
-	MCDE_CHNLPATH_CHNLC1_FIFOC1_DSI_IFC1_1 = MCDE_CHNLPATH(MCDE_CHNL_C1,
-		MCDE_FIFO_C1, MCDE_PORTTYPE_DSI, 1, 1),
-	MCDE_CHNLPATH_CHNLC1_FIFOB_DSI_IFC1_2 = MCDE_CHNLPATH(MCDE_CHNL_C1,
-		MCDE_FIFO_B, MCDE_PORTTYPE_DSI, 1, 2),
-};
-
 /* Update sync mode */
 enum mcde_sync_src {
 	MCDE_SYNCSRC_OFF = 0, /* No sync */
@@ -109,6 +49,12 @@ enum mcde_sync_src {
 	MCDE_SYNCSRC_TE1 = 2, /* MCDE ext TE1 */
 	MCDE_SYNCSRC_BTA = 3, /* DSI BTA */
 	MCDE_SYNCSRC_TE_POLLING = 4, /* DSI TE_POLLING */
+};
+
+/* Frame trig method */
+enum mcde_trig_method {
+	MCDE_TRIG_HW = 0, /* frame trig from MCDE formatter */
+	MCDE_TRIG_SW = 1, /* frame trig from software */
 };
 
 /* Interface pixel formats (output) */
@@ -153,6 +99,25 @@ struct mcde_col_transform {
 	u16 offset[3];
 };
 
+struct mcde_oled_transform {
+	u16 matrix[3][3];
+	u16 offset[3];
+};
+
+/* DSI video mode */
+enum mcde_dsi_vid_mode {
+	NON_BURST_MODE_WITH_SYNC_EVENT = 0,
+	/* enables tvg, test video generator */
+	NON_BURST_MODE_WITH_SYNC_EVENT_TVG_ENABLED = 1,
+	BURST_MODE_WITH_SYNC_EVENT  = 2,
+	BURST_MODE_WITH_SYNC_PULSE  = 3,
+};
+
+enum mcde_vsync_polarity {
+	VSYNC_ACTIVE_HIGH = 0,
+	VSYNC_ACTIVE_LOW = 1,
+};
+
 #define MCDE_PORT_DPI_NO_CLOCK_DIV	0
 
 #define DPI_ACT_HIGH_ALL	0 /* all signals are active high	  */
@@ -163,32 +128,45 @@ struct mcde_col_transform {
 				   * pixel clock
 				   */
 
+/*
+ * Default values for DCS address mode.
+ * Can be overrridden in display driver.
+ */
+#define DSI_DCS_ADDR_MODE_NORMAL_DEFAULT	0x00
+#define DSI_DCS_ADDR_MODE_HOR_FLIP_DEFAULT	0x40
+
 struct mcde_port {
 	enum mcde_port_type type;
 	enum mcde_port_mode mode;
 	enum mcde_port_pix_fmt pixel_format;
+	u8 refresh_rate;	/* display refresh rate given in Hz */
 	u8 ifc;
 	u8 link;
 	enum mcde_sync_src sync_src;
+	enum mcde_trig_method frame_trig;
+	enum mcde_sync_src requested_sync_src;
+	enum mcde_trig_method requested_frame_trig;
+	enum mcde_vsync_polarity vsync_polarity;
+	u8 vsync_clock_div;
+	/* duration is expressed as number of (STBCLK / VSPDIV) clock period */
+	u16 vsync_min_duration;
+	u16 vsync_max_duration;
 	bool update_auto_trig;
 	enum mcde_hdmi_sdtv_switch hdmi_sdtv_switch;
 	union {
-		struct {
-			u8 virt_id;
-			u8 num_data_lanes;
-			u8 ui;
-			bool clk_cont;
-
-			/* DSI data lanes are swapped if true */
-			bool data_lanes_swap;
-		} dsi;
+		struct dsilink_phy dsi;
 		struct {
 			u8 bus_width;
 			bool tv_mode;
 			u16 clock_div; /* use 0 or 1 for no clock divider */
 			u32 polarity;    /* see DPI_ACT_LOW_* definitions */
+			u32 lcd_freq;
 		} dpi;
 	} phy;
+	struct {
+		u8 normal;	/* Value for no horizontal flip */
+		u8 hor_flip;	/* Value for horizontal flip */
+	} dcs_addr_mode;
 };
 
 /* Overlay pixel formats (input) *//* REVIEW: Define byte order */
@@ -204,9 +182,10 @@ enum mcde_ovly_pix_fmt {
 
 /* Display power modes */
 enum mcde_display_power_mode {
-	MCDE_DISPLAY_PM_OFF     = 0, /* Power off */
-	MCDE_DISPLAY_PM_STANDBY = 1, /* DCS sleep mode */
-	MCDE_DISPLAY_PM_ON      = 2, /* DCS normal mode, display on */
+	MCDE_DISPLAY_PM_OFF          = 0, /* Power off */
+	MCDE_DISPLAY_PM_STANDBY      = 1, /* DCS sleep mode */
+	MCDE_DISPLAY_PM_INTERMEDIATE = 2, /* DCS normal, but display off */
+	MCDE_DISPLAY_PM_ON           = 3, /* DCS normal mode, display on */
 };
 
 /* Display rotation */
@@ -228,28 +207,13 @@ enum mcde_display_rotation {
 #define MCDE_BUF_START_ALIGMENT 8
 #define MCDE_BUF_LINE_ALIGMENT 8
 
-#define MCDE_FIFO_AB_SIZE 640
-#define MCDE_FIFO_C0C1_SIZE 160
-
-#define MCDE_INPUT_FIFO_SIZE_4_0_4 80
-#define MCDE_INPUT_FIFO_SIZE_3_0_8 128
-
 /* Tv-out defines */
-#define MCDE_CONFIG_TVOUT_HBORDER 2
-#define MCDE_CONFIG_TVOUT_VBORDER 2
 #define MCDE_CONFIG_TVOUT_BACKGROUND_LUMINANCE		0x83
 #define MCDE_CONFIG_TVOUT_BACKGROUND_CHROMINANCE_CB	0x9C
 #define MCDE_CONFIG_TVOUT_BACKGROUND_CHROMINANCE_CR	0x2C
 
 /* In seconds */
 #define MCDE_AUTO_SYNC_WATCHDOG 5
-
-/* Hardware versions */
-#define MCDE_CHIP_VERSION_4_0_4 4       /* U5500 V2 */
-#define MCDE_CHIP_VERSION_1_0_4 3	/* U5500 V1 */
-#define MCDE_CHIP_VERSION_3_0_8 2	/* U8500 V2 */
-#define MCDE_CHIP_VERSION_3_0_5 1	/* U8500 V1 */
-#define MCDE_CHIP_VERSION_3	0
 
 /* DSI modes */
 #define DSI_VIDEO_MODE	0
@@ -270,13 +234,6 @@ struct mcde_video_mode {
 	bool force_update; /* when switching between hdmi and sdtv */
 };
 
-struct mcde_rectangle {
-	u16 x;
-	u16 y;
-	u16 w;
-	u16 h;
-};
-
 struct mcde_overlay_info {
 	u32 paddr;
 	u32 *vaddr;
@@ -290,7 +247,6 @@ struct mcde_overlay_info {
 	u16 dst_z;
 	u16 w;
 	u16 h;
-	struct mcde_rectangle dirty;
 };
 
 struct mcde_overlay {
@@ -326,24 +282,32 @@ void mcde_chnl_set_col_convert(struct mcde_chnl_state *chnl,
 					enum   mcde_col_convert    convert);
 int mcde_chnl_set_video_mode(struct mcde_chnl_state *chnl,
 					struct mcde_video_mode *vmode);
-/* TODO: Remove rotbuf* parameters when ESRAM allocator is implemented*/
 int mcde_chnl_set_rotation(struct mcde_chnl_state *chnl,
-		enum mcde_display_rotation rotation, u32 rotbuf1, u32 rotbuf2);
-int mcde_chnl_enable_synchronized_update(struct mcde_chnl_state *chnl,
-								bool enable);
+					enum mcde_display_rotation rotation);
+bool mcde_chnl_is_rotated_90(struct mcde_chnl_state *chnl);
 int mcde_chnl_set_power_mode(struct mcde_chnl_state *chnl,
 				enum mcde_display_power_mode power_mode);
 
 int mcde_chnl_apply(struct mcde_chnl_state *chnl);
+void mcde_chnl_set_dirty(struct mcde_chnl_state *chnl);
+void mcde_chnl_update_sync_src(struct mcde_chnl_state *chnl,
+				enum mcde_sync_src src);
 int mcde_chnl_update(struct mcde_chnl_state *chnl,
-			struct mcde_rectangle *update_area,
 			bool tripple_buffer);
+int mcde_chnl_wait_for_next_vsync(struct mcde_chnl_state *chnl, s64 *timestamp);
 void mcde_chnl_put(struct mcde_chnl_state *chnl);
 
 void mcde_chnl_stop_flow(struct mcde_chnl_state *chnl);
 
 void mcde_chnl_enable(struct mcde_chnl_state *chnl);
 void mcde_chnl_disable(struct mcde_chnl_state *chnl);
+void mcde_formatter_enable(struct mcde_chnl_state *chnl);
+void mcde_disable_ulpm_support(bool disable);
+void mcde_extra_oled_conversion(bool enable);
+void set_rgb_extra_matrix(struct mcde_oled_transform *matrix);
+struct mcde_oled_transform *get_rgb_extra_matrix(void);
+void set_yuv_extra_matrix(struct mcde_oled_transform *matrix);
+struct mcde_oled_transform *get_yuv_extra_matrix(void);
 
 /* MCDE overlay */
 struct mcde_ovly_state;
@@ -413,25 +377,45 @@ int mcde_dsi_dcs_read(struct mcde_chnl_state *chnl,
 		u8 cmd, u32 *data, int *len);
 int mcde_dsi_set_max_pkt_size(struct mcde_chnl_state *chnl);
 
+void mcde_hw_chnl_print(struct mcde_chnl_state *chnl);
+void mcde_hw_ovly_print(struct mcde_ovly_state *ovly);
+
 /* MCDE */
 
 /* Driver data */
 #define MCDE_IRQ     "MCDE IRQ"
 #define MCDE_IO_AREA "MCDE I/O Area"
 
-struct mcde_platform_data {
-	/* DSI */
-	int num_dsilinks;
+/*
+ * Default pixelfetch watermark levels per overlay.
+ * Values are in pixels and 2 basic rules should be followed:
+ * 1. The value should be at least 256 bits.
+ * 2. The sum of all active overlays pixelfetch watermark level multiplied with
+ *    bits per pixel, should be lower than the size of input_fifo_size in bits.
+ * 3. The value should be a multiple of a line (256 bits).
+ */
+#define MCDE_PIXFETCH_WTRMRKLVL_OVL0 48		/* LCD 32 bpp */
+#define MCDE_PIXFETCH_WTRMRKLVL_OVL1 64		/* LCD 16 bpp */
+#define MCDE_PIXFETCH_WTRMRKLVL_OVL2 128	/* HDMI 32 bpp */
+#define MCDE_PIXFETCH_WTRMRKLVL_OVL3 192	/* HDMI 16 bpp */
+#define MCDE_PIXFETCH_WTRMRKLVL_OVL4 16
+#define MCDE_PIXFETCH_WTRMRKLVL_OVL5 16
 
+struct mcde_platform_data {
 	/* DPI */
 	u8 outmux[5]; /* MCDE_CONF0.OUTMUXx */
 	u8 syncmux;   /* MCDE_CONF0.SYNCMUXx */
 
+	/* TODO: Remove once ESRAM allocator is done */
+	u32 rotbuf1;
+	u32 rotbuf2;
+	u32 rotbufsize;
+
+	u32 pixelfetchwtrmrk[6];
+
 	const char *regulator_vana_id;
 	const char *regulator_mcde_epod_id;
 	const char *regulator_esram_epod_id;
-	int num_channels;
-	int num_overlays;
 	const char *clock_dsi_id;
 	const char *clock_dsi_lp_id;
 	const char *clock_dpi_id;

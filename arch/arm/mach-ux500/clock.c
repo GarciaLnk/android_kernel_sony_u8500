@@ -10,17 +10,11 @@
 #include <linux/errno.h>
 #include <linux/io.h>
 #include <linux/spinlock.h>
-#include <linux/mfd/ab8500/sysctrl.h>
+#include <linux/mfd/abx500/ux500_sysctrl.h>
 #include <linux/mfd/dbx500-prcmu.h>
 
 #include "clock.h"
-
-#define PRCC_PCKEN 0x0
-#define PRCC_PCKDIS 0x4
-#define PRCC_KCKEN 0x8
-#define PRCC_KCKDIS 0xC
-#define PRCC_PCKSR 0x10
-#define PRCC_KCKSR 0x14
+#include "prcc.h"
 
 DEFINE_MUTEX(clk_opp100_mutex);
 static DEFINE_SPINLOCK(clk_spin_lock);
@@ -213,6 +207,36 @@ long clk_round_rate_rec(struct clk *clk, unsigned long rate)
 	return rounded_rate;
 }
 
+static void lock_parent_rate(struct clk *clk)
+{
+	unsigned long flags;
+
+	if (clk->parent == NULL)
+		return;
+
+	__clk_lock(clk->parent, clk->mutex, &flags);
+
+	lock_parent_rate(clk->parent);
+	clk->parent->rate_locked++;
+
+	__clk_unlock(clk->parent, clk->mutex, flags);
+}
+
+static void unlock_parent_rate(struct clk *clk)
+{
+	unsigned long flags;
+
+	if (clk->parent == NULL)
+		return;
+
+	__clk_lock(clk->parent, clk->mutex, &flags);
+
+	unlock_parent_rate(clk->parent);
+	clk->parent->rate_locked--;
+
+	__clk_unlock(clk->parent, clk->mutex, flags);
+}
+
 int clk_set_rate(struct clk *clk, unsigned long rate)
 {
 	int err;
@@ -223,8 +247,20 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 
 	__clk_lock(clk, NO_LOCK, &flags);
 
-	err =  __clk_set_rate(clk, rate);
+	if (clk->enabled) {
+		err = -EBUSY;
+		goto unlock_and_return;
+	}
+	if (clk->rate_locked) {
+		err = -EAGAIN;
+		goto unlock_and_return;
+	}
 
+	lock_parent_rate(clk);
+	err =  __clk_set_rate(clk, rate);
+	unlock_parent_rate(clk);
+
+unlock_and_return:
 	__clk_unlock(clk, NO_LOCK, flags);
 
 	return err;
@@ -241,8 +277,17 @@ int clk_set_rate_rec(struct clk *clk, unsigned long rate)
 
 	__clk_lock(clk->parent, clk->mutex, &flags);
 
+	if (clk->parent->enabled) {
+		err = -EBUSY;
+		goto unlock_and_return;
+	}
+	if (clk->parent->rate_locked != 1) {
+		err = -EAGAIN;
+		goto unlock_and_return;
+	}
 	err = __clk_set_rate(clk->parent, rate);
 
+unlock_and_return:
 	__clk_unlock(clk->parent, clk->mutex, flags);
 
 	return err;
@@ -302,10 +347,10 @@ static int request_ape_opp100(bool enable)
 	static unsigned int requests;
 
 	if (enable) {
-	       if (0 == requests++) {
-		       return prcmu_qos_add_requirement(PRCMU_QOS_APE_OPP,
-			       "clock", 100);
-	       }
+		if (0 == requests++) {
+			return prcmu_qos_add_requirement(PRCMU_QOS_APE_OPP,
+							 "clock", 100);
+		}
 	} else if (1 == requests--) {
 		prcmu_qos_remove_requirement(PRCMU_QOS_APE_OPP, "clock");
 	}

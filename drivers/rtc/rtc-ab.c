@@ -113,7 +113,7 @@ static int ab5500_rtc_request_read(struct device *dev)
 		if (!(value & AB5500_READREQ_REQ))
 			return 0;
 
-		msleep(1);
+		usleep_range(1000, 2000);
 	}
 
 	return -EIO;
@@ -370,7 +370,7 @@ static int ab_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alarm)
 			return err;
 	}
 
-	return ab_rtc_alarm_enable(dev, true);
+	return alarm->enabled ? ab_rtc_alarm_enable(dev, true) : 0;
 }
 
 static const struct rtc_class_ops ab_rtc_ops = {
@@ -409,6 +409,8 @@ static int __devinit ab_rtc_probe(struct platform_device *pdev)
 		if (err)
 			return err;
 	}
+
+	device_init_wakeup(&pdev->dev, true);
 
 	rtc = rtc_device_register("ab8500-rtc", &pdev->dev, &ab_rtc_ops,
 			THIS_MODULE);

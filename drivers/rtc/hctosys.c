@@ -24,6 +24,11 @@
 
 int rtc_hctosys_ret = -ENODEV;
 
+/* make it possible to update a 2nd rtc */
+void __attribute__((weak)) rtc_hctohc(struct rtc_time tm)
+{
+}
+
 static int __init rtc_hctosys(void)
 {
 	int err = -ENODEV;
@@ -69,6 +74,7 @@ err_invalid:
 err_read:
 	rtc_class_close(rtc);
 
+	rtc_hctohc(tm);
 err_open:
 	rtc_hctosys_ret = err;
 

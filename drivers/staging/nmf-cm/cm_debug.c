@@ -5,12 +5,12 @@
  */
 
 #include <linux/proc_fs.h>
-#include <linux/sched.h>
 
 #include "osal-kernel.h"
 #include "cm_debug.h"
 
 #ifdef CONFIG_DEBUG_FS
+#include <linux/sched.h>
 
 static struct dentry *cm_dir;        /* nmf-cm/            */
 static struct dentry *proc_dir;      /* nmf-cm/proc/       */
@@ -306,9 +306,10 @@ static ssize_t domain_read(struct file *file, char __user *userbuf,
 				"address     Size     Free     Used\n"
 				"---------------------------------------"
 				"-----------------------------------\n");
-			if (domain->domain.esramCode.size) {
-				cm_DSP_GetDspBaseAddress(ARM_CORE_ID,
-							 ESRAM_CODE, &addr);
+			if (domain->domain.esramCode.size &&
+			    cm_DSP_GetDspBaseAddress(ARM_CORE_ID,
+						     ESRAM_CODE,
+						     &addr) == CM_OK) {
 				cm_DSP_GetInternalMemoriesInfo(id, ESRAM_CODE,
 							       &dOffset,
 							       &dSize);
@@ -330,9 +331,10 @@ static ssize_t domain_read(struct file *file, char __user *userbuf,
 					status.global.accumulate_free_memory,
 					status.global.accumulate_used_memory);
 			}
-			if (domain->domain.esramData.size) {
-				cm_DSP_GetDspBaseAddress(ARM_CORE_ID,
-							 ESRAM_EXT24, &addr);
+			if (domain->domain.esramData.size &&
+			    cm_DSP_GetDspBaseAddress(ARM_CORE_ID,
+						     ESRAM_EXT24,
+						     &addr) == CM_OK) {
 				cm_DSP_GetInternalMemoriesInfo(id, ESRAM_EXT24,
 							       &dOffset,
 							       &dSize);
@@ -354,9 +356,10 @@ static ssize_t domain_read(struct file *file, char __user *userbuf,
 					status.global.accumulate_free_memory,
 					status.global.accumulate_used_memory);
 			}
-			if (domain->domain.sdramCode.size) {
-				cm_DSP_GetDspBaseAddress(ARM_CORE_ID,
-							 SDRAM_CODE, &addr);
+			if (domain->domain.sdramCode.size &&
+			    cm_DSP_GetDspBaseAddress(ARM_CORE_ID,
+						     SDRAM_CODE,
+						     &addr) == CM_OK) {
 				cm_DSP_GetInternalMemoriesInfo(id, SDRAM_CODE,
 							       &dOffset,
 							       &dSize);
@@ -378,9 +381,10 @@ static ssize_t domain_read(struct file *file, char __user *userbuf,
 					status.global.accumulate_free_memory,
 					status.global.accumulate_used_memory);
 			}
-			if (domain->domain.sdramData.size) {
-				cm_DSP_GetDspBaseAddress(ARM_CORE_ID,
-							 SDRAM_EXT24, &addr);
+			if (domain->domain.sdramData.size &&
+			    cm_DSP_GetDspBaseAddress(ARM_CORE_ID,
+						     SDRAM_EXT24,
+						     &addr) == CM_OK) {
 				cm_DSP_GetInternalMemoriesInfo(id, SDRAM_EXT24,
 							       &dOffset,
 							       &dSize);
@@ -679,7 +683,7 @@ static const struct file_operations esram_fops = {
 void cm_debug_create_tcm_file(unsigned mpc_index)
 {
 	osalEnv.mpc[mpc_index].tcm_file = debugfs_create_blob(
-		"tcm24", S_IRUSR|S_IRGRP,
+		"tcm24", S_IRUSR|S_IRGRP|S_IROTH,
 		osalEnv.mpc[mpc_index].snapshot_dir,
 		&osalEnv.mpc[mpc_index].base);
 	if (IS_ERR(osalEnv.mpc[mpc_index].tcm_file)) {
@@ -801,14 +805,14 @@ void cm_debug_init(void)
 						PTR_ERR(osalEnv.mpc[i].snapshot_dir));
 				osalEnv.mpc[i].snapshot_dir = NULL;
 			} else {
-				debugfs_create_file("esram", S_IRUSR|S_IRGRP,
+				debugfs_create_file("esram", S_IRUSR|S_IRGRP|S_IROTH,
 						    osalEnv.mpc[i].snapshot_dir,
 						    &osalEnv.esram_base,
 						    &esram_fops);
-				debugfs_create_blob("sdram_data", S_IRUSR|S_IRGRP,
+				debugfs_create_blob("sdram_data", S_IRUSR|S_IRGRP|S_IROTH,
 						    osalEnv.mpc[i].snapshot_dir,
 						    &osalEnv.mpc[i].sdram_data);
-				debugfs_create_blob("sdram_code", S_IRUSR|S_IRGRP,
+				debugfs_create_blob("sdram_code", S_IRUSR|S_IRGRP|S_IROTH,
 						    osalEnv.mpc[i].snapshot_dir,
 						    &osalEnv.mpc[i].sdram_code);
 			}

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) ST-Ericsson SA 2010
+ * Copyright (C) ST-Ericsson SA 2011
  *
  * Author: Ola Lilja <ola.o.lilja@stericsson.com>,
  *         Roger Nilsson <roger.xr.nilsson@stericsson.com>
@@ -17,7 +17,6 @@
 
 #include <linux/types.h>
 #include <linux/spinlock.h>
-#include <linux/i2s/i2s.h>
 #include <mach/msp.h>
 
 #define UX500_NBR_OF_DAI	4
@@ -25,7 +24,7 @@
 #define UX500_I2S_RATES (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |	\
 			SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000)
 
-#define UX500_I2S_FORMATS (SNDRV_PCM_FMTBIT_S16_LE)
+#define UX500_I2S_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE)
 
 #define FRAME_PER_SINGLE_SLOT_8_KHZ		31
 #define FRAME_PER_SINGLE_SLOT_16_KHZ	124
@@ -54,7 +53,7 @@ enum ux500_msp_clock_id {
 };
 
 struct ux500_platform_drvdata {
-	struct i2s_device *i2s;
+	struct ux500_msp_i2s_drvdata *msp_i2s_drvdata;
 	unsigned int fmt;
 	unsigned int tx_mask;
 	unsigned int rx_mask;
@@ -68,17 +67,6 @@ struct ux500_platform_drvdata {
 };
 
 extern struct snd_soc_dai ux500_msp_dai[UX500_NBR_OF_DAI];
-
-bool ux500_msp_dai_i2s_get_underrun_status(int dai_idx);
-dma_addr_t ux500_msp_dai_i2s_get_pointer(int dai_idx, int stream_id);
-int ux500_msp_dai_i2s_configure_sg(dma_addr_t dma_addr,
-				int perod_cnt,
-				size_t period_len,
-				int dai_idx,
-				int stream_id);
-int ux500_msp_dai_i2s_send_data(void *data, size_t bytes, int dai_idx);
-int ux500_msp_dai_i2s_receive_data(void *data, size_t bytes, int dai_idx);
-
 int ux500_msp_dai_set_data_delay(struct snd_soc_dai *dai, int delay);
 
 #endif

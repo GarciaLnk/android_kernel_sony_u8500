@@ -11,7 +11,7 @@
 
 #include <linux/notifier.h>
 
-#ifdef CONFIG_UX500_CONTEXT
+#ifdef CONFIG_DBX500_CONTEXT
 
 /* Defines to be with
  * context_ape_notifier_register
@@ -73,6 +73,9 @@ void u5500_context_save_icn(void);
 void u5500_context_restore_icn(void);
 void u5500_context_init(void);
 
+void u9540_context_save_icn(void);
+void u9540_context_restore_icn(void);
+void u9540_context_init(void);
 #else
 
 static inline void context_varm_save_core(void) {}

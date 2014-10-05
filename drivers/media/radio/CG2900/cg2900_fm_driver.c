@@ -106,6 +106,15 @@
  */
 #define MAX_RESPONSE_TIME_IN_MS	5000
 
+/* Byte per word */
+#define WORD_LENGTH				2
+
+/* Byte Offset Counter */
+#define COUNTER					1
+
+/* Binary shift offset for one byte */
+#define SHIFT_OFFSET			8
+
 /*
  * enum fmd_gocmd_t - FM Driver Command state.
  *
@@ -229,7 +238,7 @@ struct fmd_states_info {
 struct fmd_data {
 	u32 cmd_id;
 	u16 num_parameters;
-	u8 *parameters;
+	u8 parameters[MAX_RESP_SIZE];
 };
 
 static struct fmd_states_info fmd_state_info;
@@ -873,11 +882,6 @@ static int fmd_rx_channel_to_frequency(
 	 */
 	*frequency = min_freq + (channel_number * CHANNEL_FREQ_CONVERTER_MHZ);
 
-	if (*frequency > max_freq)
-		*frequency = max_freq;
-	else if (*frequency < min_freq)
-		*frequency = min_freq;
-
 error:
 	return result;
 }
@@ -1154,6 +1158,8 @@ static int fmd_rds_thread(
 		/* Give 100 ms for context switching */
 		schedule_timeout_interruptible(msecs_to_jiffies(100));
 	}
+	/* Always signal the rds_sem semaphore before exiting */
+	fmd_set_rds_sem();
 	FM_DEBUG_REPORT("fmd_rds_thread Exiting!!!");
 	return 0;
 }
@@ -1619,6 +1625,8 @@ static int fmd_read_resp(
 			)
 {
 	int err;
+	int param_offset = 0;
+	int byte_offset = 0;
 	FM_INFO_REPORT("fmd_read_resp");
 
 	/* Wait till response of the command is received */
@@ -1638,10 +1646,17 @@ static int fmd_read_resp(
 	*cmd_id = fmd_data.cmd_id;
 	if (fmd_data.num_parameters) {
 		*num_parameters = fmd_data.num_parameters;
-		memcpy(
-			parameters,
-			fmd_data.parameters,
-			(*num_parameters * sizeof(u16)));
+		while (param_offset <
+				(*num_parameters * sizeof(u16)) / WORD_LENGTH) {
+			parameters[param_offset] =
+				(u16)(fmd_data.parameters[byte_offset])
+						& 0x00ff;
+			parameters[param_offset] |=
+				((u16)(fmd_data.parameters[byte_offset + COUNTER])
+						& 0x00ff) << SHIFT_OFFSET;
+			byte_offset = byte_offset + WORD_LENGTH;
+			param_offset++;
+		}
 	}
 
 	err = 0;
@@ -1666,6 +1681,7 @@ static void fmd_process_fm_function(
 {
 	u8 fm_function_id;
 	u8 block_id;
+	int count = 0;
 
 	if (packet_buffer == NULL)
 		return;
@@ -1698,12 +1714,14 @@ static void fmd_process_fm_function(
 			fmd_data.cmd_id, fmd_data.num_parameters);
 
 		if (fmd_data.num_parameters) {
-			fmd_data.parameters =
-				FM_GET_RSP_BUFFER_ADDR(packet_buffer);
-			memcpy(fmd_data.parameters,
-				FM_GET_RSP_BUFFER_ADDR(packet_buffer),
-				fmd_data.num_parameters * sizeof(u16));
+			while (count <
+				(fmd_data.num_parameters * sizeof(u16))) {
+				fmd_data.parameters[count] =
+				*(FM_GET_RSP_BUFFER_ADDR(packet_buffer) + count);
+				count++;
+			}
 		}
+
 		/* Release the semaphore since response is received */
 		fmd_set_cmd_sem();
 		break;
@@ -2302,6 +2320,44 @@ int fmd_rx_set_stereo_mode(
 	}
 
 	fmd_state_info.rx_stereo_mode = mode;
+	err = 0;
+
+error:
+	return err;
+}
+
+int fmd_rx_set_stereo_ctrl_blending_rssi(
+			u16 min_rssi,
+			u16 max_rssi)
+{
+	int err;
+	int io_result;
+	u16 parameters[CMD_RP_STEREO_SET_CONTROL_BLENDING_RSSI_PARAM_LEN];
+
+	if (fmd_go_cmd_busy()) {
+		err = -EBUSY;
+		goto error;
+	}
+
+	if (!fmd_state_info.fmd_initialized) {
+		err = -ENOEXEC;
+		goto error;
+	}
+
+	parameters[0] = min_rssi;
+	parameters[1] = max_rssi;
+
+	io_result = fmd_send_cmd_and_read_resp(
+			CMD_FMR_RP_STEREO_SET_CONTROL_BLENDING_RSSI,
+			CMD_RP_STEREO_SET_CONTROL_BLENDING_RSSI_PARAM_LEN,
+			parameters,
+			NULL,
+			NULL);
+
+	if (io_result != 0) {
+		err = io_result;
+		goto error;
+	}
 	err = 0;
 
 error:
@@ -3188,6 +3244,47 @@ int fmd_rx_set_rds(
 	io_result = fmd_send_cmd_and_read_resp(
 			CMD_FMR_DP_SET_CONTROL,
 			CMD_DP_SET_CONTROL_PARAM_LEN,
+			parameters,
+			NULL,
+			NULL);
+
+	if (io_result != 0) {
+		err = io_result;
+		goto error;
+	}
+
+	err = 0;
+
+error:
+	return err;
+}
+
+int fmd_rx_set_rds_group_rejection(
+			u8 on_off_state
+			)
+{
+	int err;
+	int io_result;
+	u16  parameters[CMD_DP_SET_GROUP_REJECTION_PARAM_LEN];
+
+	if (fmd_go_cmd_busy()) {
+		err = -EBUSY;
+		goto error;
+	}
+
+	if (!fmd_state_info.fmd_initialized) {
+		err = -ENOEXEC;
+		goto error;
+	}
+
+	if (on_off_state == FMD_RDS_GROUP_REJECTION_ON)
+		parameters[0] = 0x0001;
+	else if (on_off_state == FMD_RDS_GROUP_REJECTION_OFF)
+		parameters[0] = 0x0000;
+
+	io_result = fmd_send_cmd_and_read_resp(
+			CMD_FMR_DP_SET_GROUP_REJECTION,
+			CMD_DP_SET_GROUP_REJECTION_PARAM_LEN,
 			parameters,
 			NULL,
 			NULL);
@@ -4527,7 +4624,7 @@ int fmd_send_fm_firmware(
 			u16 fw_size
 			)
 {
-	int err;
+	int err = -EINVAL;
 	u16 bytes_to_write = ST_WRITE_FILE_BLK_SIZE -
 				FM_HCI_WRITE_FILE_BLK_PARAM_LEN;
 	u16 bytes_remaining = fw_size;
@@ -4667,6 +4764,9 @@ void fmd_stop_rds_thread(void)
 	sema_init(&rds_sem, 0);
 	cb_rds_func = NULL;
 	rds_thread_required = false;
+	/* Wait for RDS thread to exit gracefully */
+	fmd_get_rds_sem();
+
 	if (rds_thread_task)
 		rds_thread_task = NULL;
 }

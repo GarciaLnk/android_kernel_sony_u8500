@@ -65,9 +65,6 @@ struct b2r2_blt_rect {
  * three separate planes for each color component, namely Y, U, and V.
  * U and V pixels are subsampled by a factor of two horizontally.
  * The buffer shall contain a plane of Y, U, and V data in this order.
- * @B2R2_BLT_FMT_Y_CB_Y_CR: 16 bits per pixel YUV interleaved format organized
- * as YUYV (i.e., YCbYCr).
- * (Corresponds to YUV422 interleaved)
  * @B2R2_BLT_FMT_CB_Y_CR_Y: 16 bits per pixel YUV interleaved format organized
  * as UYVY (i.e., CbYCrY).
  * (Corresponds to YUV422R)
@@ -131,36 +128,44 @@ struct b2r2_blt_rect {
  * stored as V 23:16, U 15:8, and Y 7:0.
  * @B2R2_BLT_FMT_32_BIT_VUYA8888: 32 bits per pixel VUYA format with colors
  * stored as V 31:24, U 23:16, Y 15:8, and Alpha 7:0.
+ * @B2R2_BLT_FMT_16_BIT_ABGR4444: 16 bits per pixel ABGR format with colors
+ * stored as Alpha 15:12, Blue 11:8, Green 7:4, and Red 3:0.
  */
 enum b2r2_blt_fmt {
-    B2R2_BLT_FMT_UNUSED = 0,
-    B2R2_BLT_FMT_16_BIT_ARGB4444 = 4,
-    B2R2_BLT_FMT_16_BIT_ARGB1555 = 5,
-    B2R2_BLT_FMT_16_BIT_RGB565 = 6,
-    B2R2_BLT_FMT_24_BIT_RGB888 = 11,
-    B2R2_BLT_FMT_32_BIT_ARGB8888 = 16,
-    B2R2_BLT_FMT_YUV420_PACKED_PLANAR = 20,
-    B2R2_BLT_FMT_YUV422_PACKED_PLANAR = 23,
-    B2R2_BLT_FMT_Y_CB_Y_CR = 25,
-    B2R2_BLT_FMT_CB_Y_CR_Y = 27,
-    B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR = 39,
-    B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR = 40,
-    /* Extensions, non OpenMAX formats */
-    B2R2_BLT_FMT_32_BIT_ABGR8888 = 0x7F000000, /* OpenMax vendor start */
-    B2R2_BLT_FMT_24_BIT_ARGB8565 = 0x7F000001,
-    B2R2_BLT_FMT_24_BIT_YUV888 = 0x7F000002,
-    B2R2_BLT_FMT_32_BIT_AYUV8888 = 0x7F000003,
-    B2R2_BLT_FMT_YUV420_PACKED_SEMIPLANAR_MB_STE = 0x7F000004,
-    B2R2_BLT_FMT_YUV422_PACKED_SEMIPLANAR_MB_STE = 0x7F000005,
-    B2R2_BLT_FMT_1_BIT_A1 = 0x7F000006,
-    B2R2_BLT_FMT_8_BIT_A8 = 0x7F000007,
-    B2R2_BLT_FMT_YUV444_PACKED_PLANAR = 0x7F000008,
-    B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR = 0x7F000009,
-    B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR = 0x7F00000A,
-    B2R2_BLT_FMT_YVU420_PACKED_PLANAR = 0x7F00000B,
-    B2R2_BLT_FMT_YVU422_PACKED_PLANAR = 0x7F00000C,
-    B2R2_BLT_FMT_24_BIT_VUY888 = 0x7F00000D,
-    B2R2_BLT_FMT_32_BIT_VUYA8888 = 0x7F00000E,
+	B2R2_BLT_FMT_UNUSED = 0,
+	B2R2_BLT_FMT_16_BIT_ARGB4444 = 4,
+	B2R2_BLT_FMT_16_BIT_ARGB1555 = 5,
+	B2R2_BLT_FMT_16_BIT_RGB565 = 6,
+	B2R2_BLT_FMT_24_BIT_RGB888 = 11,
+	B2R2_BLT_FMT_32_BIT_ARGB8888 = 16,
+	B2R2_BLT_FMT_YUV420_PACKED_PLANAR = 20,
+	B2R2_BLT_FMT_YUV422_PACKED_PLANAR = 23,
+	B2R2_BLT_FMT_Y_CB_Y_CR = 25, /* Unsupported format */
+	B2R2_BLT_FMT_CB_Y_CR_Y = 27,
+	B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR = 39,
+	B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR = 40,
+	/* Extensions, non OpenMAX formats */
+	B2R2_BLT_FMT_32_BIT_ABGR8888 = 0x7F000000, /* OpenMax vendor start */
+	B2R2_BLT_FMT_24_BIT_ARGB8565 = 0x7F000001,
+	B2R2_BLT_FMT_24_BIT_YUV888 = 0x7F000002,
+	B2R2_BLT_FMT_32_BIT_AYUV8888 = 0x7F000003,
+	B2R2_BLT_FMT_YUV420_PACKED_SEMIPLANAR_MB_STE = 0x7F000004,
+	B2R2_BLT_FMT_YUV422_PACKED_SEMIPLANAR_MB_STE = 0x7F000005,
+	B2R2_BLT_FMT_1_BIT_A1 = 0x7F000006,
+	B2R2_BLT_FMT_8_BIT_A8 = 0x7F000007,
+	B2R2_BLT_FMT_YUV444_PACKED_PLANAR = 0x7F000008,
+	B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR = 0x7F000009,
+	B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR = 0x7F00000A,
+	B2R2_BLT_FMT_YVU420_PACKED_PLANAR = 0x7F00000B,
+	B2R2_BLT_FMT_YVU422_PACKED_PLANAR = 0x7F00000C,
+	B2R2_BLT_FMT_24_BIT_VUY888 = 0x7F00000D,
+	B2R2_BLT_FMT_32_BIT_VUYA8888 = 0x7F00000E,
+	B2R2_BLT_FMT_16_BIT_ABGR4444 = 0x7F00000F,
+	/*
+	 * YV12 is a YVU420P format with alignment requirements
+	 * on luma and chroma stride
+	 */
+	B2R2_BLT_FMT_YV12 = 0x7F000010,
 };
 
 /**
@@ -302,6 +307,21 @@ enum b2r2_blt_transform {
  *    Enable destination clip rectangle
  * @B2R2_BLT_FLAG_INHERIT_PRIO
  *    Inherit process priority
+ * @B2R2_BLT_FLAG_SRC_NO_CACHE_FLUSH
+ *    Skip cache flush of source image buffer
+ * @B2R2_BLT_FLAG_SRC_MASK_NO_CACHE_FLUSH
+ *    Skip cache flush of source mask buffer
+ * @B2R2_BLT_FLAG_DST_NO_CACHE_FLUSH
+ *    Skip cache flush of destination image buffer
+ * @B2R2_BLT_FLAG_BG_BLEND
+ *    Indicate that a background buffer is supplied
+ *    to the blit operation. B2R2_BLT_FLAG_PER_PIXEL_ALPHA_BLEND,
+ *    B2R2_BLT_FLAG_SRC_IS_NOT_PREMULT, and
+ *    B2R2_BLT_FLAG_GLOBAL_ALPHA_BLEND will control the blend operation.
+ *    The destination blending is in this case disabled and the destination
+ *    buffer will be overwritten with the source and background blend result.
+ * @B2R2_BLT_FLAG_BG_NO_CACHE_FLUSH
+ *    Skip cache flush of background image buffer
  * @B2R2_BLT_FLAG_REPORT_WHEN_DONE
  *    Report through b2r2_blt file when done. A b2r2_blt_report structure is
  *    read. Use poll() or select() if anything to read. (i.e. to help user space
@@ -355,6 +375,9 @@ enum b2r2_blt_flag {
 	B2R2_BLT_FLAG_SRC_NO_CACHE_FLUSH    = BIT(14),/*0x4000*/
 	B2R2_BLT_FLAG_SRC_MASK_NO_CACHE_FLUSH = BIT(15),/*0x8000*/
 	B2R2_BLT_FLAG_DST_NO_CACHE_FLUSH    = BIT(16),/*0x10000*/
+	B2R2_BLT_FLAG_BG_BLEND              = BIT(17),/*0x20000*/
+	B2R2_BLT_FLAG_BG_NO_CACHE_FLUSH     = BIT(18),/*0x40000*/
+	B2R2_BLT_FLAG_FULL_RANGE_YUV        = BIT(19),/*0x20000*/
 	B2R2_BLT_FLAG_REPORT_WHEN_DONE      = BIT(29),/*0x20000000*/
 	B2R2_BLT_FLAG_REPORT_PERFORMANCE    = BIT(30),/*0x40000000*/
 	B2R2_BLT_FLAG_CLUT_COLOR_CORRECTION = BIT(31),/*0x80000000*/
@@ -375,6 +398,8 @@ enum b2r2_blt_flag {
  * @src_mask: Source mask. Not used if source fill.
  * @src_rect: Source area to be blitted.
  * @src_color: Source fill color or color key
+ * @bg_img: Background image.
+ * @bg_rect: Background area to blend with.
  * @dst_img: Destination image.
  * @dst_rect: Destination area to be blitted to.
  * @dst_color: Destination color key
@@ -396,6 +421,8 @@ struct b2r2_blt_req {
 	struct b2r2_blt_img       src_mask;
 	struct b2r2_blt_rect      src_rect;
 	__u32                     src_color;
+	struct b2r2_blt_img       bg_img;
+	struct b2r2_blt_rect      bg_rect;
 	struct b2r2_blt_img       dst_img;
 	struct b2r2_blt_rect      dst_rect;
 	struct b2r2_blt_rect      dst_clip_rect;
@@ -613,5 +640,56 @@ struct b2r2_blt_report {
  */
 #define B2R2_BLT_QUERY_CAP_IOC  _IOWR(B2R2_BLT_IOC_MAGIC, 3, \
 				  struct b2r2_blt_query_cap)
+
+/**
+ * struct b2r2_platform_data - The b2r2 core hardware configuration
+ *
+ * @regulator_id: The name of the b2r2 power source
+ * @clock_id: The name of the b2r2 clock
+ *
+ */
+struct b2r2_platform_data {
+	const char *regulator_id;
+	const char *clock_id;
+};
+
+/**
+ * b2r2_blt_open - Opening a handle for use with the blitter interface
+ *
+ * Returns a handle (0 or greater) to a B2R2 blitter intance on success
+ */
+int b2r2_blt_open(void);
+
+/**
+ * b2r2_blt_close - Free the blitter instance and its resources
+ *
+ * @handle: The B2R2 BLT instance handle
+ *
+ * All active jobs are finished or cancelled and allocated data
+ * is released.
+ *
+ * Returns 0 on success
+ */
+int b2r2_blt_close(int handle);
+
+/**
+ * b2r2_blt_request - Request a blit operation
+ *
+ * @handle: The B2R2 BLT instance handle
+ *
+ * Returns 0 on success
+ */
+int b2r2_blt_request(int handle, struct b2r2_blt_req *user_req);
+
+/**
+ * b2r2_blt_synch - Wait for all or a specified job
+ *
+ * @handle: The B2R2 BLT instance handle
+ * @request_id: If 0, wait for all requests on this instance to finish.
+ *              Else wait for the request with the given request id to finish.
+ *
+ * Returns 0 on success
+ */
+int b2r2_blt_synch(int handle, int request_id);
 
 #endif /* #ifdef _LINUX_VIDEO_B2R2_BLT_H */

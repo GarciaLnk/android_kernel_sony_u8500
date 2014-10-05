@@ -6,6 +6,7 @@
  * Josef Kindberg (josef.kindberg@stericsson.com) for ST-Ericsson.
  * Dariusz Szymszak (dariusz.xd.szymczak@stericsson.com) for ST-Ericsson.
  * Kjell Andersson (kjell.k.andersson@stericsson.com) for ST-Ericsson.
+ * Hemant Gupta (hemant.gupta@stericsson.com) for ST-Ericsson.
  * License terms:  GNU General Public License (GPL), version 2
  *
  * Linux Bluetooth HCI H:4 Driver for ST-Ericsson CG2900 GPS/BT/FM controller.
@@ -58,7 +59,7 @@
  */
 #define MAX_NBR_OF_POLLS			50
 
-#define LINE_TOGGLE_DETECT_TIMEOUT		50	/* ms */
+#define LINE_TOGGLE_DETECT_TIMEOUT		100	/* ms */
 #define CHIP_READY_TIMEOUT			100	/* ms */
 #define CHIP_STARTUP_TIMEOUT			15000	/* ms */
 #define CHIP_SHUTDOWN_TIMEOUT			15000	/* ms */
@@ -80,6 +81,21 @@
  * for Bluetooth events in the ST-Ericsson connectivity controller.
  */
 #define CHANNEL_BT_EVT				0x04
+
+/** CHANNEL_NFC - Bluetooth HCI H:4 channel
+ * for NFC in the ST-Ericsson connectivity controller.
+ */
+#define CHANNEL_NFC			0x05
+
+/** CHANNEL_ANT_CMD - Bluetooth HCI H:4 channel
+ * for ANT command in the ST-Ericsson connectivity controller.
+ */
+#define CHANNEL_ANT_CMD			0x0C
+
+/** CHANNEL_ANT_DAT - Bluetooth HCI H:4 channel
+ * for ANT data in the ST-Ericsson connectivity controller.
+ */
+#define CHANNEL_ANT_DAT			0x0E
 
 /** CHANNEL_FM_RADIO - Bluetooth HCI H:4 channel
  * for FM radio in the ST-Ericsson connectivity controller.
@@ -127,6 +143,18 @@
 /** CG2900_BT_EVT - Bluetooth HCI H4 channel for Bluetooth events.
  */
 #define CG2900_BT_EVT				"cg2900_bt_evt"
+
+/** CG2900_NFC - Bluetooth HCI H4 channel for NFC.
+ */
+#define CG2900_NFC				"cg2900_nfc"
+
+/** CG2900_ANT_CMD - Bluetooth HCI H4 channel for ANT Command.
+ */
+#define CG2900_ANT_CMD			"cg2900_antradio_cmd"
+
+/** CG2900_ANT_DAT - Bluetooth HCI H4 channel for ANT Data.
+ */
+#define CG2900_ANT_DAT			"cg2900_antradio_data"
 
 /** CG2900_FM_RADIO - Bluetooth HCI H4 channel for FM radio.
  */
@@ -203,7 +231,6 @@ enum main_state {
  *					and settings.
  * @BOOT_READ_SELFTEST_RESULT:		CG2900 is performing selftests that
  *					shall be read out.
- * @BOOT_DISABLE_BT:			Disable BT Core.
  * @BOOT_READY:				CG2900 chip driver boot is ready.
  * @BOOT_FAILED:			CG2900 chip driver boot failed.
  */
@@ -214,7 +241,6 @@ enum boot_state {
 	BOOT_DOWNLOAD_PATCH,
 	BOOT_ACTIVATE_PATCHES_AND_SETTINGS,
 	BOOT_READ_SELFTEST_RESULT,
-	BOOT_DISABLE_BT,
 	BOOT_READY,
 	BOOT_FAILED
 };
@@ -383,7 +409,9 @@ struct cg2900_chip_info {
 	int				nbr_of_polls;
 	bool				startup;
 	int				mfd_size;
+	int				mfd_extra_size;
 	int				mfd_char_size;
+	int				mfd_extra_char_size;
 };
 
 /**
@@ -407,9 +435,14 @@ static DECLARE_WAIT_QUEUE_HEAD(main_wait_queue);
 
 static struct mfd_cell cg2900_devs[];
 static struct mfd_cell cg2900_char_devs[];
+static struct mfd_cell cg2905_extra_devs[];
+static struct mfd_cell cg2905_extra_char_devs[];
+static struct mfd_cell cg2910_extra_devs[];
+static struct mfd_cell cg2910_extra_char_devs[];
+static struct mfd_cell cg2910_extra_devs_pg2[];
+static struct mfd_cell cg2910_extra_char_devs_pg2[];
 
 static void chip_startup_finished(struct cg2900_chip_info *info, int err);
-static void chip_shutdown(struct cg2900_user_data *user);
 
 /**
  * bt_is_open() - Checks if any BT user is in open state.
@@ -923,22 +956,6 @@ static void update_flow_ctrl_fm(struct cg2900_chip_dev *dev,
 }
 
 /**
- * send_bt_enable() - Send HCI VS BT Enable command to the chip.
- * @info:	Chip info structure.
- * @bt_enable:	Value for BT Enable parameter (e.g. CG2900_BT_DISABLE).
- */
-static void send_bt_enable(struct cg2900_chip_info *info, u8 bt_enable)
-{
-	struct bt_vs_bt_enable_cmd cmd;
-
-	cmd.op_code = cpu_to_le16(CG2900_BT_OP_VS_BT_ENABLE);
-	cmd.plen = BT_PARAM_LEN(sizeof(cmd));
-	cmd.enable = bt_enable;
-	cg2900_send_bt_cmd(info->user_in_charge, info->logger,
-			   &cmd, sizeof(cmd));
-}
-
-/**
  * send_bd_address() - Send HCI VS command with BD address to the chip.
  */
 static void send_bd_address(struct cg2900_chip_info *info)
@@ -978,9 +995,12 @@ static void send_settings_file(struct cg2900_chip_info *info)
 {
 	int bytes_sent;
 
-	bytes_sent = cg2900_read_and_send_file_part(info->user_in_charge,
-						    info->logger,
-						    &info->file_info);
+	bytes_sent = cg2900_read_and_send_file_part(
+			info->user_in_charge,
+			info->logger,
+			&info->file_info,
+			info->file_info.fw_file_ssf);
+
 	if (bytes_sent > 0) {
 		/* Data sent. Wait for CmdComplete */
 		return;
@@ -997,9 +1017,7 @@ static void send_settings_file(struct cg2900_chip_info *info)
 	info->download_state = DOWNLOAD_SUCCESS;
 
 	/* Settings file finished. Release used resources */
-	dev_dbg(BOOT_DEV, "Settings file finished, release used resources\n");
-	release_firmware(info->file_info.fw_file);
-	info->file_info.fw_file = NULL;
+	dev_dbg(BOOT_DEV, "Settings file finished\n");
 
 	dev_dbg(BOOT_DEV, "New file_load_state: FILE_LOAD_NO_MORE_FILES\n");
 	info->file_load_state = FILE_LOAD_NO_MORE_FILES;
@@ -1021,11 +1039,13 @@ static void send_patch_file(struct cg2900_chip_dev *dev)
 	int err;
 	int bytes_sent;
 	struct cg2900_chip_info *info = dev->c_data;
-	int file_name_size = strlen("CG2900_XXXX_XXXX_settings.fw");
 
-	bytes_sent = cg2900_read_and_send_file_part(info->user_in_charge,
-						    info->logger,
-						    &info->file_info);
+	bytes_sent = cg2900_read_and_send_file_part(
+			info->user_in_charge,
+			info->logger,
+			&info->file_info,
+			info->file_info.fw_file_ptc);
+
 	if (bytes_sent > 0) {
 		/* Data sent. Wait for CmdComplete */
 		return;
@@ -1039,34 +1059,8 @@ static void send_patch_file(struct cg2900_chip_dev *dev)
 	/* No data was sent. This file is finished */
 	info->download_state = DOWNLOAD_SUCCESS;
 
-	dev_dbg(BOOT_DEV, "Patch file finished, release used resources\n");
-	release_firmware(info->file_info.fw_file);
-	info->file_info.fw_file = NULL;
+	dev_dbg(BOOT_DEV, "Patch file finished\n");
 
-	/*
-	 * Create the settings file name from HCI revision and sub_version.
-	 * file_name_size does not include terminating NULL character
-	 * so add 1.
-	 */
-	err = snprintf(info->settings_file_name, file_name_size + 1,
-			"CG2900_%04X_%04X_settings.fw", dev->chip.hci_revision,
-			dev->chip.hci_sub_version);
-	if (err == file_name_size) {
-		dev_dbg(BOOT_DEV, "Downloading settings file %s\n",
-				info->settings_file_name);
-	} else {
-		dev_err(BOOT_DEV, "Settings file name failed! err=%d\n", err);
-		goto error_handling;
-	}
-
-	/* Retrieve the settings file */
-	err = request_firmware(&info->file_info.fw_file,
-			       info->settings_file_name,
-			       info->dev);
-	if (err) {
-		dev_err(BOOT_DEV, "Couldn't get settings file (%d)\n", err);
-		goto error_handling;
-	}
 	/* Now send the settings file */
 	dev_dbg(BOOT_DEV,
 		"New file_load_state: FILE_LOAD_GET_STATIC_SETTINGS\n");
@@ -1168,16 +1162,16 @@ shut_down_chip:
 		int err;
 
 		err = mfd_add_devices(dev->dev, main_info->cell_base_id,
-				      cg2900_devs, info->mfd_size, NULL, 0);
+				cg2900_devs, info->mfd_size, NULL, 0);
 		if (err) {
 			dev_err(dev->dev, "Failed to add cg2900_devs (%d)\n",
-				err);
+					err);
 			goto finished;
 		}
 
 		err = mfd_add_devices(dev->dev, main_info->cell_base_id,
-				      cg2900_char_devs, info->mfd_char_size,
-				      NULL, 0);
+				cg2900_char_devs, info->mfd_char_size,
+				NULL, 0);
 		if (err) {
 			dev_err(dev->dev, "Failed to add cg2900_char_devs (%d)"
 					"\n", err);
@@ -1189,34 +1183,98 @@ shut_down_chip:
 		 * Increase base ID so next connected transport will not get the
 		 * same device IDs.
 		 */
-		main_info->cell_base_id += MAX(info->mfd_size,
-					       info->mfd_char_size);
+		main_info->cell_base_id +=
+				MAX(info->mfd_size, info->mfd_char_size);
+
+		if (dev->chip.hci_revision == CG2905_PG2_REV) {
+			err = mfd_add_devices(dev->dev, main_info->cell_base_id,
+					cg2905_extra_devs,
+					info->mfd_extra_size, NULL, 0);
+			if (err) {
+				dev_err(dev->dev, "Failed to add cg2905_extra_devs "
+						"(%d)\n", err);
+				goto finished;
+			}
+
+			err = mfd_add_devices(dev->dev, main_info->cell_base_id,
+					cg2905_extra_char_devs,
+					info->mfd_extra_char_size, NULL, 0);
+			if (err) {
+				dev_err(dev->dev, "Failed to add cg2905_extra_char_devs "
+						"(%d)\n", err);
+				mfd_remove_devices(dev->dev);
+				goto finished;
+			}
+
+			/*
+			 * Increase base ID so next connected transport
+			 * will not get the same device IDs.
+			 */
+			main_info->cell_base_id +=
+					MAX(info->mfd_extra_size,
+						info->mfd_extra_char_size);
+		} else if (dev->chip.hci_revision == CG2910_PG1_REV ||
+				dev->chip.hci_revision == CG2910_PG1_05_REV) {
+			err = mfd_add_devices(dev->dev, main_info->cell_base_id,
+					cg2910_extra_devs,
+					info->mfd_extra_size, NULL, 0);
+			if (err) {
+				dev_err(dev->dev, "Failed to add cg2910_extra_devs "
+						"(%d)\n", err);
+				goto finished;
+			}
+
+			err = mfd_add_devices(dev->dev, main_info->cell_base_id,
+					cg2910_extra_char_devs,
+					info->mfd_extra_char_size, NULL, 0);
+			if (err) {
+				dev_err(dev->dev, "Failed to add cg2910_extra_char_devs "
+						"(%d)\n", err);
+				mfd_remove_devices(dev->dev);
+				goto finished;
+			}
+
+			/*
+			 * Increase base ID so next connected transport
+			 * will not get the same device IDs.
+			 */
+			main_info->cell_base_id +=
+					MAX(info->mfd_extra_size,
+						info->mfd_extra_char_size);
+		} else if (dev->chip.hci_revision == CG2910_PG2_REV) {
+
+			err = mfd_add_devices(dev->dev, main_info->cell_base_id,
+					cg2910_extra_devs_pg2,
+					info->mfd_extra_size, NULL, 0);
+			if (err) {
+				dev_err(dev->dev, "Failed to add cg2910_extra_devs_pg2 "
+						"(%d)\n", err);
+				goto finished;
+			}
+
+			err = mfd_add_devices(dev->dev, main_info->cell_base_id,
+					cg2910_extra_char_devs_pg2,
+					info->mfd_extra_char_size, NULL, 0);
+			if (err) {
+				dev_err(dev->dev, "Failed to add cg2910_extra_char_devs_pg2 "
+						"(%d)\n", err);
+				mfd_remove_devices(dev->dev);
+				goto finished;
+			}
+
+			/*
+			 * Increase base ID so next connected transport
+			 * will not get the same device IDs.
+			 */
+			main_info->cell_base_id +=
+					MAX(info->mfd_extra_size,
+						info->mfd_extra_char_size);
+		}
+
 		info->startup = false;
 	}
 
 finished:
-	kfree(my_work);
-}
-
-/**
- * work_chip_shutdown() - Shut down the chip.
- * @work:	Reference to work data.
- */
-static void work_chip_shutdown(struct work_struct *work)
-{
-	struct cg2900_work *my_work;
-	struct cg2900_user_data *user;
-
-	if (!work) {
-		dev_err(MAIN_DEV, "work_chip_shutdown: work == NULL\n");
-		return;
-	}
-
-	my_work = container_of(work, struct cg2900_work, work);
-	user = my_work->user_data;
-
-	chip_shutdown(user);
-
 	kfree(my_work);
 }
 
@@ -1252,11 +1310,9 @@ static void work_reset_after_error(struct work_struct *work)
  */
 static void work_load_patch_and_settings(struct work_struct *work)
 {
-	int err = 0;
 	struct cg2900_work *my_work;
 	struct cg2900_chip_dev *dev;
 	struct cg2900_chip_info *info;
-	int file_name_size = strlen("CG2900_XXXX_XXXX_patch.fw");
 
 	if (!work) {
 		dev_err(MAIN_DEV,
@@ -1272,22 +1328,6 @@ static void work_load_patch_and_settings(struct work_struct *work)
 	if (info->boot_state != BOOT_GET_FILES_TO_LOAD)
 		goto finished;
 
-	/*
-	 * Create the patch file name from HCI revision and sub_version.
-	 * file_name_size does not include terminating NULL character
-	 * so add 1.
-	 */
-	err = snprintf(info->patch_file_name, file_name_size + 1,
-			"CG2900_%04X_%04X_patch.fw", dev->chip.hci_revision,
-			dev->chip.hci_sub_version);
-	if (err == file_name_size) {
-		dev_dbg(BOOT_DEV, "Downloading patch file %s\n",
-				info->patch_file_name);
-	} else {
-		dev_err(BOOT_DEV, "Patch file name failed! err=%d\n", err);
-		goto error_handling;
-	}
-
 	/* We now all info needed */
 	dev_dbg(BOOT_DEV, "New boot_state: BOOT_DOWNLOAD_PATCH\n");
 	info->boot_state = BOOT_DOWNLOAD_PATCH;
@@ -1297,24 +1337,11 @@ static void work_load_patch_and_settings(struct work_struct *work)
 	info->file_load_state = FILE_LOAD_GET_PATCH;
 	info->file_info.chunk_id = 0;
 	info->file_info.file_offset = 0;
-	info->file_info.fw_file = NULL;
 
-	/* OK. Now it is time to download the patches */
-	err = request_firmware(&(info->file_info.fw_file),
-			       info->patch_file_name,
-			       dev->dev);
-	if (err < 0) {
-		dev_err(BOOT_DEV, "Couldn't get patch file (%d)\n", err);
-		goto error_handling;
-	}
 	send_patch_file(dev);
 
 	goto finished;
 
-error_handling:
-	dev_dbg(BOOT_DEV, "New boot_state: BOOT_FAILED\n");
-	info->boot_state = BOOT_FAILED;
-	chip_startup_finished(info, -EIO);
 finished:
 	kfree(my_work);
 }
@@ -1480,6 +1507,24 @@ static bool handle_vs_write_file_block_cmd_complete(struct cg2900_chip_dev *dev,
 	    info->download_state != DOWNLOAD_PENDING)
 		return false;
 
+	if (HCI_BT_WRONG_SEQ_ERROR == status && info->file_info.chunk_id == 1 &&
+			(CG2905_PG1_05_REV == dev->chip.hci_revision ||
+			CG2910_PG1_REV == dev->chip.hci_revision ||
+			CG2910_PG1_05_REV == dev->chip.hci_revision)) {
+		/*
+		 * Because of bug in CG2905/CG2910 PG1 H/W, the first chunk
+		 * will return an error of wrong sequence number. As a
+		 * workaround the first chunk needs to be sent again.
+		 */
+		info->file_info.chunk_id = 0;
+		info->file_info.file_offset = 0;
+		/*
+		 * Set the status back to success so that it continues on the
+		 * success path rather than failure.
+		 */
+		status = HCI_BT_ERROR_NO_ERROR;
+	}
+
 	if (HCI_BT_ERROR_NO_ERROR == status)
 		cg2900_create_work_item(info->wq, work_cont_file_download, dev);
 	else {
@@ -1490,10 +1535,6 @@ static bool handle_vs_write_file_block_cmd_complete(struct cg2900_chip_dev *dev,
 		info->download_state = DOWNLOAD_FAILED;
 		dev_dbg(BOOT_DEV, "New boot_state: BOOT_FAILED\n");
 		info->boot_state = BOOT_FAILED;
-		if (info->file_info.fw_file) {
-			release_firmware(info->file_info.fw_file);
-			info->file_info.fw_file = NULL;
-		}
 		cg2900_create_work_item(info->wq, work_reset_after_error, dev);
 	}
 
@@ -1529,10 +1570,6 @@ static bool handle_vs_write_file_block_cmd_status(struct cg2900_chip_dev *dev,
 		info->download_state = DOWNLOAD_FAILED;
 		dev_dbg(BOOT_DEV, "New boot_state: BOOT_FAILED\n");
 		info->boot_state = BOOT_FAILED;
-		if (info->file_info.fw_file) {
-			release_firmware(info->file_info.fw_file);
-			info->file_info.fw_file = NULL;
-		}
 		cg2900_create_work_item(info->wq, work_reset_after_error, dev);
 	}
 
@@ -1592,7 +1629,12 @@ static bool handle_vs_system_reset_cmd_complete(struct cg2900_chip_dev *dev,
 		status);
 
 	if (HCI_BT_ERROR_NO_ERROR == status) {
-		if (dev->chip.hci_revision == CG2900_PG2_REV) {
+		if (dev->chip.hci_revision == CG2900_PG2_REV ||
+				dev->chip.hci_revision == CG2905_PG1_05_REV ||
+				dev->chip.hci_revision == CG2905_PG2_REV ||
+				dev->chip.hci_revision == CG2910_PG1_REV ||
+				dev->chip.hci_revision == CG2910_PG1_05_REV ||
+				dev->chip.hci_revision == CG2910_PG2_REV) {
 			/*
 			 * We must now wait for the selftest results. They will
 			 * take a certain amount of time to finish so start a
@@ -1604,14 +1646,6 @@ static bool handle_vs_system_reset_cmd_complete(struct cg2900_chip_dev *dev,
 			queue_delayed_work(info->wq, &info->selftest_work.work,
 					   msecs_to_jiffies(SELFTEST_INITIAL));
 			info->nbr_of_polls = 0;
-		} else {
-			/*
-			 * We are now almost finished. Shut off BT Core. It will
-			 * be re-enabled by the Bluetooth driver when needed.
-			 */
-			dev_dbg(BOOT_DEV, "New boot_state: BOOT_DISABLE_BT\n");
-			info->boot_state = BOOT_DISABLE_BT;
-			send_bt_enable(info, CG2900_BT_DISABLE);
 		}
 	} else {
 		dev_err(BOOT_DEV,
@@ -1660,9 +1694,9 @@ static bool handle_vs_read_selftests_cmd_complete(struct cg2900_chip_dev *dev,
 		 * We are now almost finished. Shut off BT Core. It will
 		 * be re-enabled by the Bluetooth driver when needed.
 		 */
-		dev_dbg(BOOT_DEV, "New boot_state: BOOT_DISABLE_BT\n");
-		info->boot_state = BOOT_DISABLE_BT;
-		send_bt_enable(info, CG2900_BT_DISABLE);
+		dev_dbg(BOOT_DEV, "New boot_state: BOOT_READY\n");
+		info->boot_state = BOOT_READY;
+		chip_startup_finished(info, 0);
 		return true;
 	} else if (CG2900_BT_SELFTEST_NOT_COMPLETED == evt->result) {
 		/*
@@ -1688,80 +1722,6 @@ err_handling:
 	dev_dbg(BOOT_DEV, "New boot_state: BOOT_FAILED\n");
 	info->boot_state = BOOT_FAILED;
 	chip_startup_finished(info, -EIO);
-	return true;
-}
-
-/**
- * handle_vs_bt_enable_cmd_status() - Handles HCI VS BtEnable Command Status event.
- * @status:	Returned status of BtEnable command.
- *
- * Returns:
- *   true,  if packet was handled internally,
- *   false, otherwise.
- */
-static bool handle_vs_bt_enable_cmd_status(struct cg2900_chip_dev *dev,
-					   u8 status)
-{
-	struct cg2900_chip_info *info = dev->c_data;
-
-	if (info->boot_state != BOOT_DISABLE_BT)
-		return false;
-
-	dev_dbg(BOOT_DEV, "handle_vs_bt_enable_cmd_status status %d\n", status);
-
-	/*
-	 * Only do something if there is an error. Otherwise we will wait for
-	 * CmdComplete.
-	 */
-	if (HCI_BT_ERROR_NO_ERROR != status) {
-		dev_err(BOOT_DEV,
-			"Received BtEnable status event with status 0x%X\n",
-			status);
-		dev_dbg(BOOT_DEV, "New boot_state: BOOT_FAILED\n");
-		info->boot_state = BOOT_FAILED;
-		chip_startup_finished(info, -EIO);
-	}
-
-	return true;
-}
-
-/**
- * handle_vs_bt_enable_cmd_complete() - Handle HCI VS BtEnable Command Complete event.
- * @data:	Pointer to received HCI data packet.
- *
- * Returns:
- *   true,  if packet was handled internally,
- *   false, otherwise.
- */
-static bool handle_vs_bt_enable_cmd_complete(struct cg2900_chip_dev *dev,
-					     u8 *data)
-{
-	u8 status = data[0];
-	struct cg2900_chip_info *info = dev->c_data;
-
-	if (info->boot_state != BOOT_DISABLE_BT)
-		return false;
-
-	dev_dbg(BOOT_DEV, "handle_vs_bt_enable_cmd_complete status %d\n",
-		status);
-
-	if (HCI_BT_ERROR_NO_ERROR == status) {
-		/*
-		 * The boot sequence is now finished successfully.
-		 * Set states and signal to waiting thread.
-		 */
-		dev_dbg(BOOT_DEV, "New boot_state: BOOT_READY\n");
-		info->boot_state = BOOT_READY;
-		chip_startup_finished(info, 0);
-	} else {
-		dev_err(BOOT_DEV,
-			"Received BtEnable complete event with status 0x%X\n",
-			status);
-		dev_dbg(BOOT_DEV, "New boot_state: BOOT_FAILED\n");
-		info->boot_state = BOOT_FAILED;
-		chip_startup_finished(info, -EIO);
-	}
-
 	return true;
 }
 
@@ -1817,9 +1777,6 @@ static bool handle_rx_data_bt_evt(struct cg2900_chip_dev *dev,
 		else if (op_code == CG2900_BT_OP_VS_SYSTEM_RESET)
 			pkt_handled = handle_vs_system_reset_cmd_complete(dev,
 									  data);
-		else if (op_code == CG2900_BT_OP_VS_BT_ENABLE)
-			pkt_handled = handle_vs_bt_enable_cmd_complete(dev,
-								       data);
 		else if (op_code == CG2900_BT_OP_VS_READ_SELTESTS_RESULT)
 			pkt_handled = handle_vs_read_selftests_cmd_complete(dev,
 									data);
@@ -1836,9 +1793,29 @@ static bool handle_rx_data_bt_evt(struct cg2900_chip_dev *dev,
 		if (op_code == CG2900_BT_OP_VS_WRITE_FILE_BLOCK)
 			pkt_handled = handle_vs_write_file_block_cmd_status
 				(dev, cmd_status->status);
-		else if (op_code == CG2900_BT_OP_VS_BT_ENABLE)
-			pkt_handled = handle_vs_bt_enable_cmd_status
-				(dev, cmd_status->status);
+	} else if (HCI_EV_VENDOR_SPECIFIC == evt->evt) {
+		/*
+		 * In the new versions of CG29xx i.e. after CG2900 we
+		 * will recieve HCI_Event_VS_Write_File_Block_Complete
+		 * instead of Command Complete while downloading
+		 * the patches/settings file
+		 */
+		struct bt_vs_evt *cmd_evt;
+		cmd_evt = (struct bt_vs_evt *)data;
+
+		if (cmd_evt->evt_id == CG2900_EV_VS_WRITE_FILE_BLOCK_COMPLETE) {
+			struct bt_vs_write_file_block_evt *write_block_evt;
+			write_block_evt =
+				(struct bt_vs_write_file_block_evt *)
+				cmd_evt->data;
+			dev_dbg(dev->dev, "Received VS write file block complete\n");
+			pkt_handled = handle_vs_write_file_block_cmd_complete(
+				dev, &write_block_evt->status);
+		} else {
+			dev_err(dev->dev, "Vendor Specific Event 0x%x"
+					"Not Supported\n", cmd_evt->evt_id);
+			return false;
+		}
 	} else if (HCI_EV_HW_ERROR == evt->evt) {
 		struct hci_ev_hw_error *hw_error;
 
@@ -2185,6 +2162,16 @@ static void chip_removed(struct cg2900_chip_dev *dev)
 
 	cancel_delayed_work(&info->selftest_work.work);
 	mfd_remove_devices(dev->dev);
+	if (info->file_info.fw_file_ptc) {
+		release_firmware(info->file_info.fw_file_ptc);
+		info->file_info.fw_file_ptc = NULL;
+	}
+
+	if (info->file_info.fw_file_ssf) {
+		release_firmware(info->file_info.fw_file_ssf);
+		info->file_info.fw_file_ssf = NULL;
+	}
+
 	kfree(info->settings_file_name);
 	kfree(info->patch_file_name);
 	destroy_workqueue(info->wq);
@@ -2229,51 +2216,6 @@ static void last_fm_user_removed(struct cg2900_chip_info *info)
 }
 
 /**
- * chip_shutdown() - Reset and power the chip off.
- * @user:	MFD device.
- */
-static void chip_shutdown(struct cg2900_user_data *user)
-{
-	struct hci_command_hdr cmd;
-	struct cg2900_chip_dev *dev = cg2900_get_prv(user);
-	struct cg2900_chip_info *info = dev->c_data;
-
-	dev_dbg(user->dev, "chip_shutdown\n");
-
-	/* First do a quick power switch of the chip to assure a good state */
-	if (dev->t_cb.set_chip_power)
-		dev->t_cb.set_chip_power(dev, false);
-
-	/*
-	 * Wait 50ms before continuing to be sure that the chip detects
-	 * chip power off.
-	 */
-	schedule_timeout_killable(
-			msecs_to_jiffies(LINE_TOGGLE_DETECT_TIMEOUT));
-
-	if (dev->t_cb.set_chip_power)
-		dev->t_cb.set_chip_power(dev, true);
-
-	/* Wait 100ms before continuing to be sure that the chip is ready */
-	schedule_timeout_killable(msecs_to_jiffies(CHIP_READY_TIMEOUT));
-
-	if (user != info->bt_audio && user != info->fm_audio)
-		info->last_user = user;
-	info->user_in_charge = user;
-
-	/*
-	 * Transmit HCI reset command to ensure the chip is using
-	 * the correct transport and to put BT part in reset.
-	 */
-	dev_dbg(user->dev, "New closing_state: CLOSING_RESET\n");
-	info->closing_state = CLOSING_RESET;
-	cmd.opcode = cpu_to_le16(HCI_OP_RESET);
-	cmd.plen = 0; /* No parameters for HCI reset */
-	cg2900_send_bt_cmd(info->user_in_charge, info->logger, &cmd,
-			   sizeof(cmd));
-}
-
-/**
  * chip_startup_finished() - Called when chip startup has finished.
  * @info:	Chip handler info.
  * @err:	Result of chip startup, 0 for no error.
@@ -2287,8 +2229,8 @@ static void chip_startup_finished(struct cg2900_chip_info *info, int err)
 
 	if (err)
 		/* Shutdown the chip */
-		cg2900_create_work_item(info->wq, work_chip_shutdown,
-					info->user_in_charge);
+		cg2900_create_work_item(info->wq, work_power_off_chip,
+				cg2900_get_prv(info->user_in_charge));
 	else {
 		dev_dbg(BOOT_DEV, "New main_state: CG2900_ACTIVE\n");
 		info->main_state = CG2900_ACTIVE;
@@ -2365,7 +2307,7 @@ static int cg2900_open(struct cg2900_user_data *user)
 	err = wait_event_timeout(main_wait_queue,
 			(CG2900_IDLE == info->main_state ||
 			 CG2900_ACTIVE == info->main_state),
-			msecs_to_jiffies(LINE_TOGGLE_DETECT_TIMEOUT));
+			msecs_to_jiffies(CHIP_STARTUP_TIMEOUT));
 	if (err <= 0) {
 		if (CG2900_INIT == info->main_state)
 			dev_err(user->dev, "Transport not opened\n");
@@ -2443,6 +2385,21 @@ static int cg2900_open(struct cg2900_user_data *user)
 			err = -EIO;
 			goto err_free_list_item;
 		}
+
+		if (CG2905_PG1_05_REV == dev->chip.hci_revision ||
+				CG2910_PG1_REV == dev->chip.hci_revision ||
+				CG2910_PG1_05_REV == dev->chip.hci_revision) {
+			/*
+			 * Switch to higher baud rate
+			 * Because of bug in CG2905/CG2910 PG1 H/W,
+			 * We have to download the ptc/ssf files
+			 * at lower baud and then switch to Higher Baud
+			 */
+			if (info->chip_dev->t_cb.set_baud_rate)
+				info->chip_dev->t_cb.set_baud_rate(
+						info->chip_dev, false);
+		}
+
 	}
 
 	list_add_tail(&tmp->list, &info->open_channels);
@@ -2709,7 +2666,8 @@ static void cg2900_close(struct cg2900_user_data *user)
 
 	dev_dbg(user->dev, "New main_state: CG2900_CLOSING\n");
 	info->main_state = CG2900_CLOSING;
-	chip_shutdown(user);
+	/* Finish by turning off the chip */
+	cg2900_create_work_item(info->wq, work_power_off_chip, dev);
 
 	dev_dbg(user->dev, "Wait up to 15 seconds for chip to shut-down\n");
 	wait_event_timeout(main_wait_queue,
@@ -2905,7 +2863,7 @@ static int cg2900_reset(struct cg2900_user_data *user)
 	dev_dbg(user->dev, "New main_state: CG2900_RESETING\n");
 	info->main_state = CG2900_RESETING;
 
-	chip_shutdown(user);
+	cg2900_create_work_item(info->wq, work_power_off_chip, dev);
 
 	/*
 	 * Inform all opened channels about the reset and free the user devices
@@ -3089,6 +3047,15 @@ static struct cg2900_user_data btacl_data = {
 static struct cg2900_user_data btevt_data = {
 	.h4_channel = CHANNEL_BT_EVT,
 };
+static struct cg2900_user_data nfc_data = {
+	.h4_channel = CHANNEL_NFC,
+};
+static struct cg2900_user_data antcmd_data = {
+	.h4_channel = CHANNEL_ANT_CMD,
+};
+static struct cg2900_user_data antdat_data = {
+	.h4_channel = CHANNEL_ANT_DAT,
+};
 static struct cg2900_user_data fm_data = {
 	.h4_channel = CHANNEL_FM_RADIO,
 };
@@ -3193,6 +3160,45 @@ static struct mfd_cell cg2900_devs[] = {
 	},
 };
 
+static struct mfd_cell cg2905_extra_devs[] = {
+	{
+		.name = "cg2900-antcmd",
+		.platform_data = &antcmd_data,
+		.pdata_size = sizeof(antcmd_data)
+	},
+	{
+		.name = "cg2900-antdat",
+		.platform_data = &antdat_data,
+		.pdata_size = sizeof(antdat_data)
+	},
+};
+
+static struct mfd_cell cg2910_extra_devs[] = {
+	{
+		.name = "cg2900-nfc",
+		.platform_data = &nfc_data,
+		.pdata_size = sizeof(nfc_data)
+	},
+};
+
+static struct mfd_cell cg2910_extra_devs_pg2[] = {
+	{
+		.name = "cg2900-nfc",
+		.platform_data = &nfc_data,
+		.pdata_size = sizeof(nfc_data)
+	},
+	{
+		.name = "cg2900-antcmd",
+		.platform_data = &antcmd_data,
+		.pdata_size = sizeof(antcmd_data)
+	},
+	{
+		.name = "cg2900-antdat",
+		.platform_data = &antdat_data,
+		.pdata_size = sizeof(antdat_data)
+	},
+};
+
 static struct cg2900_user_data char_btcmd_data = {
 	.channel_data = {
 		.char_dev_name = CG2900_BT_CMD,
@@ -3210,6 +3216,24 @@ static struct cg2900_user_data char_btevt_data = {
 		.char_dev_name = CG2900_BT_EVT,
 	},
 	.h4_channel = CHANNEL_BT_EVT,
+};
+static struct cg2900_user_data char_nfc_data = {
+	.channel_data = {
+		.char_dev_name = CG2900_NFC,
+	},
+	.h4_channel = CHANNEL_NFC,
+};
+static struct cg2900_user_data char_antcmd_data = {
+	.channel_data = {
+		.char_dev_name = CG2900_ANT_CMD,
+	},
+	.h4_channel = CHANNEL_ANT_CMD,
+};
+static struct cg2900_user_data char_antdat_data = {
+	.channel_data = {
+		.char_dev_name = CG2900_ANT_DAT,
+	},
+	.h4_channel = CHANNEL_ANT_DAT,
 };
 static struct cg2900_user_data char_fm_data = {
 	.channel_data = {
@@ -3351,6 +3375,51 @@ static struct mfd_cell cg2900_char_devs[] = {
 	},
 };
 
+static struct mfd_cell cg2905_extra_char_devs[] = {
+	{
+		.name = "cg2900-chardev",
+		.id = 12,
+		.platform_data = &char_antcmd_data,
+		.pdata_size = sizeof(char_antcmd_data)
+	},
+	{
+		.name = "cg2900-chardev",
+		.id = 13,
+		.platform_data = &char_antdat_data,
+		.pdata_size = sizeof(char_antdat_data)
+	},
+};
+
+static struct mfd_cell cg2910_extra_char_devs[] = {
+	{
+		.name = "cg2900-chardev",
+		.id = 12,
+		.platform_data = &char_nfc_data,
+		.pdata_size = sizeof(char_nfc_data)
+	},
+};
+
+static struct mfd_cell cg2910_extra_char_devs_pg2[] = {
+	{
+		.name = "cg2900-chardev",
+		.id = 12,
+		.platform_data = &char_nfc_data,
+		.pdata_size = sizeof(char_nfc_data)
+	},
+	{
+		.name = "cg2900-chardev",
+		.id = 13,
+		.platform_data = &char_antcmd_data,
+		.pdata_size = sizeof(char_antcmd_data)
+	},
+	{
+		.name = "cg2900-chardev",
+		.id = 14,
+		.platform_data = &char_antdat_data,
+		.pdata_size = sizeof(char_antdat_data)
+	},
+};
+
 /**
  * set_plat_data() - Initializes data for an MFD cell.
  * @cell:	MFD cell.
@@ -3379,6 +3448,88 @@ static void set_plat_data(struct mfd_cell *cell, struct cg2900_chip_dev *dev)
 }
 
 /**
+ * fetch_firmware_files() - Do a request_firmware for ssf/ptc files.
+ * @dev:	Chip info structure.
+ *
+ * Returns:
+ *   system wide error.
+ */
+static int fetch_firmware_files(struct cg2900_chip_dev *dev,
+		struct cg2900_chip_info *info)
+{
+	int filename_size_ptc = strlen("CG29XX_XXXX_XXXX_patch.fw");
+	int filename_size_ssf = strlen("CG29XX_XXXX_XXXX_settings.fw");
+	int err;
+
+	/*
+	 * Create the patch file name from HCI revision and sub_version.
+	 * filename_size_ptc does not include terminating NULL character
+	 * so add 1.
+	 */
+	err = snprintf(info->patch_file_name, filename_size_ptc + 1,
+			"CG29XX_%04X_%04X_patch.fw", dev->chip.hci_revision,
+			dev->chip.hci_sub_version);
+	if (err == filename_size_ptc) {
+		dev_dbg(BOOT_DEV, "Downloading patch file %s\n",
+				info->patch_file_name);
+	} else {
+		dev_err(BOOT_DEV, "Patch file name failed! err=%d\n", err);
+		goto error_handling;
+	}
+
+	/* OK. Now it is time to download the patches */
+	err = request_firmware(&(info->file_info.fw_file_ptc),
+			info->patch_file_name,
+			dev->dev);
+	if (err < 0) {
+		dev_err(BOOT_DEV, "Couldn't get patch file "
+				"(%d)\n", err);
+		goto error_handling;
+	}
+
+	/*
+	 * Create the settings file name from HCI revision and sub_version.
+	 * filename_size_ssf does not include terminating NULL character
+	 * so add 1.
+	 */
+	err = snprintf(info->settings_file_name, filename_size_ssf + 1,
+			"CG29XX_%04X_%04X_settings.fw", dev->chip.hci_revision,
+			dev->chip.hci_sub_version);
+	if (err == filename_size_ssf) {
+		dev_dbg(BOOT_DEV, "Downloading settings file %s\n",
+				info->settings_file_name);
+	} else {
+		dev_err(BOOT_DEV, "Settings file name failed! err=%d\n", err);
+		goto error_handling;
+	}
+
+	/* Retrieve the settings file */
+	err = request_firmware(&info->file_info.fw_file_ssf,
+			info->settings_file_name,
+			info->dev);
+	if (err) {
+		dev_err(BOOT_DEV, "Couldn't get settings file "
+				"(%d)\n", err);
+		goto error_handling;
+	}
+
+	return 0;
+
+error_handling:
+	if (info->file_info.fw_file_ptc) {
+		release_firmware(info->file_info.fw_file_ptc);
+		info->file_info.fw_file_ptc = NULL;
+	}
+
+	if (info->file_info.fw_file_ssf) {
+		release_firmware(info->file_info.fw_file_ssf);
+		info->file_info.fw_file_ssf = NULL;
+	}
+
+	return err;
+}
+
+/**
  * check_chip_support() - Checks if connected chip is handled by this driver.
  * @dev:	Chip info structure.
  *
@@ -3395,24 +3546,19 @@ static bool check_chip_support(struct cg2900_chip_dev *dev)
 	struct cg2900_platform_data *pf_data;
 	struct cg2900_chip_info *info;
 	int i;
+	int err;
 
 	dev_dbg(dev->dev, "check_chip_support\n");
 
 	/*
-	 * Check if this is a CG2900 revision.
+	 * Check if this is a CG29XX revision.
 	 * We do not care about the sub-version at the moment. Change this if
 	 * necessary.
 	 */
-	if ((dev->chip.manufacturer != CG2900_SUPP_MANUFACTURER) ||
-	    (dev->chip.hci_revision != CG2900_PG1_SPECIAL_REV &&
-	     (dev->chip.hci_revision < CG2900_SUPP_REVISION_MIN ||
-	      dev->chip.hci_revision > CG2900_SUPP_REVISION_MAX))) {
-		dev_dbg(dev->dev, "Chip not supported by CG2900 driver\n"
-			"\tMan: 0x%02X\n"
-			"\tRev: 0x%04X\n"
-			"\tSub: 0x%04X\n",
-			dev->chip.manufacturer, dev->chip.hci_revision,
-			dev->chip.hci_sub_version);
+	if (dev->chip.manufacturer != CG2900_SUPP_MANUFACTURER
+		|| !(check_chip_revision_support(dev->chip.hci_revision))) {
+		dev_err(dev->dev, "Unsupported Chip revision:0x%x\n",
+				dev->chip.hci_revision);
 		return false;
 	}
 
@@ -3461,6 +3607,13 @@ static bool check_chip_support(struct cg2900_chip_dev *dev)
 		goto err_handling_free_patch_name;
 	}
 
+	err = fetch_firmware_files(dev, info);
+	if (err) {
+		dev_err(dev->dev,
+				"Couldn't fetch firmware files\n");
+		goto err_handling_free_patch_name;
+	}
+
 	info->selftest_work.data = info;
 	INIT_DELAYED_WORK(&info->selftest_work.work,
 			  work_send_read_selftest_cmd);
@@ -3477,14 +3630,41 @@ static bool check_chip_support(struct cg2900_chip_dev *dev)
 	btacl_data.channel_data.bt_bus = pf_data->bus;
 	btevt_data.channel_data.bt_bus = pf_data->bus;
 
+	/* Set the Platform data based on supported chip */
 	for (i = 0; i < ARRAY_SIZE(cg2900_devs); i++)
 		set_plat_data(&cg2900_devs[i], dev);
 	for (i = 0; i < ARRAY_SIZE(cg2900_char_devs); i++)
 		set_plat_data(&cg2900_char_devs[i], dev);
-
-	info->startup = true;
 	info->mfd_size = ARRAY_SIZE(cg2900_devs);
 	info->mfd_char_size = ARRAY_SIZE(cg2900_char_devs);
+
+	if (dev->chip.hci_revision == CG2905_PG2_REV) {
+		for (i = 0; i < ARRAY_SIZE(cg2905_extra_devs); i++)
+			set_plat_data(&cg2905_extra_devs[i], dev);
+		for (i = 0; i < ARRAY_SIZE(cg2905_extra_char_devs); i++)
+			set_plat_data(&cg2905_extra_char_devs[i], dev);
+		info->mfd_extra_size = ARRAY_SIZE(cg2905_extra_devs);
+		info->mfd_extra_char_size = ARRAY_SIZE(cg2905_extra_char_devs);
+	} else if (dev->chip.hci_revision == CG2910_PG1_REV ||
+			dev->chip.hci_revision == CG2910_PG1_05_REV) {
+		for (i = 0; i < ARRAY_SIZE(cg2910_extra_devs); i++)
+			set_plat_data(&cg2910_extra_devs[i], dev);
+		for (i = 0; i < ARRAY_SIZE(cg2910_extra_char_devs); i++)
+			set_plat_data(&cg2910_extra_char_devs[i], dev);
+		info->mfd_extra_size = ARRAY_SIZE(cg2910_extra_devs);
+		info->mfd_extra_char_size = ARRAY_SIZE(cg2910_extra_char_devs);
+	} else if (dev->chip.hci_revision == CG2910_PG2_REV) {
+		for (i = 0; i < ARRAY_SIZE(cg2910_extra_devs_pg2); i++)
+			set_plat_data(&cg2910_extra_devs_pg2[i], dev);
+		for (i = 0; i < ARRAY_SIZE(cg2910_extra_char_devs_pg2); i++)
+			set_plat_data(&cg2910_extra_char_devs_pg2[i], dev);
+		info->mfd_extra_size = ARRAY_SIZE(cg2910_extra_devs_pg2);
+		info->mfd_extra_char_size =
+				ARRAY_SIZE(cg2910_extra_char_devs_pg2);
+	}
+
+
+	info->startup = true;
 
 	/*
 	 * The devices will be registered when chip has been powered down, i.e.
@@ -3493,7 +3673,7 @@ static bool check_chip_support(struct cg2900_chip_dev *dev)
 
 	mutex_unlock(&main_info->man_mutex);
 
-	dev_info(dev->dev, "Chip supported by the CG2900 chip driver\n");
+	dev_info(dev->dev, "Chip supported by the CG2900 driver\n");
 
 	/* Finish by turning off the chip */
 	cg2900_create_work_item(info->wq, work_power_off_chip, dev);

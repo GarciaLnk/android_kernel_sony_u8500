@@ -15,7 +15,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/err.h>
-#include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
@@ -27,56 +26,110 @@
  * struct ab8500_ext_regulator_info - ab8500 regulator information
  * @dev: device pointer
  * @desc: regulator description
- * @regulator_dev: regulator device
+ * @rdev: regulator device
+ * @cfg: regulator configuration (extension of regulator FW configuration)
  * @is_enabled: status of regulator (on/off)
  * @fixed_uV: typical voltage (for fixed voltage supplies)
  * @update_bank: bank to control on/off
  * @update_reg: register to control on/off
  * @update_mask: mask to enable/disable and set mode of regulator
  * @update_val: bits holding the regulator current mode
- * @update_val_en: bits to set EN pin active (LPn pin deactive)
+ * @update_val_hp: bits to set EN pin active (LPn pin deactive)
  *                 normally this means high power mode
- * @update_val_en_lp: bits to set EN pin active and LPn pin active
- *                    normally this means low power mode
- * @delay: startup delay in ms
+ * @update_val_lp: bits to set EN pin active and LPn pin active
+ *                 normally this means low power mode
+ * @update_val_hw: bits to set regulator pins in HW control
+ *                 SysClkReq pins and logic will choose mode
  */
 struct ab8500_ext_regulator_info {
 	struct device *dev;
 	struct regulator_desc desc;
-	struct regulator_dev *regulator;
+	struct regulator_dev *rdev;
+	struct ab8500_ext_regulator_cfg *cfg;
 	bool is_enabled;
 	int fixed_uV;
 	u8 update_bank;
 	u8 update_reg;
 	u8 update_mask;
 	u8 update_val;
-	u8 update_val_en;
-	u8 update_val_en_lp;
+	u8 update_val_hp;
+	u8 update_val_lp;
+	u8 update_val_hw;
 };
+
+static int enable(struct ab8500_ext_regulator_info *info, u8 *regval)
+{
+	int ret;
+
+	*regval = info->update_val;
+
+	/*
+	 * To satisfy both HW high power request and SW request, the regulator
+	 * must be on in high power.
+	 */
+	if (info->cfg && info->cfg->hwreq)
+		*regval = info->update_val_hp;
+
+	ret = abx500_mask_and_set_register_interruptible(info->dev,
+		info->update_bank, info->update_reg,
+		info->update_mask, *regval);
+	if (ret < 0)
+		dev_err(rdev_get_dev(info->rdev),
+			"couldn't set enable bits for regulator\n");
+
+	info->is_enabled = true;
+
+	return ret;
+}
 
 static int ab8500_ext_regulator_enable(struct regulator_dev *rdev)
 {
 	int ret;
 	struct ab8500_ext_regulator_info *info = rdev_get_drvdata(rdev);
+	u8 regval;
 
 	if (info == NULL) {
 		dev_err(rdev_get_dev(rdev), "regulator info null pointer\n");
 		return -EINVAL;
 	}
 
-	ret = abx500_mask_and_set_register_interruptible(info->dev,
-		info->update_bank, info->update_reg,
-		info->update_mask, info->update_val);
-	if (ret < 0)
-		dev_err(rdev_get_dev(rdev),
-			"couldn't set enable bits for regulator\n");
-
-	info->is_enabled = true;
+	ret = enable(info, &regval);
 
 	dev_dbg(rdev_get_dev(rdev), "%s-enable (bank, reg, mask, value):"
 		" 0x%02x, 0x%02x, 0x%02x, 0x%02x\n",
 		info->desc.name, info->update_bank, info->update_reg,
-		info->update_mask, info->update_val);
+		info->update_mask, regval);
+
+	return ret;
+}
+
+static int ab8500_ext_regulator_set_suspend_enable(struct regulator_dev *rdev)
+{
+	dev_dbg(rdev_get_dev(rdev), "suspend: ");
+
+	return ab8500_ext_regulator_enable(rdev);
+}
+
+static int disable(struct ab8500_ext_regulator_info *info, u8 *regval)
+{
+	int ret;
+
+	*regval = 0x0;
+
+	/*
+	 * Set the regulator in HW request mode if configured
+	 */
+	if (info->cfg && info->cfg->hwreq)
+		*regval = info->update_val_hw;
+
+	ret = abx500_mask_and_set_register_interruptible(info->dev,
+		info->update_bank, info->update_reg,
+		info->update_mask, *regval);
+	if (ret < 0)
+		dev_err(rdev_get_dev(info->rdev),
+			"couldn't set disable bits for regulator\n");
+
+	info->is_enabled = false;
 
 	return ret;
 }
@@ -85,27 +138,28 @@ static int ab8500_ext_regulator_disable(struct regulator_dev *rdev)
 {
 	int ret;
 	struct ab8500_ext_regulator_info *info = rdev_get_drvdata(rdev);
+	u8 regval;
 
 	if (info == NULL) {
 		dev_err(rdev_get_dev(rdev), "regulator info null pointer\n");
 		return -EINVAL;
 	}
 
-	ret = abx500_mask_and_set_register_interruptible(info->dev,
-		info->update_bank, info->update_reg,
-		info->update_mask, 0x0);
-	if (ret < 0)
-		dev_err(rdev_get_dev(rdev),
-			"couldn't set disable bits for regulator\n");
-
-	info->is_enabled = false;
+	ret = disable(info, &regval);
 
 	dev_dbg(rdev_get_dev(rdev), "%s-disable (bank, reg, mask, value):"
 		" 0x%02x, 0x%02x, 0x%02x, 0x%02x\n",
 		info->desc.name, info->update_bank, info->update_reg,
-		info->update_mask, 0x0);
+		info->update_mask, regval);
 
 	return ret;
+}
+
+static int ab8500_ext_regulator_set_suspend_disable(struct regulator_dev *rdev)
+{
+	dev_dbg(rdev_get_dev(rdev), "suspend: ");
+
+	return ab8500_ext_regulator_disable(rdev);
 }
 
 static int ab8500_ext_regulator_is_enabled(struct regulator_dev *rdev)
@@ -132,12 +186,74 @@ static int ab8500_ext_regulator_is_enabled(struct regulator_dev *rdev)
 		info->desc.name, info->update_bank, info->update_reg,
 		info->update_mask, regval);
 
-	if (regval & info->update_mask)
+	if (((regval & info->update_mask) == info->update_val_lp) ||
+	    ((regval & info->update_mask) == info->update_val_hp))
 		info->is_enabled = true;
 	else
 		info->is_enabled = false;
 
 	return info->is_enabled;
+}
+
+static int ab8500_ext_regulator_set_mode(struct regulator_dev *rdev,
+					 unsigned int mode)
+{
+	int ret = 0;
+	struct ab8500_ext_regulator_info *info = rdev_get_drvdata(rdev);
+
+	if (info == NULL) {
+		dev_err(rdev_get_dev(rdev), "regulator info null pointer\n");
+		return -EINVAL;
+	}
+
+	switch (mode) {
+	case REGULATOR_MODE_NORMAL:
+		info->update_val = info->update_val_hp;
+		break;
+	case REGULATOR_MODE_IDLE:
+		info->update_val = info->update_val_lp;
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
+	if (info->is_enabled) {
+		u8 regval;
+
+		ret = enable(info, &regval);
+		if (ret < 0)
+			dev_err(rdev_get_dev(rdev),
+				"Could not set regulator mode.\n");
+
+		dev_dbg(rdev_get_dev(rdev),
+			"%s-set_mode (bank, reg, mask, value): "
+			"0x%x, 0x%x, 0x%x, 0x%x\n",
+			info->desc.name, info->update_bank, info->update_reg,
+			info->update_mask, regval);
+	}
+
+	return ret;
+}
+
+static unsigned int ab8500_ext_regulator_get_mode(struct regulator_dev *rdev)
+{
+	struct ab8500_ext_regulator_info *info = rdev_get_drvdata(rdev);
+	int ret;
+
+	if (info == NULL) {
+		dev_err(rdev_get_dev(rdev), "regulator info null pointer\n");
+		return -EINVAL;
+	}
+
+	if (info->update_val == info->update_val_hp)
+		ret = REGULATOR_MODE_NORMAL;
+	else if (info->update_val == info->update_val_lp)
+		ret = REGULATOR_MODE_IDLE;
+	else
+		ret = -EINVAL;
+
+	return ret;
 }
 
 static int ab8500_ext_fixed_get_voltage(struct regulator_dev *rdev)
@@ -171,15 +287,64 @@ static int ab8500_ext_list_voltage(struct regulator_dev *rdev,
 
 static struct regulator_ops ab8500_ext_regulator_ops = {
 	.enable			= ab8500_ext_regulator_enable,
+	.set_suspend_enable	= ab8500_ext_regulator_set_suspend_enable,
 	.disable		= ab8500_ext_regulator_disable,
+	.set_suspend_disable	= ab8500_ext_regulator_set_suspend_disable,
 	.is_enabled		= ab8500_ext_regulator_is_enabled,
+	.set_mode		= ab8500_ext_regulator_set_mode,
+	.get_mode		= ab8500_ext_regulator_get_mode,
 	.get_voltage		= ab8500_ext_fixed_get_voltage,
 	.list_voltage		= ab8500_ext_list_voltage,
 };
 
+static struct regulator_ops ab9540_ext_regulator_ops = {
+	.enable			= ab8500_ext_regulator_enable,
+	.disable		= ab8500_ext_regulator_disable,
+	.is_enabled		= ab8500_ext_regulator_is_enabled,
+	.set_mode		= ab8500_ext_regulator_set_mode,
+	.get_mode		= ab8500_ext_regulator_get_mode,
+	.get_voltage		= ab8500_ext_fixed_get_voltage,
+	.list_voltage		= ab8500_ext_list_voltage,
+};
 
 static struct ab8500_ext_regulator_info
 		ab8500_ext_regulator_info[AB8500_NUM_EXT_REGULATORS] = {
+	[AB8500_EXT_SUPPLY1] = {
+		.desc = {
+			.name		= "VEXTSUPPLY1",
+			.ops		= &ab8500_ext_regulator_ops,
+			.type		= REGULATOR_VOLTAGE,
+			.id		= AB8500_EXT_SUPPLY1,
+			.owner		= THIS_MODULE,
+			.n_voltages	= 1,
+		},
+		.fixed_uV		= 1800000,
+		.update_bank		= 0x04,
+		.update_reg		= 0x08,
+		.update_mask		= 0x03,
+		.update_val		= 0x01,
+		.update_val_hp		= 0x01,
+		.update_val_lp		= 0x03,
+		.update_val_hw		= 0x02,
+	},
+	[AB8500_EXT_SUPPLY2] = {
+		.desc = {
+			.name		= "VEXTSUPPLY2",
+			.ops		= &ab8500_ext_regulator_ops,
+			.type		= REGULATOR_VOLTAGE,
+			.id		= AB8500_EXT_SUPPLY2,
+			.owner		= THIS_MODULE,
+			.n_voltages	= 1,
+		},
+		.fixed_uV		= 1360000,
+		.update_bank		= 0x04,
+		.update_reg		= 0x08,
+		.update_mask		= 0x0c,
+		.update_val		= 0x04,
+		.update_val_hp		= 0x04,
+		.update_val_lp		= 0x0c,
+		.update_val_hw		= 0x08,
+	},
 	[AB8500_EXT_SUPPLY3] = {
 		.desc = {
 			.name		= "VEXTSUPPLY3",
@@ -194,8 +359,9 @@ static struct ab8500_ext_regulator_info
 		.update_reg		= 0x08,
 		.update_mask		= 0x30,
 		.update_val		= 0x10,
-		.update_val_en		= 0x10,
-		.update_val_en_lp	= 0x30,
+		.update_val_hp		= 0x10,
+		.update_val_lp		= 0x30,
+		.update_val_hw		= 0x20,
 	},
 };
 
@@ -229,14 +395,14 @@ __devinit int ab8500_ext_regulator_init(struct platform_device *pdev)
 	}
 
 	/* check for AB8500 2.x */
-	if (abx500_get_chip_id(&pdev->dev) < 0x30) {
+	if (is_ab8500_2p0_or_earlier(ab8500)) {
 		struct ab8500_ext_regulator_info *info;
 
 		/* VextSupply3LPn is inverted on AB8500 2.x */
 		info = &ab8500_ext_regulator_info[AB8500_EXT_SUPPLY3];
 		info->update_val = 0x30;
-		info->update_val_en = 0x30;
-		info->update_val_en_lp = 0x10;
+		info->update_val_hp = 0x30;
+		info->update_val_lp = 0x10;
 	}
 
 	/* register all regulators */
@@ -246,23 +412,38 @@ __devinit int ab8500_ext_regulator_init(struct platform_device *pdev)
 		/* assign per-regulator data */
 		info = &ab8500_ext_regulator_info[i];
 		info->dev = &pdev->dev;
+		info->cfg = (struct ab8500_ext_regulator_cfg *)
+			pdata->ext_regulator[i].driver_data;
 
+		if (is_ab9540(ab8500)) {
+			if (info->desc.id == AB8500_EXT_SUPPLY1) {
+				info->desc.ops = &ab9540_ext_regulator_ops;
+				info->fixed_uV = 4500000;
+			}
+			if (info->desc.id == AB8500_EXT_SUPPLY2)
+				info->desc.ops = &ab9540_ext_regulator_ops;
+
+			if (info->desc.id == AB8500_EXT_SUPPLY3) {
+				info->desc.ops = &ab9540_ext_regulator_ops;
+				info->fixed_uV = 3300000;
+			}
+		}
 		/* register regulator with framework */
-		info->regulator = regulator_register(&info->desc, &pdev->dev,
+		info->rdev = regulator_register(&info->desc, &pdev->dev,
 				&pdata->ext_regulator[i], info);
-		if (IS_ERR(info->regulator)) {
-			err = PTR_ERR(info->regulator);
+		if (IS_ERR(info->rdev)) {
+			err = PTR_ERR(info->rdev);
 			dev_err(&pdev->dev, "failed to register regulator %s\n",
 					info->desc.name);
 			/* when we fail, un-register all earlier regulators */
 			while (--i >= 0) {
 				info = &ab8500_ext_regulator_info[i];
-				regulator_unregister(info->regulator);
+				regulator_unregister(info->rdev);
 			}
 			return err;
 		}
 
-		dev_dbg(rdev_get_dev(info->regulator),
+		dev_dbg(rdev_get_dev(info->rdev),
 			"%s-probed\n", info->desc.name);
 	}
 
@@ -277,10 +458,10 @@ __devexit int ab8500_ext_regulator_exit(struct platform_device *pdev)
 		struct ab8500_ext_regulator_info *info = NULL;
 		info = &ab8500_ext_regulator_info[i];
 
-		dev_vdbg(rdev_get_dev(info->regulator),
+		dev_vdbg(rdev_get_dev(info->rdev),
 			"%s-remove\n", info->desc.name);
 
-		regulator_unregister(info->regulator);
+		regulator_unregister(info->rdev);
 	}
 
 	return 0;

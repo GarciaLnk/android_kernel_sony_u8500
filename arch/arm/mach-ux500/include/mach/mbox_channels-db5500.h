@@ -11,6 +11,9 @@
 /* Maximum number of datawords which can be send in one PDU */
 #define MAILBOX_NR_OF_DATAWORDS	3
 
+/* Number of buffers */
+#define NUM_DSP_BUFFER		32
+
 /**
  * mbox_channel_cb_t - Definition of the mailbox channel callback.
  * @data:	Pointer to the data.
@@ -68,5 +71,12 @@ int mbox_channel_send(struct mbox_channel_msg *msg);
  */
 int mbox_channel_revoke_messages(u16 channel);
 
-#endif /*INC_STE_MBOX_H*/
+/**
+ * mbox_channel_deregister - de-register given mailbox channel.
+ * @channel:    Mailbox channel number.
+ *
+ * Returns 0 on success or a negative error code on error.
+ */
+int mbox_channel_deregister(u16 channel);
 
+#endif /*INC_STE_MBOX_H*/

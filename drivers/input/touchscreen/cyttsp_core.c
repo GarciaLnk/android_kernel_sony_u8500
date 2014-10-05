@@ -2,7 +2,13 @@
  * Cypress TrueTouch(TM) Standard Product touchscreen driver.
  * drivers/input/touchscreen/cyttsp_core.c
  *
- * Copyright (C) 2009-2011 Cypress Semiconductor, Inc.
+ * Copyright (C) 2009, 2010 Cypress Semiconductor, Inc.
+ *
+ * Portions created by Sony Ericsson are Copyright (C) 2012 Sony Ericsson Mobile
+ * Communications AB.
+ *
+ * Portions created by Sony Mobile are Copyright (C) 2012 Sony Mobile
+ * Communications AB.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -31,24 +37,19 @@
 #include <linux/module.h>
 #include <linux/input.h>
 #include <linux/slab.h>
+#include <linux/sched.h>
 #include <linux/gpio.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
-#include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/byteorder/generic.h>
 #include <linux/bitops.h>
-#ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
-#endif
 #include <linux/cyttsp.h>
 #include <linux/ctype.h>
-#include <linux/regulator/consumer.h>
 #include "cyttsp_core.h"
 
 #define DBG(x)
-#define DBG2(x)
-#define DBG3(x)
 
 /* rely on kernel input.h to define Multi-Touch capability */
 #ifndef ABS_MT_TRACKING_ID
@@ -56,6 +57,8 @@
 /* value based on linux kernel 2.6.30.10 */
 #define ABS_MT_TRACKING_ID (ABS_MT_BLOB_ID + 1)
 #endif /* ABS_MT_TRACKING_ID */
+
+#define ESD_CHECK_INTERVAL msecs_to_jiffies(3000)
 
 #define	TOUCHSCREEN_TIMEOUT (msecs_to_jiffies(28))
 /* Bootloader File 0 offset */
@@ -98,14 +101,15 @@
 #define INVERT_X(x, xmax)           ((xmax) - (x))
 #define INVERT_Y(y, ymax)           ((ymax) - (y))
 #define SET_HSTMODE(reg, mode)      ((reg) & (mode))
-#define GET_HSTMODE(reg)            ((reg & 0x70) >> 4)
+#define GET_HSTMODE(reg)            (reg & 0x70)
 #define GET_BOOTLOADERMODE(reg)     ((reg & 0x10) >> 4)
 
-/* Watchdog timeout to check if device is reset and no interrupts running */
-#define CY_WDG_TIMEOUT              msecs_to_jiffies(3000)
-#define CY_MODE_ERROR(ps, hst_mode, tt_mode) \
-	((ps == CY_ACTIVE_STATE && GET_HSTMODE(hst_mode) != CY_OPERATE_MODE) ||\
-	GET_BOOTLOADERMODE(tt_mode))
+/* Airtouch: extract the object from TT_STAT register */
+#define GET_OBJECT(reg)             (((reg) & 0x70) >> 4)
+#define HOVER_OBJECT                4
+#define CY_REG_SCN_TYP              0x1C
+#define CY_SCAN_MODE_HOVER          0xC0
+#define CY_SCAN_MODE_NO_HOVER       0
 
 /* maximum number of concurrent ST track IDs */
 #define CY_NUM_ST_TCH_ID            2
@@ -113,17 +117,12 @@
 #define CY_NUM_MT_TCH_ID            4
 /* maximum number of track IDs */
 #define CY_NUM_TRK_ID               16
-/*
- * maximum number of concurrent touches
- * (only CY_NUM_MT_TCH_ID have coord data)
- */
-#define CY_MAX_TCH                  10
+
 /*
  * maximum number of touch reports with
  * current touches=0 before performing Driver reset
  */
 #define CY_MAX_NTCH                 10
-
 #define CY_NTCH                     0 /* lift off */
 #define CY_TCH                      1 /* touch down */
 #define CY_ST_FNGR1_IDX             0
@@ -139,8 +138,9 @@
 #define CY_LARGE_TOOL_WIDTH         255
 #define CY_REG_BASE                 0x00
 #define CY_REG_GEST_SET             0x1E
-#define CY_REG_SCN_TYP              0x1C
 #define CY_REG_ACT_INTRVL           0x1D
+#define CY_REG_SYSTEM               0x1C
+#define CY_REG_RUNTIME_CONFIG       0x1F
 #define CY_REG_TCH_TMOUT            (CY_REG_ACT_INTRVL+1)
 #define CY_REG_LP_INTRVL            (CY_REG_TCH_TMOUT+1)
 #define CY_SOFT_RESET               (1 << 0)
@@ -149,13 +149,12 @@
 #define CY_MAXZ                     255
 #define CY_OK                       0
 #define CY_INIT                     1
-#define CY_DELAY_DFLT               20 /* ms */
-#define CY_DELAY_MAX                (500/CY_DELAY_DFLT) /* half second */
+#define CY_DELAY_DFLT               10 /* ms */
 #define CY_DELAY_SYSINFO            20 /* ms */
-#define CY_MODE_CHANGE_DELAY        30 /* ms */
 #define CY_DELAY_BL                 300
 #define CY_DELAY_DNLOAD             100 /* ms */
 #define CY_HNDSHK_BIT               0x80
+#define CY_CONFIRM_NUM_RETRY        10
 /* device mode bits */
 #define CY_OPERATE_MODE             0x00
 #define CY_SYSINFO_MODE             0x10
@@ -164,6 +163,16 @@
 #define CY_DEEP_SLEEP_MODE          0x02
 #define CY_LOW_POWER_MODE           0x04
 #define CY_NUM_KEY                  8
+
+#define CYTTSP_SCAN_PERIOD          20
+#define CYTTSP_BL_READY_TIME        30
+#define CYTTSP_ENTER_BLDR_TIME      6000
+#define CYTTSP_BL_ENTER_TIME        100
+#define CY_LOUNCH_APP_TIME          400
+
+#define CY_BL_BUSY                  (1 << 7)
+#define CY_BL_RECEPTIVE             (1 << 5)
+#define CY_APP_CHKSUM               (1 << 0)
 
 /* TrueTouch Standard Product Gen3 (Txx3xx) interface definition */
 struct cyttsp_xydata {
@@ -189,6 +198,11 @@ struct cyttsp_xydata {
 	u8 tt_undef[3];
 	u8 gest_set;
 	u8 tt_reserved;
+};
+
+struct cyttsp_mode {
+	u8 hst_mode;
+	u8 tt_mode;
 };
 
 struct cyttsp_xydata_gen2 {
@@ -234,12 +248,24 @@ struct cyttsp_sysinfo_data {
 	u8 app_idl;
 	u8 app_verh;
 	u8 app_verl;
-	u8 tt_undef[5];
-	u8 scn_typ;	/* Gen3 only: scan type [0:Mutual, 1:Self] */
+	u8 tt_undef[6];
 	u8 act_intrvl;
 	u8 tch_tmout;
 	u8 lp_intrvl;
 };
+
+#define CY_MFG_CMD_REG offsetof(struct cyttsp_sysinfo_data, mfg_cmd)
+#define CY_MFG_STATUS_REG offsetof(struct cyttsp_sysinfo_data, mfg_stat)
+
+enum mfg_command_status {
+	CY_MFG_STAT_BUSY = 0x01,
+	CY_MFG_STAT_COMPLETE = 0x02,
+	CY_MFG_STAT_PASS = 0x80,
+	CY_MFG_DONE = CY_MFG_STAT_COMPLETE | CY_MFG_STAT_PASS,
+};
+
+static const u8 CY_MFG_CMD_IDAC[] = {0x20, 0x00};
+static const u8 CY_MFG_CMD_CLR_STATUS[] = {0x2f};
 
 /* TTSP Bootloader Register Map interface definition */
 #define CY_BL_CHKSUM_OK 0x01
@@ -264,16 +290,23 @@ struct cyttsp_bootloader_data {
 
 #define cyttsp_wake_data cyttsp_xydata
 
+enum cyttsp_op_mode {
+	MODE_OPERATIONAL,
+	MODE_SYSINFO,
+	MODE_BL_IDLE,
+	MODE_BL_ACTIVE,
+	MODE_TEST,
+	MODE_SLEEP,
+	MODE_UNKNOWN = -1,
+};
+
 struct cyttsp {
 	struct device *pdev;
 	int irq;
 	struct input_dev *input;
-	struct work_struct work;
-	struct timer_list timer;
+	struct delayed_work work;
 	struct mutex mutex;
-#ifdef CONFIG_HAS_EARLYSUSPEND
 	struct early_suspend early_suspend;
-#endif
 	char phys[32];
 	struct cyttsp_platform_data *platform_data;
 	struct cyttsp_bootloader_data bl_data;
@@ -283,16 +316,23 @@ struct cyttsp {
 	u16 prv_mt_tch[CY_NUM_MT_TCH_ID];
 	u16 prv_st_tch[CY_NUM_ST_TCH_ID];
 	u16 prv_mt_pos[CY_NUM_TRK_ID][2];
+	atomic_t baseline_reset_status;
+	atomic_t signal_disparity_status;
+	atomic_t wall_charger_status;
+	struct work_struct runtime_config_work;
 	struct cyttsp_bus_ops *bus_ops;
-	struct regulator *regulator;
 	unsigned fw_loader_mode:1;
 	unsigned suspended:1;
-	struct timer_list to_timer;
-	bool to_timeout;
-	struct completion int_running;
-	bool bl_ready;
-	u8 reg_id;
-	u8 ntch_count;
+	u16 appid;
+	u16 appver;
+	u16 ttspid;
+	u32 cid;
+	wait_queue_head_t wq;
+	atomic_t mode;
+	atomic_t done;
+	atomic_t handshake;
+	u8 is_hovering;
+	u8 airtouch_enabled;
 };
 
 struct cyttsp_track_data {
@@ -353,21 +393,6 @@ static void print_data_block(const char *func, u8 command,
 	printk(KERN_DEBUG "%s: %s\n", func, buf);
 })
 
-static int cyttsp_soft_reset(struct cyttsp *ts);
-static int cyttsp_set_operational_mode(struct cyttsp *ts);
-static int cyttsp_exit_bl_mode(struct cyttsp *ts);
-static int cyttsp_power_on(struct cyttsp *ts);
-static void cyttsp_init_tch(struct cyttsp *ts)
-{
-	/* init the touch structures */
-	ts->num_prv_st_tch = CY_NTCH;
-	memset(ts->act_trk, CY_NTCH, sizeof(ts->act_trk));
-	memset(ts->prv_mt_pos, CY_NTCH, sizeof(ts->prv_mt_pos));
-	memset(ts->prv_mt_tch, CY_IGNR_TCH, sizeof(ts->prv_mt_tch));
-	memset(ts->prv_st_tch, CY_IGNR_TCH, sizeof(ts->prv_st_tch));
-	ts->ntch_count = 0;
-}
-
 static u8 ttsp_convert_gen2(u8 cur_tch, struct cyttsp_xydata *pxy_data)
 {
 	struct cyttsp_xydata_gen2 *pxy_data_gen2;
@@ -407,7 +432,6 @@ static int ttsp_read_block_data(struct cyttsp *ts, u8 command,
 	u8 length, void *buf)
 {
 	int rc;
-	int tries;
 	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
 
 	if (!buf || !length) {
@@ -416,12 +440,7 @@ static int ttsp_read_block_data(struct cyttsp *ts, u8 command,
 		return -EIO;
 	}
 
-	for (tries = 0, rc = -1; tries < CY_NUM_RETRY && (rc < 0); tries++) {
-		rc = ts->bus_ops->read(ts->bus_ops, command, length, buf);
-		if (rc)
-			msleep(CY_DELAY_DFLT);
-	}
-
+	rc = ts->bus_ops->read(ts->bus_ops, command, length, buf);
 	if (rc < 0)
 		printk(KERN_ERR "%s: error %d\n", __func__, rc);
 	DBG(print_data_block(__func__, command, length, buf);)
@@ -432,7 +451,6 @@ static int ttsp_write_block_data(struct cyttsp *ts, u8 command,
 	u8 length, void *buf)
 {
 	int rc;
-	int tries;
 	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
 
 	if (!buf || !length) {
@@ -441,12 +459,7 @@ static int ttsp_write_block_data(struct cyttsp *ts, u8 command,
 		return -EIO;
 	}
 
-	for (tries = 0, rc = -1; tries < CY_NUM_RETRY && (rc < 0); tries++) {
-		rc = ts->bus_ops->write(ts->bus_ops, command, length, buf);
-		if (rc)
-			msleep(CY_DELAY_DFLT);
-	}
-
+	rc = ts->bus_ops->write(ts->bus_ops, command, length, buf);
 	if (rc < 0)
 		printk(KERN_ERR "%s: error %d\n", __func__, rc);
 	DBG(print_data_block(__func__, command, length, buf);)
@@ -463,16 +476,18 @@ static int ttsp_tch_ext(struct cyttsp *ts, void *buf)
 				__func__, !buf ? "NULL" : "OK");
 		return -EIO;
 	}
+
+	if (ts->platform_data->cust_spec != NULL) {
+		struct cyttsp_xydata* pxy_data = buf;
+		ts->platform_data->cust_spec(pxy_data->tt_undef, sizeof(pxy_data->tt_undef));
+	}
+
 	rc = ts->bus_ops->ext(ts->bus_ops, buf);
 	if (rc < 0)
 		printk(KERN_ERR "%s: error %d\n", __func__, rc);
 	return rc;
 }
 
-/* ************************************************************************
- * The cyttsp_xy_worker function reads the XY coordinates and sends them to
- * the input layer.  It is called from the Touch Interrupt.
- * *************************************************************************/
 static int cyttsp_inlist(u16 prev_track[], u8 cur_trk_id, u8 *prev_loc,
 	u8 num_touches)
 {
@@ -512,8 +527,12 @@ static int cyttsp_next_avail_inlist(u16 cur_trk[], u8 *new_loc,
 	return *new_loc < CY_NUM_TRK_ID;
 }
 
-static void handle_single_touch(struct cyttsp_xydata *xy,
-	struct cyttsp_track_data *t, struct cyttsp *ts)
+/* ************************************************************************
+ * The cyttsp_xy_worker function reads the XY coordinates and sends them to
+ * the input layer.  It is scheduled from the interrupt.
+ * *************************************************************************/
+void handle_single_touch(struct cyttsp_xydata *xy, struct cyttsp_track_data *t,
+			 struct cyttsp *ts)
 {
 	u8 id;
 	u8 use_trk_id = ts->platform_data->use_trk_id;
@@ -607,7 +626,7 @@ static void handle_single_touch(struct cyttsp_xydata *xy,
 		input_report_key(ts->input, BTN_TOUCH, CY_TCH);
 		input_report_abs(ts->input, ABS_TOOL_WIDTH, t->tool_width);
 
-		DBG2(printk(KERN_INFO"%s:ST->F1:%3d X:%3d Y:%3d Z:%3d\n",
+		DBG(printk(KERN_INFO"%s:ST->F1:%3d X:%3d Y:%3d Z:%3d\n",
 			   __func__, t->cur_st_tch[CY_ST_FNGR1_IDX],
 			   t->st_x1, t->st_y1, t->st_z1);)
 
@@ -616,8 +635,7 @@ static void handle_single_touch(struct cyttsp_xydata *xy,
 			input_report_abs(ts->input, ABS_HAT0X, t->st_x2);
 			input_report_abs(ts->input, ABS_HAT0Y, t->st_y2);
 
-			DBG2(printk(KERN_INFO
-				"%s:ST->F2:%3d X:%3d Y:%3d Z:%3d\n",
+			DBG(printk(KERN_INFO"%s:ST->F2:%3d X:%3d Y:%3d Z:%3d\n",
 				__func__, t->cur_st_tch[CY_ST_FNGR2_IDX],
 				t->st_x2, t->st_y2, t->st_z2);)
 		} else {
@@ -634,10 +652,9 @@ static void handle_single_touch(struct cyttsp_xydata *xy,
 
 }
 
-static void handle_multi_touch(struct cyttsp_track_data *t, struct cyttsp *ts)
+void handle_multi_touch(struct cyttsp_track_data *t, struct cyttsp *ts)
 {
-
-	u8 id;
+	u8 id, index, count;
 	u8 i, loc;
 	void (*mt_sync_func)(struct input_dev *) = ts->platform_data->mt_sync;
 
@@ -647,44 +664,53 @@ static void handle_multi_touch(struct cyttsp_track_data *t, struct cyttsp *ts)
 	/* terminate any previous touch where the track
 	 * is missing from the current event */
 	for (id = 0; id < CY_NUM_TRK_ID; id++) {
-		if ((ts->act_trk[id] == CY_NTCH) || (t->cur_trk[id] != CY_NTCH))
+		if (ts->act_trk[id] == CY_NTCH || t->cur_trk[id] != CY_NTCH)
 			continue;
 
-		input_report_abs(ts->input, ABS_MT_TRACKING_ID, id);
-		input_report_abs(ts->input, ABS_MT_TOUCH_MAJOR, CY_NTCH);
-		input_report_abs(ts->input, ABS_MT_WIDTH_MAJOR, t->tool_width);
-		input_report_abs(ts->input, ABS_MT_POSITION_X,
-					ts->prv_mt_pos[id][CY_XPOS]);
-		input_report_abs(ts->input, ABS_MT_POSITION_Y,
-					ts->prv_mt_pos[id][CY_YPOS]);
-		if (mt_sync_func)
-			mt_sync_func(ts->input);
 		ts->act_trk[id] = CY_NTCH;
 		ts->prv_mt_pos[id][CY_XPOS] = 0;
 		ts->prv_mt_pos[id][CY_YPOS] = 0;
 	}
+
 	/* set Multi-Touch current event signals */
-	for (id = 0; id < CY_NUM_MT_TCH_ID; id++) {
-		if (t->cur_mt_tch[id] >= CY_NUM_TRK_ID)
+	for (count = index = 0; index < CY_NUM_MT_TCH_ID; index++) {
+		id = t->cur_mt_tch[index];
+		if (id >= CY_NUM_TRK_ID)
 			continue;
 
 		input_report_abs(ts->input, ABS_MT_TRACKING_ID,
-						t->cur_mt_tch[id]);
-		input_report_abs(ts->input, ABS_MT_TOUCH_MAJOR,
-						t->cur_mt_z[id]);
-		input_report_abs(ts->input, ABS_MT_WIDTH_MAJOR,
-						t->tool_width);
+						t->cur_mt_tch[index] - 1);
+		input_report_abs(ts->input, ABS_MT_WIDTH_MAJOR, t->tool_width);
 		input_report_abs(ts->input, ABS_MT_POSITION_X,
-						t->cur_mt_pos[id][CY_XPOS]);
+						t->cur_mt_pos[index][CY_XPOS]);
 		input_report_abs(ts->input, ABS_MT_POSITION_Y,
-						t->cur_mt_pos[id][CY_YPOS]);
+						t->cur_mt_pos[index][CY_YPOS]);
+
+		if (!ts->platform_data->use_airtouch || !ts->is_hovering) {
+			/* Report touch major for normal touch events. */
+			input_report_abs(ts->input, ABS_MT_TOUCH_MAJOR,
+						t->cur_mt_z[index]);
+			input_report_abs(ts->input, ABS_MT_PRESSURE, 1);
+		} else {
+			/* Report distance for airtouch events. */
+			input_report_abs(ts->input, ABS_MT_DISTANCE,
+					CY_MAXZ - t->cur_mt_z[index]);
+			input_report_abs(ts->input, ABS_MT_PRESSURE, 0);
+		}
+
 		if (mt_sync_func)
 			mt_sync_func(ts->input);
 
+		count++;
 		ts->act_trk[id] = CY_TCH;
-		ts->prv_mt_pos[id][CY_XPOS] = t->cur_mt_pos[id][CY_XPOS];
-		ts->prv_mt_pos[id][CY_YPOS] = t->cur_mt_pos[id][CY_YPOS];
+		ts->prv_mt_pos[id][CY_XPOS] = t->cur_mt_pos[index][CY_XPOS];
+		ts->prv_mt_pos[id][CY_YPOS] = t->cur_mt_pos[index][CY_YPOS];
 	}
+	/* if no fingers were pressed, we need to output a MT sync so that the
+	 * userspace can identify when the last finger has been removed from
+	 * the device */
+	if (!count)
+		mt_sync_func(ts->input);
 	return;
 no_track_id:
 
@@ -798,7 +824,7 @@ no_track_id:
 			if (mt_sync_func)
 				mt_sync_func(ts->input);
 
-			DBG2(printk(KERN_INFO"%s: MT1 -> TID:"
+			DBG(printk(KERN_INFO"%s: MT1 -> TID:"
 				"%3d X:%3d  Y:%3d  Z:%3d\n", __func__,
 				t->snd_trk[id],
 				t->cur_mt_pos[t->snd_trk[id]][CY_XPOS],
@@ -819,7 +845,7 @@ no_track_id:
 			if (mt_sync_func)
 				mt_sync_func(ts->input);
 
-			DBG2(printk(KERN_INFO"%s: "
+			DBG(printk(KERN_INFO"%s: "
 				"MT2->TID:%2d X:%3d Y:%3d Z:%3d liftoff-sent\n",
 				__func__, ts->prv_mt_tch[id],
 				ts->prv_mt_pos[ts->prv_mt_tch[id]][CY_XPOS],
@@ -859,35 +885,123 @@ no_track_id:
 	}
 }
 
-static void cyttsp_xy_worker(struct cyttsp *ts)
+static void runtime_cfg_work(struct work_struct *work)
 {
+	struct cyttsp *ts =
+		container_of(work, struct cyttsp, runtime_config_work);
+	int err;
+
+	u8 cmd = 0;
+	u8 charger_cmd;
+	u8 baseline_cmd;
+	u8 disparity_cmd;
+
+	if (ts->platform_data->use_charger_mode) {
+		charger_cmd = atomic_read(&ts->wall_charger_status) ?
+							0x01 : 0x00;
+		cmd = charger_cmd;
+		dev_info(ts->pdev, "%s: charger_cmd: %u\n", __func__,
+							charger_cmd);
+	}
+
+	if (ts->platform_data->use_configure_sensitivity) {
+		baseline_cmd = atomic_read(&ts->baseline_reset_status) ?
+							0x01 : 0x00;
+		baseline_cmd =  baseline_cmd << 7;
+		disparity_cmd = atomic_read(&ts->signal_disparity_status);
+		disparity_cmd = 0x78 & (disparity_cmd << 3);
+		cmd = cmd | baseline_cmd | disparity_cmd;
+		dev_info(ts->pdev, "%s: baseline_cmd: %u, disparity_cmd: %u\n",
+					__func__, baseline_cmd, disparity_cmd);
+	}
+
+
+	if (atomic_read(&ts->mode) !=  MODE_OPERATIONAL) {
+		dev_info(ts->pdev, "%s: not operational mode, ignored\n",
+				__func__);
+		return;
+	}
+
+	if (ts->suspended)
+		return;
+	err = ttsp_write_block_data(ts, CY_REG_RUNTIME_CONFIG,
+							sizeof(cmd), &cmd);
+	if (!err)
+		dev_info(ts->pdev, "%s: Writes setting to reg: 0x%x\n",
+				__func__, cmd);
+	else
+		dev_err(ts->pdev, "%s: error %d\n", __func__, err);
+}
+
+static int cyttsp_handshake(struct cyttsp *ts)
+{
+	u8 mode;
+	int rc = ttsp_read_block_data(ts, CY_REG_BASE, sizeof(mode), &mode);
+	if (rc)
+		return rc;
+	dev_vdbg(ts->pdev, "%s: mode 0x%02x\n", __func__, mode);
+	mode ^= CY_HNDSHK_BIT;
+	rc = ttsp_write_block_data(ts, CY_REG_BASE, sizeof(mode), &mode);
+	return rc;
+}
+
+static int cyttsp_wait_condition(struct cyttsp *ts,
+		bool (*condition)(struct cyttsp *ts),
+		int tout)
+{
+	bool ok;
+	tout = msecs_to_jiffies(tout);
+
+	while (tout > 0) {
+		if (condition(ts))
+			return true;
+		atomic_set(&ts->done, 0);
+		tout = wait_event_timeout(ts->wq, atomic_read(&ts->done), tout);
+	}
+	ok = condition(ts);
+	dev_vdbg(ts->pdev, "%s: tout, status %s\n", __func__,
+			(ok ? "ok" : "nok"));
+	return ok;
+}
+
+static irqreturn_t cyttsp_irq(int irq, void *handle)
+{
+	struct cyttsp *ts = handle;
 	struct cyttsp_xydata xy_data;
 	u8 id, tilt, rev_x, rev_y;
 	struct cyttsp_track_data trc;
 	s32 retval;
 
-	DBG(printk(KERN_INFO "%s: Enter\n", __func__);)
+	dev_vdbg(ts->pdev, "%s: mode %d, done %d, handshake %d\n", __func__,
+		atomic_read(&ts->mode), atomic_read(&ts->done),
+		atomic_read(&ts->handshake));
+
+	if (atomic_read(&ts->handshake))
+		cyttsp_handshake(ts);
+	if (atomic_read(&ts->mode) == MODE_UNKNOWN) {
+		dev_dbg(ts->pdev, "%s: MODE_UNKNOWN\n", __func__);
+		goto exit_xy_worker;
+	}
+	if (atomic_cmpxchg(&ts->done, 0, 1) == 0)
+		wake_up(&ts->wq);
+	if (atomic_read(&ts->mode) != MODE_OPERATIONAL)
+		goto exit_xy_worker;
+
 	/* get event data from CYTTSP device */
 	retval = ttsp_read_block_data(ts, CY_REG_BASE,
 				      sizeof(xy_data), &xy_data);
 
-	if (retval < 0) {
-		printk(KERN_ERR "%s: Error, fail to read device on host interface bus\n",
-			__func__);
+	if (IS_BAD_PKT(xy_data.tt_mode)) {
+		dev_err(ts->pdev, "%s: invalid buffer\n", __func__);
 		goto exit_xy_worker;
 	}
 
-	if (CY_MODE_ERROR(ts->platform_data->power_state,
-		xy_data.hst_mode, xy_data.tt_mode)) {
-		/* TTSP device has switched to non-operational mode */
-		printk(KERN_ERR "%s: Error, bad mode ps=%d hm=%02X tm=%02X\n",
-			__func__, ts->platform_data->power_state,
-			xy_data.hst_mode, xy_data.tt_mode);
-		retval = cyttsp_power_on(ts);
-		if (retval < 0)
-			printk(KERN_ERR "%s: Error, power on fail\n", __func__);
+	if (GET_BOOTLOADERMODE(xy_data.tt_mode)) {
+		schedule_delayed_work(&ts->work, 0);
 		goto exit_xy_worker;
 	}
+
+	schedule_delayed_work(&ts->work, ESD_CHECK_INTERVAL);
 
 	/* touch extension handling */
 	retval = ttsp_tch_ext(ts, &xy_data);
@@ -902,25 +1016,26 @@ static void cyttsp_xy_worker(struct cyttsp *ts)
 		goto exit_xy_worker;
 	}
 
-	/* provide flow control handshake */
-	if (ts->irq) {
-		if (ts->platform_data->use_hndshk) {
-			u8 cmd;
-			cmd = xy_data.hst_mode & CY_HNDSHK_BIT ?
-				xy_data.hst_mode & ~CY_HNDSHK_BIT :
-				xy_data.hst_mode | CY_HNDSHK_BIT;
-			retval = ttsp_write_block_data(ts, CY_REG_BASE,
-						       sizeof(cmd), (u8 *)&cmd);
-		}
+	if (ts->platform_data->use_airtouch) {
+		u8 tt_stat_obj;
+		tt_stat_obj = GET_OBJECT(xy_data.tt_stat);
+		ts->is_hovering = (tt_stat_obj == HOVER_OBJECT) ? 1 : 0;
+		dev_dbg(ts->pdev, "%s: tt_stat_obj: %u, Is hovering: %u\n",
+			__func__, tt_stat_obj, ts->is_hovering);
 	}
-	trc.cur_tch = GET_NUM_TOUCHES(xy_data.tt_stat);
 
-	if (IS_LARGE_AREA(xy_data.tt_stat) == 1) {
+	trc.cur_tch = GET_NUM_TOUCHES(xy_data.tt_stat);
+	if (GET_HSTMODE(xy_data.hst_mode) != CY_OPERATE_MODE) {
+		/* terminate all active tracks */
+		trc.cur_tch = CY_NTCH;
+		DBG(printk(KERN_INFO "%s: Invalid mode detected\n",
+			__func__);)
+	} else if (IS_LARGE_AREA(xy_data.tt_stat) == 1) {
 		/* terminate all active tracks */
 		trc.cur_tch = CY_NTCH;
 		DBG(printk(KERN_INFO "%s: Large area detected\n",
 			__func__);)
-	} else if (trc.cur_tch > CY_MAX_TCH) {
+	} else if (trc.cur_tch > CY_NUM_MT_TCH_ID) {
 		/* terminate all active tracks */
 		trc.cur_tch = CY_NTCH;
 		DBG(printk(KERN_INFO "%s: Num touch error detected\n",
@@ -946,24 +1061,11 @@ static void cyttsp_xy_worker(struct cyttsp *ts)
 		trc.prv_tch += ts->act_trk[id];
 	}
 
-	/*
-	 * send no events if there were no
-	 * previous touches and no new touches
-	 */
+	/* send no events if there were no previous touches */
+	/* and no new touches */
 	if ((trc.prv_tch == CY_NTCH) && ((trc.cur_tch == CY_NTCH) ||
-				(trc.cur_tch > CY_MAX_TCH))) {
-		if (++ts->ntch_count > CY_MAX_NTCH) {
-			/* TTSP device has a stuck operational mode */
-			printk(KERN_ERR "%s: Error, stuck no-touch ct=%d\n",
-				__func__, trc.cur_tch);
-			retval = cyttsp_power_on(ts);
-			if (retval < 0)
-				printk(KERN_ERR "%s: Error, power on fail\n",
-					__func__);
-			goto exit_xy_worker;
-		}
-	} else
-		ts->ntch_count = 0;
+				(trc.cur_tch > CY_NUM_MT_TCH_ID)))
+		goto exit_xy_worker;
 
 	DBG(printk(KERN_INFO "%s: prev=%d  curr=%d\n", __func__,
 		   trc.prv_tch, trc.cur_tch);)
@@ -1185,7 +1287,7 @@ static void cyttsp_xy_worker(struct cyttsp *ts)
 	if (ts->platform_data->use_gestures && xy_data.gest_id) {
 		input_report_key(ts->input, BTN_3, CY_TCH);
 		input_report_abs(ts->input, ABS_HAT1X, xy_data.gest_id);
-		input_report_abs(ts->input, ABS_HAT1Y, xy_data.gest_cnt);
+		input_report_abs(ts->input, ABS_HAT2Y, xy_data.gest_cnt);
 	}
 
 	/* signal the view motion event */
@@ -1195,515 +1297,555 @@ static void cyttsp_xy_worker(struct cyttsp *ts)
 	memcpy(ts->act_trk, trc.cur_trk, CY_NUM_TRK_ID);
 
 exit_xy_worker:
-	/* reset the watchdog */
-	mod_timer(&ts->timer, jiffies + CY_WDG_TIMEOUT);
 	DBG(printk(KERN_INFO"%s: finished.\n", __func__);)
-	return;
-}
-
-static irqreturn_t cyttsp_irq(int irq, void *handle)
-{
-	struct cyttsp *ts = (struct cyttsp *)handle;
-
-	DBG(printk(KERN_INFO"%s: Got IRQ!\n", __func__);)
-	switch (ts->platform_data->power_state) {
-	case CY_BL_STATE:
-	case CY_SYSINFO_STATE:
-		complete(&ts->int_running);
-		break;
-	case CY_LDR_STATE:
-		ts->bl_ready = true;
-		break;
-	case CY_ACTIVE_STATE:
-		cyttsp_xy_worker(ts);
-		break;
-	case CY_READY_STATE:
-	default:
-		break;
-	}
-
 	return IRQ_HANDLED;
 }
 
-/* Timer function used as watchdog */
-static void cyttsp_timer(unsigned long handle)
+static void set_version_info(struct cyttsp *ts)
 {
-	struct cyttsp *ts = (struct cyttsp *)handle;
-
-	DBG(printk(KERN_INFO"%s: Watchdog timer event\n", __func__);)
-	if (!work_pending(&ts->work))
-		schedule_work(&ts->work);
-	return;
+	ts->appid = ((u16)ts->bl_data.appid_hi << 8) | ts->bl_data.appid_lo;
+	ts->appver = ((u16)ts->bl_data.appver_hi << 8) | ts->bl_data.appver_lo;
+	ts->ttspid = ((u16)ts->bl_data.ttspver_hi << 8) |
+			ts->bl_data.ttspver_lo;
+	ts->cid = ((u32)ts->bl_data.cid_0 << 16) |
+			((u32)ts->bl_data.cid_1 << 8) | ts->bl_data.cid_2;
+	dev_info(ts->pdev, "appver %04x, appid %04x\n", ts->appver, ts->appid);
 }
-/*
- ************************************************************************
- * Probe initialization functions
- ************************************************************************
- */
+
+static int ttsp_write_confirm(struct cyttsp *ts, u8 command,
+	u8 length, void *buf, int timeout)
+{
+	int rc;
+	do {
+		rc = ttsp_write_block_data(ts, command, length, buf);
+		if (rc) {
+			msleep(CYTTSP_SCAN_PERIOD);
+			timeout -= CYTTSP_SCAN_PERIOD;
+		}
+	} while (rc && timeout > 0);
+	if (rc)
+		dev_err(ts->pdev, "%s: failed to send command, err %d\n",
+				__func__, rc);
+	return rc;
+}
+
+static bool is_cyttsp_app_started(struct cyttsp *ts)
+{
+	struct cyttsp_mode m;
+	int rc = ttsp_read_block_data(ts, CY_REG_BASE, sizeof(m), &m);
+	if (rc)
+		dev_err(ts->pdev, "%s: read error %d\n", __func__, rc);
+	dev_vdbg(ts->pdev, "%s: hst_mode 0x%02x tt_mode 0x%02x\n", __func__,
+				m.hst_mode, m.tt_mode);
+	return !rc && (GET_HSTMODE(m.hst_mode) == CY_OPERATE_MODE) &&
+		!GET_BOOTLOADERMODE(m.tt_mode);
+}
+
+static bool is_cyttsp_sysinfo(struct cyttsp *ts)
+{
+	struct cyttsp_mode m;
+	int rc = ttsp_read_block_data(ts, CY_REG_BASE, sizeof(m), &m);
+	if (rc)
+		dev_err(ts->pdev, "%s: read error %d\n", __func__, rc);
+	dev_vdbg(ts->pdev, "%s: hst_mode 0x%02x tt_mode 0x%02x\n", __func__,
+				m.hst_mode, m.tt_mode);
+	return !rc && (GET_HSTMODE(m.hst_mode) == CY_SYSINFO_MODE);
+}
+
+static bool is_cyttsp_mfg_done(struct cyttsp *ts)
+{
+	int rc = ttsp_read_block_data(ts, CY_REG_BASE, sizeof(ts->sysinfo_data),
+			&ts->sysinfo_data);
+	if (rc)
+		return false;
+	rc = ts->sysinfo_data.mfg_stat & (CY_MFG_STAT_BUSY | CY_MFG_STAT_PASS);
+	dev_vdbg(ts->pdev, "%s: hst_mode 0x%02x mfg_stat 0x%02x\n", __func__,
+				ts->sysinfo_data.hst_mode,
+				ts->sysinfo_data.mfg_stat);
+	return rc == CY_MFG_STAT_PASS;
+}
+
+static bool is_app_checksum_valid(struct cyttsp *ts)
+{
+	bool rc = ts->bl_data.bl_status & CY_APP_CHKSUM;
+	if (!rc)
+		dev_err(ts->pdev, "%s: App checksum invalid.\n", __func__);
+	else
+		dev_dbg(ts->pdev, "%s: App checksum valid.\n", __func__);
+	return rc;
+}
+
 static int cyttsp_load_bl_regs(struct cyttsp *ts)
 {
-	int retval;
-
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
-
-	memset(&ts->bl_data, 0, sizeof(ts->bl_data));
-
-	retval =  ttsp_read_block_data(ts, CY_REG_BASE,
+	int retval = ttsp_read_block_data(ts, CY_REG_BASE,
 				sizeof(ts->bl_data), &(ts->bl_data));
-
 	if (retval < 0) {
-		DBG2(printk(KERN_INFO "%s: Failed reading block data, err:%d\n",
-			__func__, retval);)
-		goto fail;
+		dev_err(ts->pdev, "%s: error %d\n", __func__, retval);
+		return retval;
 	}
-
-	DBG({
-	      int i;
-	      u8 *bl_data = (u8 *)&(ts->bl_data);
-	      for (i = 0; i < sizeof(struct cyttsp_bootloader_data); i++)
-			printk(KERN_INFO "%s bl_data[%d]=0x%x\n",
-				__func__, i, bl_data[i]);
-	})
-	DBG2(printk(KERN_INFO "%s: bl f=%02X s=%02X e=%02X\n",
-		__func__,
-		ts->bl_data.bl_file,
-		ts->bl_data.bl_status,
-		ts->bl_data.bl_error);)
-
 	return 0;
-fail:
-	return retval;
-}
-
-static bool cyttsp_bl_app_valid(struct cyttsp *ts)
-{
-	int retval;
-
-	ts->bl_data.bl_status = 0x00;
-
-	retval = cyttsp_load_bl_regs(ts);
-
-	if (retval < 0)
-		return false;
-
-	if (ts->bl_data.bl_status == 0x11) {
-		printk(KERN_INFO "%s: App found; normal boot\n", __func__);
-		return true;
-	} else if (ts->bl_data.bl_status == 0x10) {
-		printk(KERN_INFO "%s: NO APP; load firmware!!\n", __func__);
-		return false;
-	} else {
-		if (ts->bl_data.bl_file == CY_OPERATE_MODE) {
-			int invalid_op_mode_status;
-			invalid_op_mode_status = ts->bl_data.bl_status & 0x3f;
-			if (invalid_op_mode_status)
-				return false;
-			else {
-				if (ts->platform_data->power_state ==
-					CY_ACTIVE_STATE)
-					printk(KERN_INFO "%s: Operational\n",
-						__func__);
-				else
-					printk(KERN_INFO "%s: No bootloader\n",
-						__func__);
-			}
-		}
-		return true;
-	}
 }
 
 static int cyttsp_exit_bl_mode(struct cyttsp *ts)
 {
-	int retval;
-	int tries = 0;
+	int rc;
+	int wait_ms = 100;
 
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
+	dev_info(ts->pdev, "%s: trying ....\n", __func__);
 
-	/* check if in bootloader mode;
-	 * if in operational mode then just return without fail
-	 */
-	cyttsp_load_bl_regs(ts);
-	if (!GET_BOOTLOADERMODE(ts->bl_data.bl_status))
-		return 0;
+	if (!cyttsp_load_bl_regs(ts))
+		set_version_info(ts);
 
-	retval = ttsp_write_block_data(ts, CY_REG_BASE, sizeof(bl_cmd),
-				       (void *)bl_cmd);
-	if (retval < 0) {
-		printk(KERN_ERR "%s: Failed writing block data, err:%d\n",
-			__func__, retval);
-		goto fail;
-	}
+	atomic_set(&ts->mode, MODE_UNKNOWN);
+	rc = ttsp_write_confirm(ts, CY_REG_BASE, sizeof(bl_cmd),
+		(void *)bl_cmd, 100);
+	if (rc)
+		return rc;
+	msleep(CY_LOUNCH_APP_TIME);
 	do {
-		msleep(20);
-		cyttsp_load_bl_regs(ts);
-	} while (GET_BOOTLOADERMODE(ts->bl_data.bl_status) && tries++ < 10);
+		rc = is_cyttsp_app_started(ts);
+		msleep(CYTTSP_SCAN_PERIOD);
+		wait_ms -= CYTTSP_SCAN_PERIOD;
+	} while (!rc && wait_ms > 0);
 
-	DBG2(printk(KERN_INFO "%s: read tries=%d\n", __func__, tries);)
-
-	DBG(printk(KERN_INFO"%s: Exit "
-				"f=%02X s=%02X e=%02X\n",
-				__func__,
-				ts->bl_data.bl_file, ts->bl_data.bl_status,
-				ts->bl_data.bl_error);)
-
+	if (!rc)
+		return -EAGAIN;
+	schedule_delayed_work(&ts->work, ESD_CHECK_INTERVAL);
+	atomic_set(&ts->mode, MODE_OPERATIONAL);
+	dev_info(ts->pdev, "%s: success.\n", __func__);
 	return 0;
-fail:
-	return retval;
 }
 
 static int cyttsp_set_sysinfo_mode(struct cyttsp *ts)
 {
-	int retval;
+	int rc;
 	u8 cmd = CY_SYSINFO_MODE;
 
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
-	memset(&(ts->sysinfo_data), 0, sizeof(struct cyttsp_sysinfo_data));
+	cancel_delayed_work_sync(&ts->work);
+	if (ts->platform_data->use_charger_mode ||
+			ts->platform_data->use_configure_sensitivity)
+		cancel_work_sync(&ts->runtime_config_work);
 
-	/* switch to sysinfo mode */
-	retval = ttsp_write_block_data(ts, CY_REG_BASE, sizeof(cmd), &cmd);
-	if (retval < 0) {
-		printk(KERN_ERR "%s: Failed writing block data, err:%d\n",
-			__func__, retval);
-		goto exit_sysinfo_mode;
-	}
+	atomic_set(&ts->mode, MODE_UNKNOWN);
+	dev_info(ts->pdev, "%s: trying ....\n", __func__);
+	rc = ttsp_write_confirm(ts, CY_REG_BASE, sizeof(cmd), &cmd, 100);
+	if (rc)
+		return rc;
+	msleep(CYTTSP_SCAN_PERIOD);
+	if (cyttsp_wait_condition(ts, is_cyttsp_sysinfo, 1000))
+		goto success;
 
-	if (!(retval < 0)) {
-		/* wait for interrupt to set ready completion */
-		ts->platform_data->power_state = CY_SYSINFO_STATE;
-		INIT_COMPLETION(ts->int_running);
-		retval = wait_for_completion_interruptible_timeout(
-			&ts->int_running,
-			msecs_to_jiffies(CY_DELAY_DFLT * CY_DELAY_MAX));
-		ts->platform_data->power_state = CY_READY_STATE;
-	}
-
-	if (retval < 0) {
-		ts->platform_data->power_state = CY_IDLE_STATE;
-		printk(KERN_ERR "%s: reset timeout fail (ret=%d)\n",
-			__func__, retval);
-	}
-
-exit_sysinfo_mode:
-	/* read sysinfo registers */
-	retval = ttsp_read_block_data(ts, CY_REG_BASE,
-		sizeof(ts->sysinfo_data), &(ts->sysinfo_data));
-
-	DBG(printk(KERN_INFO"%s:SI2: hst_mode=0x%02X mfg_cmd=0x%02X "
-		"mfg_stat=0x%02X\n", __func__, ts->sysinfo_data.hst_mode,
-		ts->sysinfo_data.mfg_cmd,
-		ts->sysinfo_data.mfg_stat);)
-
-	DBG(printk(KERN_INFO"%s:SI2: bl_ver=0x%02X%02X\n",
-		__func__, ts->sysinfo_data.bl_verh, ts->sysinfo_data.bl_verl);)
-
-	DBG(printk(KERN_INFO"%s:SI2: sysinfo act_intrvl=0x%02X "
-		"tch_tmout=0x%02X lp_intrvl=0x%02X\n",
-		__func__, ts->sysinfo_data.act_intrvl,
-		ts->sysinfo_data.tch_tmout,
-		ts->sysinfo_data.lp_intrvl);)
-
-	printk(KERN_INFO"%s:SI2:tts_ver=%02X%02X app_id=%02X%02X "
-		"app_ver=%02X%02X c_id=%02X%02X%02X "
-		"u_id=%02X%02X%02X%02X%02X%02X%02X%02X\n",
-		__func__,
+	dev_err(ts->pdev, "%s: mode not reached.\n", __func__);
+	return -EAGAIN;
+success:
+	atomic_set(&ts->handshake, 1);
+	atomic_set(&ts->mode, MODE_SYSINFO);
+	dev_info(ts->pdev, "%s: mode entered.\n", __func__);
+	cyttsp_handshake(ts);
+	msleep(CYTTSP_SCAN_PERIOD);
+	rc = ttsp_read_block_data(ts, CY_REG_BASE,
+				sizeof(ts->sysinfo_data), &(ts->sysinfo_data));
+	dev_info(ts->pdev, "%s: SI2:tts_ver=0x%02X%02X app_id=0x%02X%02X "
+		"app_ver=0x%02X%02X c_id=0x%02X%02X%02X\n", __func__,
 		ts->sysinfo_data.tts_verh, ts->sysinfo_data.tts_verl,
 		ts->sysinfo_data.app_idh, ts->sysinfo_data.app_idl,
 		ts->sysinfo_data.app_verh, ts->sysinfo_data.app_verl,
 		ts->sysinfo_data.cid[0], ts->sysinfo_data.cid[1],
-		ts->sysinfo_data.cid[2],
-		ts->sysinfo_data.uid[0], ts->sysinfo_data.uid[1],
-		ts->sysinfo_data.uid[2], ts->sysinfo_data.uid[3],
-		ts->sysinfo_data.uid[4], ts->sysinfo_data.uid[5],
-		ts->sysinfo_data.uid[6], ts->sysinfo_data.uid[7]);
-
-	return retval;
+		ts->sysinfo_data.cid[2]);
+	return rc;
 }
 
-static int cyttsp_set_sysinfo_regs(struct cyttsp *ts)
+static int cyttsp_execute_mfg_command(struct cyttsp *ts, const u8 *cmd,
+				      int size, bool confirm)
 {
-	int retval = 0;
+	int rc;
 
-	if (ts->platform_data->scn_typ != CY_SCN_TYP_DFLT) {
-		u8 scn_typ = ts->platform_data->scn_typ;
-
-		retval = ttsp_write_block_data(ts,
-				CY_REG_SCN_TYP,
-				sizeof(scn_typ), &scn_typ);
+	rc = ttsp_write_block_data(ts, CY_MFG_CMD_REG, size, (void *)cmd);
+	if (rc < 0) {
+		dev_err(ts->pdev, "%s: Failed writing block data, err:%d\n",
+			__func__, rc);
+		return rc;
 	}
-
-	if (retval < 0)
-		return retval;
-
-	if ((ts->platform_data->act_intrvl != CY_ACT_INTRVL_DFLT) ||
-		(ts->platform_data->tch_tmout != CY_TCH_TMOUT_DFLT) ||
-		(ts->platform_data->lp_intrvl != CY_LP_INTRVL_DFLT)) {
-
-		u8 intrvl_ray[3];
-
-		intrvl_ray[0] = ts->platform_data->act_intrvl;
-		intrvl_ray[1] = ts->platform_data->tch_tmout;
-		intrvl_ray[2] = ts->platform_data->lp_intrvl;
-
-		/* set intrvl registers */
-		retval = ttsp_write_block_data(ts,
-				CY_REG_ACT_INTRVL,
-				sizeof(intrvl_ray), intrvl_ray);
-
-		msleep(CY_DELAY_SYSINFO);
+	rc = !confirm || cyttsp_wait_condition(ts, is_cyttsp_mfg_done, 1000);
+	if (!rc) {
+		dev_err(ts->pdev, "%s: not confirmed.\n", __func__);
+		return -EIO;
 	}
-
-	return retval;
+	dev_info(ts->pdev, "%s: confirmed.\n", __func__);
+	return 0;
 }
 
 static int cyttsp_set_operational_mode(struct cyttsp *ts)
 {
-	int retval;
-	int tries;
+	int rc;
 	u8 cmd = CY_OPERATE_MODE;
-	u8 gest_default;
-	struct cyttsp_xydata xy_data;
+
+	dev_info(ts->pdev, "%s: trying ....\n", __func__);
+	atomic_set(&ts->mode, MODE_UNKNOWN);
+	rc = ttsp_write_confirm(ts, CY_REG_BASE, sizeof(cmd), &cmd, 100);
+	if (rc)
+		return rc;
+	msleep(CYTTSP_SCAN_PERIOD);
+success:
+	schedule_delayed_work(&ts->work, ESD_CHECK_INTERVAL);
+	if (ts->platform_data->use_charger_mode ||
+			ts->platform_data->use_configure_sensitivity)
+		schedule_work(&ts->runtime_config_work);
+
+	atomic_set(&ts->handshake, 0);
+	atomic_set(&ts->mode, MODE_OPERATIONAL);
+	dev_info(ts->pdev, "%s: mode entered.\n", __func__);
+	return 0;
+}
+
+static bool is_cyttsp_bl_running(struct cyttsp *ts)
+{
+	struct cyttsp_mode m;
+	int rc = ttsp_read_block_data(ts, CY_REG_BASE, sizeof(m), &m);
+	dev_vdbg(ts->pdev, "%s: hst_mode 0x%02x tt_mode 0x%02x\n", __func__,
+				m.hst_mode, m.tt_mode);
+	return !rc && GET_BOOTLOADERMODE(m.tt_mode);
+}
+
+static int cyttsp_reinit_hw(struct cyttsp *ts)
+{
+	if (ts->platform_data->reset) {
+		dev_info(ts->pdev, "%s: Reinit HW\n", __func__);
+		(void)ts->platform_data->reset();
+		return 0;
+	}
+	dev_err(ts->pdev, "%s: not supported.\n", __func__);
+	return -ENODEV;
+}
+
+static int cyttsp_set_intrvl_registers(struct cyttsp *ts)
+{
+	int retval = 0;
+	u8 intrvl_ray[3];
 
 	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
 
-	retval = ttsp_write_block_data(ts, CY_REG_BASE, sizeof(cmd), &cmd);
+	intrvl_ray[0] = ts->platform_data->act_intrvl;
+	intrvl_ray[1] = ts->platform_data->tch_tmout;
+	intrvl_ray[2] = ts->platform_data->lp_intrvl;
+
+	dev_info(ts->pdev, "%s: act_intrvl=0x%02X "
+		"tch_tmout=0x%02X lp_intrvl=0x%02X\n",
+		__func__, ts->platform_data->act_intrvl,
+		ts->platform_data->tch_tmout,
+		ts->platform_data->lp_intrvl);
+
+	/* set intrvl registers */
+	retval = ttsp_write_block_data(ts,
+					CY_REG_ACT_INTRVL,
+					sizeof(intrvl_ray),
+					intrvl_ray);
 	if (retval < 0) {
-		printk(KERN_ERR "%s: Failed writing block data, err:%d\n",
-			__func__, retval);
-		goto write_block_data_fail;
+		dev_err(ts->pdev,
+			"%s: Unable to set parameters\n",
+			__func__);
+		return retval;
 	}
-
-	/* wait for TTSP Device to complete switch to Operational mode */
-	msleep(20);
-
-	tries = 0;
-	gest_default =
-		CY_GEST_GRP1 + CY_GEST_GRP2 +
-		CY_GEST_GRP3 + CY_GEST_GRP4 +
-		CY_ACT_DIST_DFLT;
-	tries = 0;
-	do {
-		msleep(CY_DELAY_DFLT);
-		memset(&xy_data, 0, sizeof(xy_data));
-		retval = ttsp_read_block_data(ts, CY_REG_BASE,
-			sizeof(struct cyttsp_xydata), &xy_data);
-	} while (!((retval == 0) &&
-		((xy_data.gest_set & CY_ACT_DIST_BITS) ==
-		(CY_ACT_DIST_DFLT & CY_ACT_DIST_BITS))) &&
-		(tries++ < CY_DELAY_MAX));
-
-	DBG2(printk(KERN_INFO "%s: read tries=%d\n", __func__, tries);)
-
-	return 0;
-write_block_data_fail:
+	msleep(CY_DELAY_SYSINFO);
 	return retval;
 }
 
-static int cyttsp_soft_reset(struct cyttsp *ts)
+static int cyttsp_set_bl_mode(struct cyttsp *ts)
 {
 	int retval;
 	u8 cmd = CY_SOFT_RESET_MODE;
 
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
+	dev_vdbg(ts->pdev, "%s.\n", __func__);
 
-	/* reset TTSP Device back to bootloader mode */
-	ts->platform_data->power_state = CY_BL_STATE;
-	retval = ttsp_write_block_data(ts, CY_REG_BASE, sizeof(cmd), &cmd);
+	cancel_delayed_work_sync(&ts->work);
+	if (ts->platform_data->use_charger_mode ||
+			ts->platform_data->use_configure_sensitivity)
+		cancel_work_sync(&ts->runtime_config_work);
 
-	if (!(retval < 0)) {
-		/* wait for interrupt to set ready completion */
-		INIT_COMPLETION(ts->int_running);
-		retval = wait_for_completion_interruptible_timeout(
-			&ts->int_running,
-			msecs_to_jiffies(CY_DELAY_DFLT * CY_DELAY_MAX));
+	atomic_set(&ts->mode, MODE_UNKNOWN);
+	dev_info(ts->pdev, "%s: ... trying.\n", __func__);
+	retval = cyttsp_reinit_hw(ts);
+	msleep(CYTTSP_SCAN_PERIOD);
+	if (retval) {
+		retval = ttsp_write_block_data(ts, CY_REG_BASE,
+				sizeof(cmd), &cmd);
+		if (retval)
+			return retval;
 	}
-
-	if (retval < 0) {
-		ts->platform_data->power_state = CY_IDLE_STATE;
-		printk(KERN_ERR "%s: reset timeout fail (ret=%d)\n",
-			__func__, retval);
+	if (cyttsp_wait_condition(ts, is_cyttsp_bl_running,
+			CYTTSP_BL_ENTER_TIME)) {
+		dev_info(ts->pdev, "%s: completed.\n", __func__);
+		atomic_set(&ts->mode, MODE_BL_IDLE);
+		atomic_set(&ts->handshake, 0);
+		msleep(CYTTSP_BL_READY_TIME);
+		if (!cyttsp_load_bl_regs(ts))
+			set_version_info(ts);
+		return 0;
 	}
-
-	if (retval > 0)
-		retval = 0;
-
-	return retval;
+	dev_err(ts->pdev, "%s: failed.\n", __func__);
+	return -EAGAIN;
 }
 
-static int cyttsp_gesture_setup(struct cyttsp *ts)
+static void configure_airtouch(struct cyttsp *ts)
 {
 	int retval;
-	u8 gesture_setup;
+	u8 mode;
 
-	DBG(printk(KERN_INFO"%s: Init gesture; active distance setup\n",
-		__func__);)
-
-	gesture_setup = ts->platform_data->gest_set;
-	retval = ttsp_write_block_data(ts, CY_REG_GEST_SET,
-		sizeof(gesture_setup), &gesture_setup);
-
-	return retval;
-}
-
-#ifdef CY_INCLUDE_LOAD_RECS
-#include "cyttsp_ldr.h"
-#else
-static bool cyttsp_bl_status(struct cyttsp *ts)
-{
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
-	return ((ts->bl_data.bl_status == 0x10) ||
-		(ts->bl_data.bl_status == 0x11));
-}
-
-static int cyttsp_loader(struct cyttsp *ts)
-{
-	void *fptr = cyttsp_bl_status;	/* kill warning */
-
-	if (ts) {
-		DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
-		DBG(printk(KERN_INFO"%s: Exit\n", __func__);)
+	if (!ts->platform_data->use_airtouch || ts->airtouch_enabled) {
+		/* Airtouch is not used, or already enabled. */
+		return;
 	}
 
-	if (!fptr)
-		return -EIO;
+	/* Only possible to set hover mode if the touchscreen is active. */
+	if (ts->platform_data->power_state != CY_ACTIVE_STATE ||
+			ts->fw_loader_mode) {
+		/* Not possible to update to the new state now. The new
+		   mode will instead be set during resume. */
+		dev_info(ts->pdev, "%s: Airtouch: Not possible to configure " \
+				"airtouch now, since the touchscreen is not " \
+				"active. Will be updated during resume.\n",
+				__func__);
+		return;
+	}
+
+	/* Switch to system information mode is required to
+	   write to SCN_TYP register */
+	dev_dbg(ts->pdev, "%s: Switching to system information mode.\n",
+			__func__);
+	retval = cyttsp_set_sysinfo_mode(ts);
+	if (retval) {
+		dev_err(ts->pdev, "%s: Switching to system information mode " \
+			"failed.\n", __func__);
+		return;
+	}
+
+	/* Airtouch: set SCN_TYP register. */
+	mode = CY_SCAN_MODE_HOVER;
+	dev_dbg(ts->pdev, "%s: Airtouch: Writes 0x%X to register 0x%X\n",
+			__func__, mode, CY_REG_SCN_TYP);
+	retval = ttsp_write_block_data(ts, CY_REG_SCN_TYP,
+			sizeof(mode), &mode);
+
+	if (!retval)
+		ts->airtouch_enabled = 1;
 	else
-		return 0;
+		dev_err(ts->pdev, "%s: Error updating SCT_TYP-register.\n",
+				__func__);
+
+	msleep(CY_DELAY_SYSINFO);
+
+	cyttsp_handshake(ts);
+
+	/* switch back to Operational mode */
+	dev_dbg(ts->pdev, "%s: switch back to operational mode\n", __func__);
+
+	retval = cyttsp_set_operational_mode(ts);
+	if (retval)
+		dev_err(ts->pdev, "%s: Failed setting operational mode\n",
+			__func__);
+
+	cyttsp_handshake(ts);
 }
-#endif
+
 
 static int cyttsp_power_on(struct cyttsp *ts)
 {
-	int retval = 0;
+	int retval;
+	int counter = 5;
 
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
+again:
+	dev_vdbg(ts->pdev, "%s: trying ...\n", __func__);
 
-	/* (re-)start watchdog */
-	mod_timer(&ts->timer, jiffies + CY_WDG_TIMEOUT);
-
-	cyttsp_init_tch(ts);
-	retval = cyttsp_soft_reset(ts);
-	DBG2(printk(KERN_INFO"%s: after softreset r=%d\n", __func__, retval);)
-	if (retval < 0)
-		goto bypass;
-
-	if (ts->platform_data->use_load_file)
-		retval = cyttsp_loader(ts);
-
-	if (!cyttsp_bl_app_valid(ts)) {
-		retval = 1;
-		goto bypass;
+	retval = cyttsp_set_bl_mode(ts);
+	if (retval) {
+		dev_err(ts->pdev, "%s: Bootloader not suppported\n", __func__);
+		return retval;
 	}
 
-	retval = cyttsp_exit_bl_mode(ts);
-	DBG2(printk(KERN_INFO"%s: after exit bl r=%d\n", __func__, retval);)
+	if (!is_app_checksum_valid(ts))
+		goto bypass;
 
-	if (retval < 0)
+	if (cyttsp_exit_bl_mode(ts))
 		goto bypass;
 
 	/* switch to System Information mode to read */
 	/* versions and set interval registers */
-	ts->platform_data->power_state = CY_READY_STATE;
-	retval = cyttsp_set_sysinfo_mode(ts);
-	if (retval < 0)
-		goto bypass;
+	if (cyttsp_set_sysinfo_mode(ts)) {
+		if (counter--)
+			goto again;
+		goto to_bl_mode;
+	}
 
-	retval = cyttsp_set_sysinfo_regs(ts);
-	if (retval < 0)
-		goto bypass;
+	if ((CY_DIFF(ts->platform_data->act_intrvl, CY_ACT_INTRVL_DFLT) ||
+		CY_DIFF(ts->platform_data->tch_tmout, CY_TCH_TMOUT_DFLT) ||
+		CY_DIFF(ts->platform_data->lp_intrvl, CY_LP_INTRVL_DFLT))) {
 
+		retval = cyttsp_set_intrvl_registers(ts);
+		if (retval < 0)
+			goto to_bl_mode;
+
+	}
 	/* switch back to Operational mode */
-	DBG2(printk(KERN_INFO"%s: switch back to operational mode\n",
-		__func__);)
+	dev_info(ts->pdev, "%s: switch back to operational mode\n", __func__);
 	retval = cyttsp_set_operational_mode(ts);
 	if (retval < 0)
-		goto bypass;
+		goto to_bl_mode;
 
-	/* init gesture setup; required for active distance */
-	cyttsp_gesture_setup(ts);
+	/* init gesture setup */
+	if (ts->platform_data->use_gestures) {
+		u8 gesture_setup;
 
+		DBG(printk(KERN_INFO"%s: Init gesture setup\n", __func__);)
+		retval = ttsp_read_block_data(ts, CY_REG_GEST_SET,
+				sizeof(gesture_setup), &gesture_setup);
+		if (retval)
+			goto err_gestures;
+
+		if (ts->platform_data->gest_set != CY_GEST_KEEP_ASIS)
+			gesture_setup = (gesture_setup & CY_GEST_GRP_CLR) |
+					ts->platform_data->gest_set;
+
+		if (ts->platform_data->act_dist != CY_ACT_DIST_KEEP_ASIS)
+			gesture_setup = (gesture_setup & CY_ACT_DIST_CLR) |
+					ts->platform_data->act_dist;
+
+		retval = ttsp_write_block_data(ts, CY_REG_GEST_SET,
+				sizeof(gesture_setup), &gesture_setup);
+		if (retval)
+			goto err_gestures;
+		msleep(CY_DELAY_DFLT);
+	}
+	/*disable water rejection feature*/
+	if (ts->platform_data->disable_w_rejection) {
+		u8 cmd = 0x00;
+		retval = ttsp_write_block_data(ts, CY_REG_SYSTEM,
+				sizeof(cmd), &cmd);
+		if (!retval)
+			dev_info(ts->pdev, "%s: disable water rejection\n",
+					__func__);
+		else
+			dev_err(ts->pdev, "%s: error %d\n", __func__, retval);
+	}
+	goto done;
+
+err_gestures:
+	dev_err(ts->pdev, "%s: Unable to set gestures.\n", __func__);
+to_bl_mode:
+	dev_info(ts->pdev, "%s: Try to keep bootloader mode\n", __func__);
+	retval = cyttsp_set_bl_mode(ts);
+	/* reset application version to force FW update */
+	ts->appver = 0;
 bypass:
-	if (retval)
+	dev_info(ts->pdev, "%s: will stay in bootloader\n", __func__);
+done:
+	if (retval < 0)
 		ts->platform_data->power_state = CY_IDLE_STATE;
 	else
 		ts->platform_data->power_state = CY_ACTIVE_STATE;
 
-	printk(KERN_INFO"%s: Power state is %s\n",
-		__func__, (ts->platform_data->power_state == CY_ACTIVE_STATE) ?
-		"ACTIVE" : "IDLE");
+	dev_info(ts->pdev, "%s: Power state is %s\n",
+			__func__, (ts->platform_data->power_state ==
+			CY_ACTIVE_STATE) ? "ACTIVE" : "IDLE");
 	return retval;
 }
 
-static void cyttsp_check_bl(struct work_struct *work)
+static void cyttsp_reset_worker(struct work_struct *work)
 {
-	struct cyttsp *ts = container_of(work, struct cyttsp, work);
-	s32 retval;
-	struct cyttsp_xydata xy_data;
+	struct cyttsp *ts = container_of(to_delayed_work(work),
+						struct cyttsp, work);
+	int retval;
+	struct cyttsp_mode xy_mode;
 
-	retval = ttsp_read_block_data(ts, CY_REG_BASE, 2, &xy_data);
+	retval = ttsp_read_block_data(ts, CY_REG_BASE,
+				      sizeof(xy_mode), &xy_mode);
 	if (retval < 0) {
-		printk(KERN_ERR "%s: Error, fail to read device\n", __func__);
+		dev_err(ts->pdev, "%s: read failed\n", __func__);
 		goto reserve_next;
 	}
 
-	if (CY_MODE_ERROR(ts->platform_data->power_state,
-		xy_data.hst_mode, xy_data.tt_mode)) {
-		printk(KERN_ERR "%s: Error, mode error detected "
-			"on watchdog timeout ps=%d mode=%02X bl_mode=%02X\n",
-			__func__, ts->platform_data->power_state,
-			xy_data.hst_mode, xy_data.tt_mode);
-		retval = cyttsp_power_on(ts);
-		if (retval < 0)
-			printk(KERN_ERR "%s: Error, power on fail\n", __func__);
+	if (IS_BAD_PKT(xy_mode.tt_mode)) {
+		dev_err(ts->pdev, "%s: invalid buffer\n", __func__);
+		goto reserve_next;
 	}
 
+	if (GET_BOOTLOADERMODE(xy_mode.tt_mode)) {
+		atomic_set(&ts->mode, MODE_BL_IDLE);
+		(void)cyttsp_exit_bl_mode(ts);
+	}
 reserve_next:
-	mod_timer(&ts->timer, jiffies + CY_WDG_TIMEOUT);
+	schedule_delayed_work(&ts->work, ESD_CHECK_INTERVAL);
 }
 
 static int cyttsp_resume(struct cyttsp *ts)
 {
 	int retval = 0;
 	struct cyttsp_xydata xydata;
+	int counter = 10;
 
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
+	dev_info(ts->pdev, "%s: Enter\n", __func__);
 	if (ts->platform_data->use_sleep && (ts->platform_data->power_state !=
-		CY_ACTIVE_STATE)) {
-		if (ts->platform_data->wakeup) {
-			retval = ts->platform_data->wakeup();
-			if (retval < 0)
-				printk(KERN_ERR "%s: Error, wakeup failed!\n",
+							CY_ACTIVE_STATE)) {
+		if (!ts->platform_data->wakeup) {
+			dev_err(ts->pdev, "%s: Error, akeup not implemented!\n",
 					__func__);
-		} else {
-			printk(KERN_ERR "%s: Error, wakeup not implemented "
-				"(check board file).\n", __func__);
 			retval = -ENOSYS;
+			goto exit;
 		}
-		if (!(retval < 0)) {
+		while (counter--) {
+			dev_info(ts->pdev, "%s: Waking ...\n", __func__);
+			retval = ts->platform_data->wakeup(ts->pdev);
+			if (retval)
+				continue;
 			retval = ttsp_read_block_data(ts, CY_REG_BASE,
-				sizeof(xydata), &xydata);
-			if (!(retval < 0) && !GET_HSTMODE(xydata.hst_mode))
+					sizeof(xydata), &xydata);
+			dev_info(ts->pdev, "%s: hst_mode %02x\n",
+					__func__, xydata.hst_mode);
+			/*
+			* Not able to  reed - seems we are still in sleep mode
+			*/
+			if (retval)
+				continue;
+			if (!xydata.hst_mode) {
+				/*
+				* Were able to  reed - let's doublecheck that
+				* we didn't enter sleep mode after first read
+				* and are still able to read
+				*/
+				msleep(CYTTSP_SCAN_PERIOD);
+				retval = ttsp_read_block_data(ts, CY_REG_BASE,
+						sizeof(xydata), &xydata);
+				dev_info(ts->pdev, "%s: hst_mode %02x\n",
+						__func__, xydata.hst_mode);
+				if (retval)
+					continue;
+			}
+			if (!GET_HSTMODE(xydata.hst_mode))
 				ts->platform_data->power_state =
-					CY_ACTIVE_STATE;
+						CY_ACTIVE_STATE;
+			if (!xydata.hst_mode)
+				break;
 		}
 	}
-	DBG(printk(KERN_INFO"%s: Wake Up %s\n", __func__,
-		(retval < 0) ? "FAIL" : "PASS");)
+exit:
 	return retval;
 }
 
+#ifdef CONFIG_HAS_EARLYSUSPEND
 static int cyttsp_suspend(struct cyttsp *ts)
 {
 	u8 sleep_mode = 0;
 	int retval = 0;
 
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
+	dev_info(ts->pdev, "%s: Enter\n", __func__);
 	if (ts->platform_data->use_sleep &&
 			(ts->platform_data->power_state == CY_ACTIVE_STATE)) {
 		sleep_mode = CY_DEEP_SLEEP_MODE;
-		retval = ttsp_write_block_data(ts,
-			CY_REG_BASE, sizeof(sleep_mode), &sleep_mode);
+		retval = ttsp_write_confirm(ts,
+			CY_REG_BASE, sizeof(sleep_mode), &sleep_mode, 100);
 		if (!(retval < 0))
 			ts->platform_data->power_state = CY_SLEEP_STATE;
-		msleep(CY_MODE_CHANGE_DELAY);
+		else
+			ts->platform_data->power_state = CY_UNSURE_STATE;
 	}
 	DBG(printk(KERN_INFO"%s: Sleep Power state is %s\n", __func__,
 		(ts->platform_data->power_state == CY_ACTIVE_STATE) ?
@@ -1713,22 +1855,19 @@ static int cyttsp_suspend(struct cyttsp *ts)
 	return retval;
 }
 
-#ifdef CONFIG_HAS_EARLYSUSPEND
 static void cyttsp_ts_early_suspend(struct early_suspend *h)
 {
 	struct cyttsp *ts = container_of(h, struct cyttsp, early_suspend);
 
 	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
 	LOCK(ts->mutex);
+	ts->suspended = 1;
 	if (!ts->fw_loader_mode) {
-		disable_irq_nosync(ts->irq);
-		ts->suspended = 1;
-		/* kill watchdog */
-		del_timer(&ts->timer);
-		cancel_work_sync(&ts->work);
+		disable_irq(ts->irq);
+		dev_dbg(ts->pdev, "%s: stop ESD check\n", __func__);
+		cancel_delayed_work_sync(&ts->work);
 		cyttsp_suspend(ts);
 	}
-	regulator_disable(ts->regulator);
 	UNLOCK(ts->mutex);
 }
 
@@ -1736,172 +1875,83 @@ static void cyttsp_ts_late_resume(struct early_suspend *h)
 {
 	struct cyttsp *ts = container_of(h, struct cyttsp, early_suspend);
 
-	regulator_enable(ts->regulator);
-
 	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
 	LOCK(ts->mutex);
-	if (!ts->fw_loader_mode && ts->suspended) {
-		ts->suspended = 0;
+	ts->suspended = 0;
+	if (!ts->fw_loader_mode) {
 		if (cyttsp_resume(ts) < 0)
 			printk(KERN_ERR "%s: Error, cyttsp_resume.\n",
 				__func__);
+		dev_dbg(ts->pdev, "%s: start ESD check\n", __func__);
+		schedule_delayed_work(&ts->work, ESD_CHECK_INTERVAL);
+		if (ts->platform_data->use_charger_mode ||
+				ts->platform_data->use_configure_sensitivity)
+			schedule_work(&ts->runtime_config_work);
+
 		enable_irq(ts->irq);
-		/* resume watchdog */
-		mod_timer(&ts->timer, jiffies + CY_WDG_TIMEOUT);
+
+		/* Configure airtouch if needed. */
+		configure_airtouch(ts);
 	}
 	UNLOCK(ts->mutex);
 }
 #endif
 
-static int cyttsp_wr_reg(struct cyttsp *ts, u8 reg_id, u8 reg_data)
+static bool is_ttsp_fwwr_done(struct cyttsp *ts)
 {
+	struct {
+		u8 status;
+		u8 error;
+	} __attribute__ ((packed)) bl;
+	int rc = ttsp_read_block_data(ts, CY_REG_BASE + 1, sizeof(bl), &bl);
 
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
-
-	return ttsp_write_block_data(ts,
-		CY_REG_BASE + reg_id, sizeof(u8), &reg_data);
+	if (rc)
+		dev_err(ts->pdev, "%s: read error %d\n", __func__, rc);
+	dev_vdbg(ts->pdev, "%s: status 0x%02x error 0x%02x\n", __func__,
+				bl.status, bl.error);
+	return !rc && !(ts->bl_data.bl_status & CY_BL_BUSY) &&
+			!(ts->bl_data.bl_error & ~CY_BL_RECEPTIVE);
 }
 
-static int cyttsp_rd_reg(struct cyttsp *ts, u8 reg_id, u8 *reg_data)
-{
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
-	return ttsp_read_block_data(ts,
-		CY_REG_BASE + reg_id, sizeof(u8), reg_data);
-}
-
-static ssize_t firmware_write(struct file *filp, struct kobject *kobj,
+static ssize_t firmware_write(struct file *f, struct kobject *kobj,
 				struct bin_attribute *bin_attr,
 				char *buf, loff_t pos, size_t size)
 {
 	struct device *dev = container_of(kobj, struct device, kobj);
 	struct cyttsp *ts = dev_get_drvdata(dev);
-	LOCK(ts->mutex);
-	if (!ts->fw_loader_mode) {
-		unsigned short val = *(unsigned short *)buf;
-		u8 reg_data = val & 0xff;
-		ts->reg_id = (val & 0xff00) >> 8;
-		if (!(ts->reg_id & 0x80)) {
-			/* write user specified operational register */
-			if (ts->reg_id == 0x00) {
-				switch (GET_HSTMODE(reg_data)) {
-				case GET_HSTMODE(CY_OPERATE_MODE):
-					cyttsp_wr_reg(ts, ts->reg_id, reg_data);
-					ts->platform_data->power_state =
-						CY_ACTIVE_STATE;
-					enable_irq(ts->irq);
-					mod_timer(&ts->timer, CY_WDG_TIMEOUT);
-					printk(KERN_INFO "%s: "
-						"Switch to Operational Mode "
-						"ps=%d\n", __func__,
-						ts->platform_data->power_state);
-					break;
-				case GET_HSTMODE(CY_SYSINFO_MODE):
-					ts->platform_data->power_state =
-						CY_READY_STATE;
-					disable_irq_nosync(ts->irq);
-					/* kill watchdog */
-					del_timer(&ts->timer);
-					cancel_work_sync(&ts->work);
-					cyttsp_wr_reg(ts, ts->reg_id, reg_data);
-					printk(KERN_INFO "%s: "
-						"Switch to SysInfo Mode "
-						"ps=%d\n", __func__,
-						ts->platform_data->power_state);
-					break;
-				default:
-					cyttsp_wr_reg(ts, ts->reg_id, reg_data);
-					break;
-				}
-			} else
-				cyttsp_wr_reg(ts, ts->reg_id, reg_data);
-			printk(KERN_INFO "%s: "
-				"write(reg=%02X(%d) dat=0x%02X(%d))\n",
-				__func__,
-				ts->reg_id & ~0x80, ts->reg_id & ~0x80,
-				reg_data,  reg_data);
-		} else {
-			/* save user specified operational read register */
-			DBG2(printk(KERN_INFO "%s: read(r=0x%02X)\n",
-				__func__, ts->reg_id);)
-		}
-	} else {
-		int retval = 0;
-		int tries = 0;
-		DBG({
-			char str[128];
-			char *p = str;
-			int i;
-			for (i = 0; i < size; i++, p += 2)
-				sprintf(p, "%02x", (unsigned char)buf[i]);
-			printk(KERN_DEBUG "%s: size %d, pos %ld payload %s\n",
-			       __func__, size, (long)pos, str);
-		})
-		do {
-			retval = ttsp_write_block_data(ts,
-				CY_REG_BASE, size, buf);
-			if (retval < 0)
-				msleep(500);
-		} while ((retval < 0) && (tries++ < 10));
+	int rc;
+	int tout = msecs_to_jiffies(CYTTSP_ENTER_BLDR_TIME);
+
+	atomic_set(&ts->done, 0);
+	ttsp_write_block_data(ts, CY_REG_BASE, size, buf);
+	tout = wait_event_timeout(ts->wq, atomic_read(&ts->done), tout);
+	if (is_ttsp_fwwr_done(ts)) {
+		dev_vdbg(ts->pdev, "%s: %d byte block, t=%d\n", __func__,
+				size, tout);
+		return size;
 	}
-	UNLOCK(ts->mutex);
-	return size;
+	rc = cyttsp_load_bl_regs(ts);
+	dev_err(dev, "cyttsp_%s: err: status %02x error %02x rc %d\n", __func__,
+			ts->bl_data.bl_status, ts->bl_data.bl_error, rc);
+	return -EAGAIN;
 }
 
-static ssize_t firmware_read(struct file *filp, struct kobject *kobj,
+static ssize_t firmware_read(struct file *f, struct kobject *kobj,
 	struct bin_attribute *ba,
 	char *buf, loff_t pos, size_t size)
 {
-	int count = 0;
-	u8 reg_data;
 	struct device *dev = container_of(kobj, struct device, kobj);
 	struct cyttsp *ts = dev_get_drvdata(dev);
 
-	DBG2(printk(KERN_INFO"%s: Enter (mode=%d)\n",
-		__func__, ts->fw_loader_mode);)
-
-	LOCK(ts->mutex);
-	if (!ts->fw_loader_mode) {
-		/* read user specified operational register */
-		cyttsp_rd_reg(ts, ts->reg_id & ~0x80, &reg_data);
-		*(unsigned short *)buf = reg_data << 8;
-		count = sizeof(unsigned short);
-		printk(KERN_INFO "%s: read(reg=%02X(%d) dat=0x%02X(%d))\n",
-			__func__, ts->reg_id & ~0x80, ts->reg_id & ~0x80,
-			reg_data,  reg_data);
-	} else {
-		int retval = 0;
-		int tries = 0;
-
-		do {
-			retval = cyttsp_load_bl_regs(ts);
-			if (retval < 0)
-				msleep(500);
-		} while ((retval < 0) && (tries++ < 10));
-
-		if (retval < 0) {
-			printk(KERN_ERR "%s: error reading status\n", __func__);
-			count = 0;
-		} else {
-			*(unsigned short *)buf = ts->bl_data.bl_status << 8 |
-				ts->bl_data.bl_error;
-			count = sizeof(unsigned short);
-		}
-
-		DBG2(printk(KERN_INFO
-			"%s:bl_f=0x%02X bl_s=0x%02X bl_e=0x%02X\n",
-			__func__,
-			ts->bl_data.bl_file,
-			ts->bl_data.bl_status,
-			ts->bl_data.bl_error);)
-	}
-	UNLOCK(ts->mutex);
-	return count;
+	*(unsigned short *)buf = ts->bl_data.bl_status << 8 |
+			ts->bl_data.bl_error;
+	return sizeof(unsigned short);
 }
 
 static struct bin_attribute cyttsp_firmware = {
 	.attr = {
 		.name = "firmware",
-		.mode = 0644,
+		.mode = 0666,
 	},
 	.size = 128,
 	.read = firmware_read,
@@ -1912,204 +1962,350 @@ static ssize_t attr_fwloader_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct cyttsp *ts = dev_get_drvdata(dev);
-	return sprintf(buf, "0x%02X%02X 0x%02X%02X 0x%02X%02X 0x%02X%02X%02X\n",
-		ts->sysinfo_data.tts_verh, ts->sysinfo_data.tts_verl,
-		ts->sysinfo_data.app_idh, ts->sysinfo_data.app_idl,
-		ts->sysinfo_data.app_verh, ts->sysinfo_data.app_verl,
-		ts->sysinfo_data.cid[0], ts->sysinfo_data.cid[1],
-		ts->sysinfo_data.cid[2]);
+	return snprintf(buf, PAGE_SIZE, "0x%04X 0x%04X 0x%04X 0x%06X\n",
+		ts->ttspid, ts->appid, ts->appver, ts->cid);
 }
+
+static ssize_t attr_appid_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct cyttsp *ts = dev_get_drvdata(dev);
+	return snprintf(buf, PAGE_SIZE, "0x%04X\n", ts->appid);
+}
+
+static ssize_t attr_appver_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct cyttsp *ts = dev_get_drvdata(dev);
+	return snprintf(buf, PAGE_SIZE, "0x%04X\n", ts->appver);
+}
+
+static ssize_t attr_ttspid_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct cyttsp *ts = dev_get_drvdata(dev);
+	return snprintf(buf, PAGE_SIZE, "0x%04X\n", ts->ttspid);
+}
+
+static ssize_t attr_custid_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct cyttsp *ts = dev_get_drvdata(dev);
+	return snprintf(buf, PAGE_SIZE, "0x%06X\n", ts->cid);
+}
+
 
 static ssize_t attr_fwloader_store(struct device *dev,
 				struct device_attribute *attr,
 				const char *buf, size_t size)
 {
-	char *p;
 	int ret;
 	struct cyttsp *ts = dev_get_drvdata(dev);
-	unsigned val = simple_strtoul(buf, &p, 10);
+	unsigned long val;
 
-	ret = p - buf;
-	if (*p && isspace(*p))
-		ret++;
-	DBG2(printk(KERN_DEBUG "%s: %u\n", __func__, val);)
-
+	ret = strict_strtoul(buf, 10, &val);
+	if (ret)
+		return ret;
 	LOCK(ts->mutex)
-	if (val == 3) {
-		sysfs_remove_bin_file(&dev->kobj, &cyttsp_firmware);
-		DBG2(printk(KERN_INFO "%s: FW loader closed for reg r/w\n",
-			__func__);)
-	} else if (val == 2) {
-		if (sysfs_create_bin_file(&dev->kobj, &cyttsp_firmware))
-			printk(KERN_ERR "%s: unable to create file\n",
+	if (val && !ts->fw_loader_mode) {
+		ret = sysfs_create_bin_file(&dev->kobj, &cyttsp_firmware);
+		if (ret) {
+			dev_err(ts->pdev, "%s: unable to create file\n",
 				__func__);
-		DBG2(printk(KERN_INFO "%s: FW loader opened for reg r/w\n",
-			__func__);)
-		if (ts->suspended) {
-			cyttsp_resume(ts);
-			ts->suspended = 0;
-			enable_irq(ts->irq);
-			/* resume watchdog */
-			mod_timer(&ts->timer, jiffies + CY_WDG_TIMEOUT);
+			goto exit;
 		}
-	} else if ((val == 1) && !ts->fw_loader_mode) {
+		ret = cyttsp_set_bl_mode(ts);
+		if (ret)
+			goto remove_file;
 		ts->fw_loader_mode = 1;
 		if (ts->suspended) {
 			cyttsp_resume(ts);
-			ts->suspended = 0;
 			enable_irq(ts->irq);
-			/* resume watchdog */
-			mod_timer(&ts->timer, jiffies + CY_WDG_TIMEOUT);
 		}
-		disable_irq_nosync(ts->irq);
-		/* kill watchdog */
-		del_timer(&ts->timer);
-		cancel_work_sync(&ts->work);
-		if (sysfs_create_bin_file(&dev->kobj, &cyttsp_firmware))
-			printk(KERN_ERR "%s: unable to create file\n",
-				__func__);
-		DBG2(printk(KERN_INFO
-			"%s: FW loader opened for start load: ps=%d mode=%d\n",
-			__func__,
-			ts->platform_data->power_state, ts->fw_loader_mode);)
-		cyttsp_soft_reset(ts);
-		printk(KERN_INFO "%s: FW loader started.\n", __func__);
-		ts->platform_data->power_state = CY_LDR_STATE;
+		dev_info(ts->pdev, "%s: FW loader started.\n", __func__);
+		goto exit;
+remove_file:
+		sysfs_remove_bin_file(&dev->kobj, &cyttsp_firmware);
 	} else if (!val && ts->fw_loader_mode) {
 		sysfs_remove_bin_file(&dev->kobj, &cyttsp_firmware);
+		ret = cyttsp_exit_bl_mode(ts);
+		if (ret)
+			goto bypass;
+		ret = cyttsp_set_sysinfo_mode(ts);
+		if (!ret) {
+			cyttsp_execute_mfg_command(ts, CY_MFG_CMD_IDAC,
+				sizeof(CY_MFG_CMD_IDAC), true);
+			cyttsp_execute_mfg_command(ts, CY_MFG_CMD_CLR_STATUS,
+				sizeof(CY_MFG_CMD_CLR_STATUS), false);
+			cyttsp_set_intrvl_registers(ts);
+		} else {
+			cyttsp_power_on(ts);
+		}
+		if (cyttsp_set_operational_mode(ts))
+			cyttsp_power_on(ts);
+bypass:
 		ts->fw_loader_mode = 0;
-		printk(KERN_INFO "%s: FW loader finished.\n", __func__);
-		enable_irq(ts->irq);
-		ret = cyttsp_power_on(ts);
-		if (ret < 0)
-			printk(KERN_ERR "%s: Error, power on fail\n", __func__);
-		/* resume watchdog */
-		mod_timer(&ts->timer, jiffies + CY_WDG_TIMEOUT);
+		dev_info(ts->pdev, "%s: FW loader finished.\n", __func__);
+		if (ts->suspended) {
+			dev_info(ts->pdev, "%s: suspending.\n", __func__);
+			disable_irq(ts->irq);
+			cyttsp_suspend(ts);
+			cancel_delayed_work_sync(&ts->work);
+		}
+		/* Configure airtouch if needed. */
+		msleep(CYTTSP_SCAN_PERIOD);
+		ts->airtouch_enabled = 0;
+		configure_airtouch(ts);
 	}
+exit:
 	UNLOCK(ts->mutex);
-	return  ret == size ? ret : -EINVAL;
+	return ret ? ret : size;
 }
 
-int cyttsp_reset_controller(struct cyttsp *ts)
+static ssize_t attr_baseline_reset_store(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf, size_t count)
 {
-	int ret;
+	struct cyttsp *ts = dev_get_drvdata(dev);
+	unsigned long command;
+	int ret_val = 0;
 
-	ret = gpio_request(ts->platform_data->rst_gpio, "reset_pin");
-	if (ret) {
-		printk(KERN_ERR "touch gpio failed\n");
-		return ret;
-	}
-	ret = gpio_direction_output(ts->platform_data->rst_gpio, 1);
-	if (ret < 0) {
-		printk(KERN_ERR "reset gpio direction failed\n");
-		goto out;
-	}
-	/*
-	 * The start up procedure
-	 * Set the RESET pin to low
-	 * Wait for a period of 1 milisecond
-	 * Set the RESET pin to high
-	 * Wait for a period of 5 milisecond
-	 * Start the initial Sequence
-	 */
-	gpio_set_value(ts->platform_data->rst_gpio, 0);
-	mdelay(1);
-	gpio_set_value(ts->platform_data->rst_gpio, 1);
-	mdelay(5);
-out:
-	gpio_free(ts->platform_data->rst_gpio);
-	return 0;
+	ret_val = strict_strtoul(buf, 10, &command);
+	if (ret_val)
+		goto end;
+
+	if (command)
+		command = 1;
+
+	atomic_set(&ts->baseline_reset_status, (int) command);
+
+	schedule_work(&ts->runtime_config_work);
+	ret_val = strlen(buf);
+
+end:
+	return  ret_val;
 }
 
-static struct device_attribute fwloader =
-	__ATTR(fwloader, 0644, attr_fwloader_show, attr_fwloader_store);
+static ssize_t attr_signal_disparity_store(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf, size_t count)
+{
+	struct cyttsp *ts = dev_get_drvdata(dev);
+	unsigned long command;
+	int ret_val = 0;
 
-void *cyttsp_core_init(struct cyttsp_bus_ops *bus_ops, struct device *pdev)
+	ret_val = strict_strtoul(buf, 10, &command);
+	if (ret_val)
+		goto end;
+
+	/* Convert disparity level to corresponding setting in FW. The value
+	0 means default value, and should not be changed.*/
+	if (command)
+		command = (command - 4) % 16;
+
+	atomic_set(&ts->signal_disparity_status, (int) command);
+
+	schedule_work(&ts->runtime_config_work);
+	ret_val = strlen(buf);
+
+end:
+	return  ret_val;
+}
+
+static ssize_t attr_cmd_store(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf, size_t count)
+{
+	struct cyttsp *ts = dev_get_drvdata(dev);
+	char cmdstr[10];
+	int ret_val;
+
+	ret_val = sscanf(buf, "%9s", cmdstr);
+	if (ret_val != 1) {
+		ret_val = -EINVAL;
+		goto end;
+	}
+
+	if (strncmp(cmdstr, "cmstart", 7) == 0) {
+		atomic_set(&ts->wall_charger_status, 1);
+	}
+	else if (strncmp(cmdstr, "cmend", 5) == 0) {
+		atomic_set(&ts->wall_charger_status, 0);
+	}
+	else {
+		dev_err(dev, "%s: cmd not supported\n", __func__);
+		ret_val = -EINVAL;
+		goto end;
+	}
+	schedule_work(&ts->runtime_config_work);
+	ret_val = strlen(buf);
+end:
+	return  ret_val;
+}
+
+static ssize_t virtual_keys_settings_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct cyttsp *ts = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%s\n", ts->platform_data->virtual_key_settings);
+}
+
+static struct device_attribute virtual_keys_attrib =
+	__ATTR(NULL, 0444, virtual_keys_settings_show, NULL);
+
+static int add_sysfs_virtual_keys_settings(struct device *dev)
+{
+	int retval;
+
+	virtual_keys_attrib.attr.name = "virtualkeys."CY_SPI_NAME;
+	retval = device_create_file(dev, &virtual_keys_attrib);
+	if (retval) {
+		dev_err(dev, "%s: Error creating device.\n", __func__);
+		return -ENODEV;
+	}
+
+	retval = sysfs_create_link(NULL, &(dev->kobj), "board_properties");
+
+	if (retval) {
+		dev_err(dev, "%s: Error creating symlink.\n", __func__);
+		goto undo;
+	}
+
+	return 0;
+undo:
+	device_remove_file(dev, &virtual_keys_attrib);
+	return -ENODEV;
+}
+
+
+static struct device_attribute sensitivity_attributes[] = {
+	__ATTR(baseline_reset, 0220, NULL, attr_baseline_reset_store),
+	__ATTR(signal_disparity, 0220, NULL, attr_signal_disparity_store),
+};
+
+static struct device_attribute charging_attribute =
+	__ATTR(touch_cmd, 0200, NULL, attr_cmd_store);
+
+
+static struct device_attribute attributes[] = {
+	__ATTR(fwloader, 0644, attr_fwloader_show, attr_fwloader_store),
+	__ATTR(appid, 0444, attr_appid_show, NULL),
+	__ATTR(appver, 0444, attr_appver_show, NULL),
+	__ATTR(ttspid, 0444, attr_ttspid_show, NULL),
+	__ATTR(custid, 0444, attr_custid_show, NULL),
+};
+
+static int add_sysfs_interfaces(struct device *dev)
+{
+	int i, j;
+	struct cyttsp *ts = dev_get_drvdata(dev);
+
+	for (i = 0; i < ARRAY_SIZE(attributes); i++)
+		if (device_create_file(dev, attributes + i))
+			goto err_device_create;
+
+	if (ts->platform_data->use_configure_sensitivity)
+		for (j = 0; j < ARRAY_SIZE(sensitivity_attributes); j++)
+			if (device_create_file(dev, sensitivity_attributes + j))
+				goto err_sensitivity_device_create;
+
+	if (ts->platform_data->virtual_key_settings)
+		if (add_sysfs_virtual_keys_settings(dev))
+			goto err_virtual_key_device_create;
+
+	if (ts->platform_data->use_charger_mode)
+		if (device_create_file(dev, &charging_attribute))
+			goto err_charger_mode_device_create;
+
+	return 0;
+
+err_charger_mode_device_create:
+	if (ts->platform_data->virtual_key_settings)
+		sysfs_remove_link(NULL, "board_properties");
+		device_remove_file(dev, &virtual_keys_attrib);
+
+err_virtual_key_device_create:
+err_sensitivity_device_create:
+	if (ts->platform_data->use_configure_sensitivity)
+		for (; j >= 0 ; j--)
+			device_remove_file(dev, sensitivity_attributes + j);
+
+err_device_create:
+	for (; i >= 0 ; i--)
+		device_remove_file(dev, attributes + i);
+
+	dev_err(dev, "%s: failed to create sysfs interface\n", __func__);
+	return -ENODEV;
+}
+
+static void remove_sysfs_interfaces(struct device *dev)
+{
+	int i;
+	struct cyttsp *ts = dev_get_drvdata(dev);
+
+	for (i = 0; i < ARRAY_SIZE(attributes); i++)
+		device_remove_file(dev, attributes + i);
+
+	if (ts->platform_data->virtual_key_settings) {
+		sysfs_remove_link(NULL, "board_properties");
+		device_remove_file(dev, &virtual_keys_attrib);
+	}
+
+	if (ts->platform_data->use_configure_sensitivity)
+		for (i = 0; i < ARRAY_SIZE(attributes); i++)
+			device_remove_file(dev, sensitivity_attributes + i);
+
+	if (ts->platform_data->use_charger_mode)
+		device_remove_file(dev, &charging_attribute);
+}
+
+struct input_dev *cyttsp_allocate_input_device(struct cyttsp *ts, char* name)
 {
 	struct input_dev *input_device;
-	struct cyttsp *ts;
-	int retval = 0, ret = 0;
+	int retval = 0;
 
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
-
-	ts = kzalloc(sizeof(*ts), GFP_KERNEL);
-	if (ts == NULL) {
-		printk(KERN_ERR "%s: Error, kzalloc\n", __func__);
-		goto error_alloc_data_failed;
-	}
-	mutex_init(&ts->mutex);
-	ts->pdev = pdev;
-	ts->platform_data = pdev->platform_data;
-	ts->bus_ops = bus_ops;
-	init_completion(&ts->int_running);
-
-	if (ts->platform_data->init)
-		retval = ts->platform_data->init(1);
-	if (retval) {
-		printk(KERN_ERR "%s: platform init failed!\n", __func__);
-		goto error_init;
-	}
-	ret = cyttsp_reset_controller(ts);
-	if (ret < 0) {
-		printk(KERN_ERR "controller reset failed\n");
-		goto error_reset;
-	}
-
-	/* Create the input device and register it. */
 	input_device = input_allocate_device();
 	if (!input_device) {
 		retval = -ENOMEM;
 		printk(KERN_ERR "%s: Error, failed to allocate input device\n",
 			__func__);
-		goto error_input_allocate_device;
+		return NULL;
 	}
 
-	ts->input = input_device;
-	input_device->name = ts->platform_data->name;
-	input_device->phys = ts->phys;
+	input_device->name = name;
 	input_device->dev.parent = ts->pdev;
-
-	/* enable interrupts */
-	ts->irq = gpio_to_irq(ts->platform_data->irq_gpio);
-	retval = request_threaded_irq(ts->irq, NULL, cyttsp_irq,
-		IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
-		ts->input->name, ts);
-	if (retval < 0) {
-		printk(KERN_ERR "%s: IRQ request failed r=%d\n",
-			__func__, retval);
-		ts->platform_data->power_state = CY_INVALID_STATE;
-		goto error_set_irq;
-	}
-	/* setup watchdog */
-	INIT_WORK(&ts->work, cyttsp_check_bl);
-	setup_timer(&ts->timer, cyttsp_timer, (unsigned long) ts);
-
-	DBG(printk(KERN_INFO "%s: call power_on\n", __func__);)
-	retval = cyttsp_power_on(ts);
-	if (retval < 0) {
-		printk(KERN_ERR "%s: Error, power on failed!\n", __func__);
-		goto error_power_on;
-	}
+	/* init the touch structures */
+	ts->num_prv_st_tch = CY_NTCH;
+	memset(ts->act_trk, CY_NTCH, sizeof(ts->act_trk));
+	memset(ts->prv_mt_pos, CY_NTCH, sizeof(ts->prv_mt_pos));
+	memset(ts->prv_mt_tch, CY_IGNR_TCH, sizeof(ts->prv_mt_tch));
+	memset(ts->prv_st_tch, CY_IGNR_TCH, sizeof(ts->prv_st_tch));
 
 	set_bit(EV_SYN, input_device->evbit);
 	set_bit(EV_KEY, input_device->evbit);
 	set_bit(EV_ABS, input_device->evbit);
-	set_bit(BTN_TOUCH, input_device->keybit);
-	set_bit(BTN_2, input_device->keybit);
+	if (ts->platform_data->use_st) {
+		set_bit(BTN_TOUCH, input_device->keybit);
+		set_bit(BTN_2, input_device->keybit);
+	}
 	if (ts->platform_data->use_gestures)
 		set_bit(BTN_3, input_device->keybit);
 
-	input_set_abs_params(input_device, ABS_X, 0, ts->platform_data->maxx,
-			     0, 0);
-	input_set_abs_params(input_device, ABS_Y, 0, ts->platform_data->maxy,
-			     0, 0);
-	input_set_abs_params(input_device, ABS_TOOL_WIDTH, 0,
-			     CY_LARGE_TOOL_WIDTH, 0, 0);
-	input_set_abs_params(input_device, ABS_PRESSURE, 0, CY_MAXZ, 0, 0);
-	input_set_abs_params(input_device, ABS_HAT0X, 0,
-			     ts->platform_data->maxx, 0, 0);
-	input_set_abs_params(input_device, ABS_HAT0Y, 0,
-			     ts->platform_data->maxy, 0, 0);
+	if (ts->platform_data->use_st) {
+		input_set_abs_params(input_device, ABS_X, 0,
+				ts->platform_data->maxx, 0, 0);
+		input_set_abs_params(input_device, ABS_Y, 0,
+				ts->platform_data->maxy, 0, 0);
+		input_set_abs_params(input_device, ABS_TOOL_WIDTH, 0,
+				CY_LARGE_TOOL_WIDTH, 0, 0);
+		input_set_abs_params(input_device, ABS_PRESSURE, 0, CY_MAXZ,
+				0, 0);
+		input_set_abs_params(input_device, ABS_HAT0X, 0,
+				ts->platform_data->maxx, 0, 0);
+		input_set_abs_params(input_device, ABS_HAT0Y, 0,
+				ts->platform_data->maxy, 0, 0);
+	}
 	if (ts->platform_data->use_gestures) {
 		input_set_abs_params(input_device, ABS_HAT1X, 0, CY_MAXZ,
 				     0, 0);
@@ -2121,76 +2317,146 @@ void *cyttsp_core_init(struct cyttsp_bus_ops *bus_ops, struct device *pdev)
 				     ts->platform_data->maxx, 0, 0);
 		input_set_abs_params(input_device, ABS_MT_POSITION_Y, 0,
 				     ts->platform_data->maxy, 0, 0);
-		input_set_abs_params(input_device, ABS_MT_TOUCH_MAJOR, 0,
-				     CY_MAXZ, 0, 0);
 		input_set_abs_params(input_device, ABS_MT_WIDTH_MAJOR, 0,
 				     CY_LARGE_TOOL_WIDTH, 0, 0);
 		if (ts->platform_data->use_trk_id)
 			input_set_abs_params(input_device, ABS_MT_TRACKING_ID,
 					0, CY_NUM_TRK_ID, 0, 0);
+
+		if (ts->platform_data->use_airtouch) {
+			input_set_abs_params(input_device, ABS_MT_DISTANCE, 0,
+						CY_MAXZ, 0, 0);
+			input_set_abs_params(input_device, ABS_MT_PRESSURE, 0,
+						CY_MAXZ, 0, 0);
+		}
+		input_set_abs_params(input_device, ABS_MT_TOUCH_MAJOR,
+					0, CY_MAXZ, 0, 0);
+
 	}
 
 	if (ts->platform_data->use_virtual_keys)
 		input_set_capability(input_device, EV_KEY, KEY_PROG1);
 
+	dev_set_drvdata(&input_device->dev, ts);
+
+	return input_device;
+}
+
+void *cyttsp_core_init(struct cyttsp_bus_ops *bus_ops, struct device *pdev)
+{
+	struct cyttsp *ts;
+	struct input_dev *input_device = NULL;
+	int retval = 0;
+
+	ts = kzalloc(sizeof(*ts), GFP_KERNEL);
+	if (ts == NULL) {
+		printk(KERN_ERR "%s: Error, kzalloc\n", __func__);
+		goto error_alloc_data_failed;
+	}
+	mutex_init(&ts->mutex);
+	init_waitqueue_head(&ts->wq);
+	atomic_set(&ts->handshake, 0);
+	atomic_set(&ts->mode, MODE_UNKNOWN);
+	ts->pdev = pdev;
+	ts->platform_data = pdev->platform_data;
+	ts->bus_ops = bus_ops;
+
+	if (ts->platform_data->init)
+		retval = ts->platform_data->init(1, ts->pdev);
+	if (retval) {
+		printk(KERN_ERR "%s: platform init failed!\n", __func__);
+		goto error_init;
+	}
+
+	ts->irq = gpio_to_irq(ts->platform_data->irq_gpio);
+	if (ts->irq < 0) {
+		dev_err(pdev, "%s: gpio_to_irq failed (%d)\n",
+			__func__, ts->irq);
+		goto err_gpio_to_irq;
+	}
+
+	/* Create the touch input device and register it. */
+	input_device = cyttsp_allocate_input_device(ts,
+						ts->platform_data->name);
+
+	ts->input = input_device;
+
+	if (input_device == NULL)
+		goto error_input_allocate_device;
+
+
 	retval = input_register_device(input_device);
 	if (retval) {
 		printk(KERN_ERR "%s: Error, failed to register input device\n",
 			__func__);
+		input_free_device(input_device);
 		goto error_input_register_device;
-	}
-	DBG(printk(KERN_INFO "%s: Registered input device %s\n",
-		   __func__, input_device->name);)
-	ts->regulator = regulator_get(ts->pdev, "vcpin");
-	if (IS_ERR(ts->regulator)) {
-		printk(KERN_ERR "%s: Error, regulator_get failed\n", __func__);
-		ts->regulator = NULL;
-		goto error_input_register_device;
-	} else {
-		ret = regulator_enable(ts->regulator);
-		if (ret < 0) {
-			printk(KERN_ERR "%s: regulator enable failed\n",
-			__func__);
-			goto out_regulator_error;
-		}
 	}
 
+	dev_set_drvdata(pdev, ts);
+
+	dev_info(ts->pdev, "%s: Enable ESD check\n", __func__);
+	INIT_DELAYED_WORK(&ts->work, cyttsp_reset_worker);
+
+	retval = request_threaded_irq(ts->irq, NULL, cyttsp_irq,
+				      IRQF_TRIGGER_FALLING |
+				      IRQF_DISABLED,
+				      input_device->name, ts);
+
+	if (retval) {
+		printk(KERN_ERR "%s: Error, could not request irq\n",
+			__func__);
+		goto error_free_irq;
+	}
+	DBG(printk(KERN_INFO "%s: Interrupt=%d\n",
+			__func__, ts->irq);)
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	ts->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
 	ts->early_suspend.suspend = cyttsp_ts_early_suspend;
 	ts->early_suspend.resume = cyttsp_ts_late_resume;
 	register_early_suspend(&ts->early_suspend);
 #endif
-	retval = device_create_file(pdev, &fwloader);
-	if (retval) {
-		printk(KERN_ERR "%s: Error, could not create attribute\n",
-			__func__);
-		goto device_create_error;
-	}
-	dev_set_drvdata(pdev, ts);
+	retval = add_sysfs_interfaces(pdev);
+	if (retval)
+		goto attr_create_error;
 
+	printk(KERN_INFO "%s: Successful.\n", __func__);
+	if (ts->platform_data->use_charger_mode ||
+			ts->platform_data->use_configure_sensitivity) {
+		INIT_WORK(&ts->runtime_config_work, runtime_cfg_work);
+
+		atomic_set(&ts->wall_charger_status, 0);
+		atomic_set(&ts->baseline_reset_status, 0);
+		atomic_set(&ts->signal_disparity_status, 0);
+	}
+
+	retval = cyttsp_power_on(ts);
+	if (retval < 0) {
+		printk(KERN_ERR "%s: Error, power on failed!\n", __func__);
+		goto error_power_on;
+	}
+	configure_airtouch(ts);
 	return ts;
 
-device_create_error:
-	regulator_disable(ts->regulator);
+error_power_on:
+	if (ts->platform_data->use_charger_mode ||
+			ts->platform_data->use_configure_sensitivity)
+		cancel_work_sync(&ts->runtime_config_work);
+
+	remove_sysfs_interfaces(ts->pdev);
+attr_create_error:
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	unregister_early_suspend(&ts->early_suspend);
 #endif
-out_regulator_error:
-	regulator_put(ts->regulator);
-error_input_register_device:
+	free_irq(ts->irq, ts);
+error_free_irq:
 	input_unregister_device(input_device);
-error_power_on:
-	cancel_work_sync(&ts->work);
-	del_timer_sync(&ts->timer);
-	if (ts->irq >= 0)
-		free_irq(ts->irq, ts);
-error_set_irq:
-	input_free_device(input_device);
-error_reset:
+	cancel_delayed_work_sync(&ts->work);
+error_input_register_device:
 error_input_allocate_device:
+err_gpio_to_irq:
 	if (ts->platform_data->init)
-		ts->platform_data->init(0);
+		ts->platform_data->init(0, ts->pdev);
 error_init:
 	kfree(ts);
 error_alloc_data_failed:
@@ -2203,16 +2469,18 @@ void cyttsp_core_release(void *handle)
 	struct cyttsp *ts = handle;
 
 	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
+	if (ts->platform_data->use_charger_mode ||
+			ts->platform_data->use_configure_sensitivity)
+		cancel_work_sync(&ts->runtime_config_work);
+
+	remove_sysfs_interfaces(ts->pdev);
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	unregister_early_suspend(&ts->early_suspend);
 #endif
-	del_timer_sync(&ts->timer);
-	cancel_work_sync(&ts->work);
 	free_irq(ts->irq, ts);
 	input_unregister_device(ts->input);
-	input_free_device(ts->input);
 	if (ts->platform_data->init)
-		ts->platform_data->init(0);
+		ts->platform_data->init(0, ts->pdev);
 	kfree(ts);
 }
 MODULE_LICENSE("GPL");

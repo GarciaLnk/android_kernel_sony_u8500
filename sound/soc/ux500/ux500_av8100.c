@@ -96,10 +96,9 @@ static int ux500_av8100_hw_params(struct snd_pcm_substream *substream,
 
 	/* Change HDMI audio-settings for codec-DAI. */
 	pr_debug("%s: Change HDMI audio-settings for codec-DAI.\n", __func__);
-	as.audio_coding_type = AV8100_CODEC_CT_IEC60958_PCM;
 	as.audio_channel_count = hdmi_cc;
-	as.sampling_frequency = AV8100_CODEC_SF_48KHZ;
-	as.sample_size = AV8100_CODEC_SS_16BIT;
+	as.sampling_frequency = AV8100_CODEC_SF_REFER;
+	as.sample_size = AV8100_CODEC_SS_REFER;
 	as.channel_allocation = hdmi_ca;
 	as.level_shift_value = AV8100_CODEC_LSV_0DB;
 	as.downmix_inhibit = false;
@@ -113,7 +112,7 @@ static int ux500_av8100_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	/* Set format for codec-DAI */
-	fmt = SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_CBM_CFM;
+	fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBM_CFM;
 	pr_debug("%s: Setting format for codec-DAI (fmt = %d).\n",
 		__func__,
 		fmt);
@@ -140,7 +139,7 @@ static int ux500_av8100_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	/* Set format for CPU-DAI */
-	fmt = SND_SOC_DAIFMT_DSP_B |
+	fmt = SND_SOC_DAIFMT_DSP_A |
 		SND_SOC_DAIFMT_CBM_CFM |
 		SND_SOC_DAIFMT_NB_IF;
 	pr_debug("%s: Setting DAI-format for Ux500-platform (fmt = %d).\n",

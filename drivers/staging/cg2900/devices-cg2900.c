@@ -41,11 +41,6 @@
 #define H4_HEADER_LENGTH		0x01
 #define BT_HEADER_LENGTH		0x03
 
-#define STLC2690_HCI_REV		0x0600
-#define CG2900_PG1_HCI_REV		0x0101
-#define CG2900_PG2_HCI_REV		0x0200
-#define CG2900_PG1_SPECIAL_HCI_REV	0x0700
-
 struct vs_power_sw_off_cmd {
 	__le16	op_code;
 	u8	len;
@@ -66,9 +61,7 @@ static struct sk_buff *dcg2900_get_power_switch_off_cmd
 	int i;
 
 	/* If connected chip does not support the command return NULL */
-	if (CG2900_PG1_SPECIAL_HCI_REV != dev->chip.hci_revision &&
-	    CG2900_PG1_HCI_REV != dev->chip.hci_revision &&
-	    CG2900_PG2_HCI_REV != dev->chip.hci_revision)
+	if (!check_chip_revision_support(dev->chip.hci_revision))
 		return NULL;
 
 	dev_dbg(dev->dev, "Generating PowerSwitchOff command\n");
@@ -208,7 +201,6 @@ err_handling_free_gpios:
 		gpio_free(info->pmuen_gpio);
 	if (info->gbf_gpio != -1)
 		gpio_free(info->gbf_gpio);
- 
 err_handling:
 	kfree(info);
 	return err;
@@ -285,7 +277,6 @@ void dcg2900_init_platdata(struct cg2900_platform_data *data)
 {
 	data->init = dcg2900_init;
 	data->exit = dcg2900_exit;
-
 	if (cpu_is_u5500()) {
 		data->enable_chip = dcg2900_u5500_enable_chip;
 		data->disable_chip = dcg2900_u5500_disable_chip;

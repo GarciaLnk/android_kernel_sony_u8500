@@ -18,13 +18,15 @@
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
+
+#include <plat/ste_dma40.h>
 
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
 #include "ux500_pcm.h"
-#include "ux500_msp_dai.h"
 
 static struct snd_pcm_hardware ux500_pcm_hw_playback = {
 	.info = SNDRV_PCM_INFO_INTERLEAVED |
@@ -34,7 +36,8 @@ static struct snd_pcm_hardware ux500_pcm_hw_playback = {
 	.formats = SNDRV_PCM_FMTBIT_S16_LE |
 		SNDRV_PCM_FMTBIT_U16_LE |
 		SNDRV_PCM_FMTBIT_S16_BE |
-		SNDRV_PCM_FMTBIT_U16_BE,
+		SNDRV_PCM_FMTBIT_U16_BE |
+		SNDRV_PCM_FMTBIT_S32_LE,
 	.rates = SNDRV_PCM_RATE_KNOT,
 	.rate_min = UX500_PLATFORM_MIN_RATE_PLAYBACK,
 	.rate_max = UX500_PLATFORM_MAX_RATE_PLAYBACK,
@@ -55,7 +58,8 @@ static struct snd_pcm_hardware ux500_pcm_hw_capture = {
 	.formats = SNDRV_PCM_FMTBIT_S16_LE |
 		SNDRV_PCM_FMTBIT_U16_LE |
 		SNDRV_PCM_FMTBIT_S16_BE |
-		SNDRV_PCM_FMTBIT_U16_BE,
+		SNDRV_PCM_FMTBIT_U16_BE |
+		SNDRV_PCM_FMTBIT_S32_LE,
 	.rates = SNDRV_PCM_RATE_KNOT,
 	.rate_min = UX500_PLATFORM_MIN_RATE_CAPTURE,
 	.rate_max = UX500_PLATFORM_MAX_RATE_CAPTURE,
@@ -76,8 +80,120 @@ static const char *stream_str(struct snd_pcm_substream *substream)
 		return "Capture";
 }
 
-static void ux500_pcm_dma_hw_free(struct device *dev,
-				struct snd_pcm_substream *substream)
+static void
+ux500_pcm_dma_eot_handler(void *data)
+{
+	struct snd_pcm_substream *substream = data;
+	struct snd_pcm_runtime *runtime;
+	struct ux500_pcm_private *private;
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *dai = rtd->cpu_dai;
+
+	pr_debug("%s: MSP %d (%s): Enter.\n", __func__,
+		dai->id,
+		stream_str(substream));
+
+	if (substream) {
+		runtime = substream->runtime;
+		private = substream->runtime->private_data;
+
+		/* calc the offset in the circular buffer */
+		private->offset += frames_to_bytes(runtime,
+				runtime->period_size);
+		private->offset %= frames_to_bytes(runtime,
+				runtime->period_size) * runtime->periods;
+
+		snd_pcm_period_elapsed(substream);
+	}
+}
+
+static int
+ux500_pcm_dma_start(
+	struct snd_pcm_substream *substream,
+	dma_addr_t dma_addr,
+	int period_cnt,
+	size_t period_len,
+	int dai_idx,
+	int stream_id)
+{
+	dma_cookie_t status_submit;
+	int direction;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *dai = rtd->cpu_dai;
+	struct ux500_pcm_private *private = runtime->private_data;
+	struct dma_async_tx_descriptor *cdesc;
+	struct ux500_pcm_dma_params *dma_params;
+
+	pr_debug("%s: Enter\n", __func__);
+
+	dma_params = snd_soc_dai_get_dma_data(dai, substream);
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		direction = DMA_TO_DEVICE;
+	else
+		direction = DMA_FROM_DEVICE;
+
+	cdesc = private->pipeid->device->device_prep_dma_cyclic(
+		private->pipeid,
+		dma_addr,
+		period_cnt * period_len,
+		period_len,
+		direction);
+
+	if (IS_ERR(cdesc)) {
+		pr_err("%s: ERROR: device_prep_dma_cyclic failed (%ld)!\n",
+			__func__,
+			PTR_ERR(cdesc));
+		return -EINVAL;
+	}
+
+	cdesc->callback = ux500_pcm_dma_eot_handler;
+	cdesc->callback_param = substream;
+
+	status_submit = dmaengine_submit(cdesc);
+
+	if (dma_submit_error(status_submit)) {
+		pr_err("%s: ERROR: dmaengine_submit failed!\n", __func__);
+		return -EINVAL;
+	}
+
+	dma_async_issue_pending(private->pipeid);
+
+	pr_debug("%s: Leave\n", __func__);
+
+	return 0;
+}
+
+static void
+ux500_pcm_dma_stop(struct work_struct *work)
+{
+	struct ux500_pcm_private *private = container_of(work,
+		struct ux500_pcm_private, ws_stop);
+
+	pr_debug("%s: Enter\n", __func__);
+
+	if (private != NULL) {
+		struct dma_chan *chan;
+
+		mutex_lock(&private->pipeLock);
+		chan = private->pipeid;
+		private->pipeid = NULL;
+		mutex_unlock(&private->pipeLock);
+
+		if (chan != NULL) {
+			dmaengine_terminate_all(chan);
+			dma_release_channel(chan);
+		}
+	}
+
+	pr_debug("%s: Leave\n", __func__);
+}
+
+static void
+ux500_pcm_dma_hw_free(
+	struct device *dev,
+	struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct snd_dma_buffer *buf = runtime->dma_buffer_p;
@@ -97,37 +213,6 @@ static void ux500_pcm_dma_hw_free(struct device *dev,
 	snd_pcm_set_runtime_buffer(substream, NULL);
 }
 
-void ux500_pcm_dma_eot_handler(void *data)
-{
-	struct snd_pcm_substream *substream = data;
-	struct snd_pcm_runtime *runtime;
-	struct ux500_pcm_private *private;
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *dai = rtd->cpu_dai;
-
-	pr_debug("%s: MSP %d (%s): Enter.\n", __func__, dai->id, stream_str(substream));
-
-	if (substream) {
-		runtime = substream->runtime;
-		private = substream->runtime->private_data;
-
-		if (ux500_msp_dai_i2s_get_underrun_status(private->msp_id)) {
-			private->no_of_underruns++;
-			pr_debug("%s: Nr of underruns (%d)\n", __func__,
-					private->no_of_underruns);
-		}
-
-		/* calc the offset in the circular buffer */
-		private->offset += frames_to_bytes(runtime,
-				runtime->period_size);
-		private->offset %= frames_to_bytes(runtime,
-				runtime->period_size) * runtime->periods;
-
-		snd_pcm_period_elapsed(substream);
-	}
-}
-EXPORT_SYMBOL(ux500_pcm_dma_eot_handler);
-
 static int ux500_pcm_open(struct snd_pcm_substream *substream)
 {
 	int stream_id = substream->pstr->stream;
@@ -137,7 +222,9 @@ static int ux500_pcm_open(struct snd_pcm_substream *substream)
 	struct snd_soc_dai *dai = rtd->cpu_dai;
 	int ret;
 
-	pr_debug("%s: MSP %d (%s): Enter.\n", __func__, dai->id, stream_str(substream));
+	pr_debug("%s: MSP %d (%s): Enter.\n", __func__,
+		dai->id,
+		stream_str(substream));
 
 	pr_debug("%s: Set runtime hwparams.\n", __func__);
 	if (stream_id == SNDRV_PCM_STREAM_PLAYBACK)
@@ -146,7 +233,10 @@ static int ux500_pcm_open(struct snd_pcm_substream *substream)
 		snd_soc_set_runtime_hwparams(substream, &ux500_pcm_hw_capture);
 
 	/* ensure that buffer size is a multiple of period size */
-	ret = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+	ret = snd_pcm_hw_constraint_integer(
+		runtime,
+		SNDRV_PCM_HW_PARAM_PERIODS);
+
 	if (ret < 0) {
 		pr_err("%s: Error: snd_pcm_hw_constraints failed (%d)\n",
 			__func__,
@@ -158,12 +248,21 @@ static int ux500_pcm_open(struct snd_pcm_substream *substream)
 	private = kzalloc(sizeof(struct ux500_pcm_private), GFP_KERNEL);
 	if (private == NULL)
 		return -ENOMEM;
+	mutex_init(&private->pipeLock);
 	private->msp_id = dai->id;
+	private->wq = alloc_ordered_workqueue("ux500/pcm", 0);
+	INIT_WORK(&private->ws_stop, ux500_pcm_dma_stop);
+
 	runtime->private_data = private;
 
-	pr_debug("%s: Set hw-struct for %s.\n", __func__, stream_str(substream));
+	pr_debug("%s: Set hw-struct for %s.\n",
+		__func__,
+		stream_str(substream));
+
 	runtime->hw = (stream_id == SNDRV_PCM_STREAM_PLAYBACK) ?
 		ux500_pcm_hw_playback : ux500_pcm_hw_capture;
+
+	pr_debug("%s: Leave\n", __func__);
 
 	return 0;
 }
@@ -174,7 +273,23 @@ static int ux500_pcm_close(struct snd_pcm_substream *substream)
 
 	pr_debug("%s: Enter\n", __func__);
 
-	kfree(private);
+	if (private != NULL) {
+		struct dma_chan *chan;
+
+		mutex_lock(&private->pipeLock);
+		chan = private->pipeid;
+		private->pipeid = NULL;
+		mutex_unlock(&private->pipeLock);
+
+		if (chan != NULL) {
+			dma_release_channel(chan);
+		}
+
+		destroy_workqueue(private->wq);
+		kfree(private);
+	}
+
+	pr_debug("%s: Leave\n", __func__);
 
 	return 0;
 }
@@ -230,7 +345,8 @@ static int ux500_pcm_hw_params(struct snd_pcm_substream *substream,
 	return -ENOMEM;
 }
 
-static int ux500_pcm_hw_free(struct snd_pcm_substream *substream)
+static int
+ux500_pcm_hw_free(struct snd_pcm_substream *substream)
 {
 	pr_debug("%s: Enter\n", __func__);
 
@@ -239,15 +355,89 @@ static int ux500_pcm_hw_free(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-static int ux500_pcm_prepare(struct snd_pcm_substream *substream)
+static int
+ux500_pcm_prepare(struct snd_pcm_substream *substream)
 {
+	struct stedma40_chan_cfg *dma_cfg;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *dai = rtd->cpu_dai;
+	struct ux500_pcm_private *private = runtime->private_data;
+	struct ux500_pcm_dma_params *dma_params;
+	dma_cap_mask_t mask;
+	u16 per_data_width, mem_data_width;
+
 	pr_debug("%s: Enter\n", __func__);
+
+	struct dma_chan *chan;
+
+	mutex_lock(&private->pipeLock);
+	chan = private->pipeid;
+	private->pipeid = NULL;
+	mutex_unlock(&private->pipeLock);
+
+	if (chan != NULL) {
+		flush_workqueue(private->wq);
+		dma_release_channel(chan);
+	}
+
+	dma_params = snd_soc_dai_get_dma_data(dai, substream);
+
+	switch (runtime->sample_bits) {
+	case 32:
+		mem_data_width = STEDMA40_WORD_WIDTH;
+		break;
+
+	case 16:
+	default:
+		mem_data_width = STEDMA40_HALFWORD_WIDTH;
+		break;
+	}
+
+	switch (dma_params->data_size) {
+	case 32:
+		per_data_width = STEDMA40_WORD_WIDTH;
+		break;
+	case 16:
+		per_data_width = STEDMA40_HALFWORD_WIDTH;
+		break;
+	case 8:
+		per_data_width = STEDMA40_BYTE_WIDTH;
+		break;
+	default:
+		per_data_width = STEDMA40_WORD_WIDTH;
+		pr_warn("%s: Unknown data-size (%d)! Assuming 32 bits.\n",
+			__func__, dma_params->data_size);
+	}
+
+	dma_cfg = dma_params->dma_cfg;
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		dma_cfg->src_info.data_width = mem_data_width;
+		dma_cfg->dst_info.data_width = per_data_width;
+	} else {
+		dma_cfg->src_info.data_width = per_data_width;
+		dma_cfg->dst_info.data_width = mem_data_width;
+	}
+
+	dma_cap_zero(mask);
+	dma_cap_set(DMA_SLAVE, mask);
+
+	chan  = dma_request_channel(mask, stedma40_filter, dma_cfg);
+
+	mutex_lock(&private->pipeLock);
+	private->pipeid = chan;
+	mutex_unlock(&private->pipeLock);
+
+	pr_debug("%s: Leave\n", __func__);
+
 	return 0;
 }
 
-static int ux500_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+static int
+ux500_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
-	int ret;
+	int ret = 0;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct ux500_pcm_private *private = runtime->private_data;
 	int stream_id = substream->pstr->stream;
@@ -263,27 +453,25 @@ static int ux500_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 				return 0;
 		}
 
-		private->no_of_underruns = 0;
 		private->offset = 0;
-		ret = ux500_msp_dai_i2s_configure_sg(runtime->dma_addr,
+		ret = ux500_pcm_dma_start(
+				substream,
+				runtime->dma_addr,
 				runtime->periods,
 				frames_to_bytes(runtime, runtime->period_size),
 				private->msp_id,
 				stream_id);
 		if (ret) {
-			pr_err("%s: Failed to configure sg-list!\n", __func__);
+			pr_err("%s: Failed to configure I2S!\n", __func__);
 			return -EINVAL;
 		}
 		break;
-
+	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		break;
-
 	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
 		pr_debug("%s: SNDRV_PCM_TRIGGER_STOP\n", __func__);
-		pr_debug("%s: no_of_underruns = %u\n",
-			__func__,
-			private->no_of_underruns);
+		queue_work(private->wq, &private->ws_stop);
 		break;
 
 	default:
@@ -292,10 +480,11 @@ static int ux500_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		return -EINVAL;
 	}
 
-	return 0;
+	return ret;
 }
 
-static snd_pcm_uframes_t ux500_pcm_pointer(struct snd_pcm_substream *substream)
+static snd_pcm_uframes_t
+ux500_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct ux500_pcm_private *private = runtime->private_data;
@@ -306,8 +495,10 @@ static snd_pcm_uframes_t ux500_pcm_pointer(struct snd_pcm_substream *substream)
 	return bytes_to_frames(substream->runtime, private->offset);
 }
 
-static int ux500_pcm_mmap(struct snd_pcm_substream *substream,
-			struct vm_area_struct *vma)
+static int
+ux500_pcm_mmap(
+	struct snd_pcm_substream *substream,
+	struct vm_area_struct *vma)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	pr_debug("%s: Enter.\n", __func__);

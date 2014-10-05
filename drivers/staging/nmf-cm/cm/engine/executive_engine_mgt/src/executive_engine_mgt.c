@@ -21,6 +21,8 @@
 #include <cm/engine/power_mgt/inc/power.h>
 #include <cm/engine/perfmeter/inc/mpcload.h>
 
+#include <cm/engine/trace/inc/xtitrace.h>
+
 #include <share/communication/inc/nmf_service.h>
 
 t_ee_state eeState[NB_CORE_IDS];
@@ -130,6 +132,16 @@ PUBLIC t_cm_error cm_EEM_Init(
         return error;
     }
 
+    if((error = cm_SRV_allocateTraceBufferMemory(coreId, cm_DSP_GetState(coreId)->domainEE)) != CM_OK)
+    {
+        cm_PFM_deallocatePerfmeterDataMemory(coreId);
+        cm_EEM_freePanicArea(coreId);
+        cm_delayedDestroyComponent(eeState[coreId].instance);
+        eeState[coreId].instance = (t_component_instance *)0;
+        cm_DSP_Shutdown(coreId);
+        return error;
+    }
+
     /* set initial stack value */
     cm_writeAttribute(eeState[coreId].instance, "rtos/scheduler/topOfStack", cm_DSP_getStackAddr(coreId));
 
@@ -179,6 +191,7 @@ PUBLIC void cm_EEM_Close(t_nmf_core_id coreId)
     cm_DSP_setStackSize(coreId, 0);
     cm_delayedDestroyComponent(eeState[coreId].instance);
     eeState[coreId].instance = (t_component_instance *)0;
+    cm_SRV_deallocateTraceBufferMemory(coreId);
     cm_PFM_deallocatePerfmeterDataMemory(coreId);
     cm_EEM_freePanicArea(coreId);
     cm_DSP_Shutdown(coreId);
@@ -326,7 +339,7 @@ t_cm_error cm_EEM_ForceWakeup(t_nmf_core_id coreId)
     {
         t_cm_error error;
 
-        LOG_INTERNAL(2, "ARM: Try to wake up\n", 0, 0, 0, 0, 0, 0);
+        LOG_INTERNAL(1, "ARM: Try to wake up on core id : %d\n", coreId, 0, 0, 0, 0, 0);
 
         if (cm_DSP_GetState(coreId)->state != MPC_STATE_BOOTED)
         {
@@ -346,6 +359,9 @@ t_cm_error cm_EEM_ForceWakeup(t_nmf_core_id coreId)
             return error;
         }
     }
+    else
+        LOG_INTERNAL(1, "ARM: Not Try to wake up on core id : %d (nbOfForceWakeup = %d)\n", coreId, eeState[coreId].nbOfForceWakeup, 0, 0, 0, 0);
+
     return CM_OK;
 }
 
@@ -353,7 +369,7 @@ void cm_EEM_AllowSleep(t_nmf_core_id coreId)
 {
     if(--eeState[coreId].nbOfForceWakeup == 0)
     {
-        LOG_INTERNAL(2, "ARM: Allow sleep\n", 0, 0, 0, 0, 0, 0);
+        LOG_INTERNAL(1, "ARM: Allow sleep on core id : %d\n", coreId, 0, 0, 0, 0, 0);
 
         if (cm_DSP_GetState(coreId)->state != MPC_STATE_BOOTED)
         {
@@ -363,6 +379,8 @@ void cm_EEM_AllowSleep(t_nmf_core_id coreId)
             ERROR("CM_MPC_NOT_RESPONDING: DSP %s can't be allow sleep'ed\n", cm_getDspName(coreId), 0, 0, 0, 0, 0);
         }
     }
+    else
+        LOG_INTERNAL(1, "ARM: Not Allow sleep on core id : %d (nbOfForceWakeup = %d)\n", coreId, eeState[coreId].nbOfForceWakeup, 0, 0, 0, 0);
 }
 
 /* internal api */

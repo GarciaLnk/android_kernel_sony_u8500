@@ -24,9 +24,30 @@
 /* Retrieve revision info */
 #define CG2900_CHAR_DEV_IOCTL_GET_REVISION	_IOR('U', 213, \
 						     struct cg2900_rev_data)
+/* Sysclk3 - Clock Enable used for GPS */
+#define CG2900_CHAR_DEV_IOCTL_EXT_CLK_ENABLE    _IOR('U', 214, int)
+/* Sysclk3 - Clock Disable used for GPS */
+#define CG2900_CHAR_DEV_IOCTL_EXT_CLK_DISABLE   _IOR('U', 215, int)
 
 #define CG2900_CHAR_DEV_IOCTL_EVENT_IDLE	0
 #define CG2900_CHAR_DEV_IOCTL_EVENT_RESET	1
+
+/* Specific chip version data */
+#define STLC2690_REV			0x0600
+#define CG2900_PG1_REV			0x0101
+#define CG2900_PG2_REV			0x0200
+#define CG2900_PG1_SPECIAL_REV	0x0700
+#define CG2905_PG1_05_REV		0x1805
+/*
+ * There is an issue in OTP setting of a single bit for distinction
+ * between CG2905 and CG2910. So Recommendation from the CG2900 Chip
+ * Architects is that CG2910 PG1_05 HCI version has to be
+ * considered as CG2905 PG1_05.
+ */
+#define CG2910_PG1_05_REV		0x1005
+#define CG2905_PG2_REV			0x1806
+#define CG2910_PG1_REV			0x1004
+#define CG2910_PG2_REV			0x1008
 
 /**
  * struct cg2900_rev_data - Contains revision data for the local controller.
@@ -39,8 +60,8 @@
  * the manufacturer.
  */
 struct cg2900_rev_data {
-	int revision;
-	int sub_version;
+	u16 revision;
+	u16 sub_version;
 };
 
 #ifdef __KERNEL__
@@ -115,6 +136,7 @@ struct cg2900_trans_callbacks {
 	int (*write)(struct cg2900_chip_dev *dev, struct sk_buff *skb);
 	void (*set_chip_power)(struct cg2900_chip_dev *dev, bool chip_on);
 	void (*chip_startup_finished)(struct cg2900_chip_dev *dev);
+	void (*set_baud_rate)(struct cg2900_chip_dev *dev, bool low_baud);
 };
 
 /**
@@ -270,11 +292,26 @@ static inline void cg2900_set_prv(struct cg2900_user_data *dev, void *data)
 		dev->private_data = data;
 }
 
+static inline bool check_chip_revision_support(u16 hci_revision)
+{
+	if (hci_revision != CG2900_PG1_SPECIAL_REV &&
+			hci_revision != CG2900_PG1_REV &&
+			hci_revision != CG2900_PG2_REV &&
+			hci_revision != CG2905_PG1_05_REV &&
+			hci_revision != CG2905_PG2_REV &&
+			hci_revision != CG2910_PG1_REV &&
+			hci_revision != CG2910_PG1_05_REV &&
+			hci_revision != CG2910_PG2_REV)
+		return false;
+
+	return true;
+}
+
 extern int cg2900_register_chip_driver(struct cg2900_id_callbacks *cb);
 extern void cg2900_deregister_chip_driver(struct cg2900_id_callbacks *cb);
 extern int cg2900_register_trans_driver(struct cg2900_chip_dev *dev);
 extern int cg2900_deregister_trans_driver(struct cg2900_chip_dev *dev);
-extern unsigned long cg2900_get_sleep_timeout(void);
+extern unsigned long cg2900_get_sleep_timeout(bool check_sleep);
 
 #endif /* __KERNEL__ */
 #endif /* _CG2900_H_ */

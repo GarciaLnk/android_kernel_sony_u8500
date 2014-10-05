@@ -6,7 +6,6 @@ mac80211-y := \
 	sta_info.o \
 	wep.o \
 	wpa.o \
-	wapi.o \
 	scan.o offchannel.o \
 	ht.o agg-tx.o agg-rx.o \
 	ibss.o \

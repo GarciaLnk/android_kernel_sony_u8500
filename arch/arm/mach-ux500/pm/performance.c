@@ -65,8 +65,8 @@ static void wlan_load(struct work_struct *work)
 
 	if ((num_irqs > old_num_irqs) &&
 	    (num_irqs - old_num_irqs) > WLAN_LIMIT) {
-		prcmu_qos_update_requirement(PRCMU_QOS_ARM_OPP,
-					     "wlan", 125);
+		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
+					     "wlan", 1000000);
 		if (!wlan_pm_qos_is_latency_0) {
 			/*
 			 * The wake up latency is set to 0 to prevent
@@ -82,8 +82,9 @@ static void wlan_load(struct work_struct *work)
 			wlan_pm_qos_is_latency_0 = true;
 		}
 	} else {
-		prcmu_qos_update_requirement(PRCMU_QOS_ARM_OPP,
-					     "wlan", 25);
+		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
+					     "wlan",
+					     PRCMU_QOS_DEFAULT_VALUE);
 		if (wlan_pm_qos_is_latency_0) {
 			pm_qos_remove_request(&wlan_pm_qos_latency);
 			wlan_pm_qos_is_latency_0 = false;
@@ -175,12 +176,14 @@ static void mmc_load(struct work_struct *work)
 	}
 
 	if (!old_mode && new_mode)
-		prcmu_qos_update_requirement(PRCMU_QOS_ARM_OPP,
-						"mmc", 125);
+		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
+					     "mmc",
+					     1000000);
 
 	if (old_mode && !new_mode)
-		prcmu_qos_update_requirement(PRCMU_QOS_ARM_OPP,
-						"mmc", 25);
+		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
+					     "mmc",
+					     PRCMU_QOS_DEFAULT_VALUE);
 
 	old_mode = new_mode;
 
@@ -195,30 +198,31 @@ static int __init performance_register(void)
 	int ret;
 
 #ifdef CONFIG_MMC_BLOCK
-	prcmu_qos_add_requirement(PRCMU_QOS_ARM_OPP, "mmc", 25);
+	ret = prcmu_qos_add_requirement(PRCMU_QOS_ARM_KHZ, "mmc",
+					PRCMU_QOS_DEFAULT_VALUE);
+	if (ret) {
+		pr_err("%s: Failed to add PRCMU req for mmc\n", __func__);
+		goto out;
+	}
 
 	INIT_DELAYED_WORK_DEFERRABLE(&work_mmc, mmc_load);
 
-	ret = schedule_delayed_work(&work_mmc,
+	schedule_delayed_work(&work_mmc,
 				 msecs_to_jiffies(PERF_MMC_PROBE_DELAY));
-	if (ret) {
-		pr_err("ux500: performance: Fail to schedudle mmc work\n");
-		goto out;
-	}
 #endif
 
-	prcmu_qos_add_requirement(PRCMU_QOS_ARM_OPP, "wlan", 25);
+	ret = prcmu_qos_add_requirement(PRCMU_QOS_ARM_KHZ, "wlan",
+					PRCMU_QOS_DEFAULT_VALUE);
+	if (ret) {
+		pr_err("%s: Failed to add PRCMU req for wlan\n", __func__);
+		goto out;
+	}
 
 	INIT_DELAYED_WORK_DEFERRABLE(&work_wlan_workaround,
 				     wlan_load);
 
-	ret = schedule_delayed_work_on(0,
-				       &work_wlan_workaround,
-				       msecs_to_jiffies(WLAN_PROBE_DELAY));
-	if (ret) {
-		pr_err("ux500: performance: Fail to schedudle wlan work\n");
-		goto out;
-	}
+	schedule_delayed_work_on(0, &work_wlan_workaround,
+			       msecs_to_jiffies(WLAN_PROBE_DELAY));
 out:
 	return ret;
 }

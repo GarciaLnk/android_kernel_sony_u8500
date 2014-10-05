@@ -2,7 +2,7 @@
  * Cypress TrueTouch(TM) Standard Product I2C touchscreen driver.
  * drivers/input/touchscreen/cyttsp_spi.c
  *
- * Copyright (C) 2009-2011 Cypress Semiconductor, Inc.
+ * Copyright (C) 2009, 2010 Cypress Semiconductor, Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,25 +25,28 @@
  * Contact Cypress Semiconductor at www.cypress.com
  *
  */
-
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/delay.h>
 #include <linux/cyttsp.h>
 #include "cyttsp_core.h"
-
-#define DBG(x)
+#include <linux/mutex.h>
+#include <linux/hrtimer.h>
 
 #define CY_SPI_WR_OP      0x00 /* r/~w */
 #define CY_SPI_RD_OP      0x01
 #define CY_SPI_CMD_BYTES  4
+#define CY_SPI_SYNC_BYTES 2
 #define CY_SPI_SYNC_BYTE  2
-#define CY_SPI_SYNC_ACK1  0x62
-#define CY_SPI_SYNC_ACK2  0x9D
-#define CY_SPI_DATA_SIZE  128
+#define CY_SPI_SYNC_ACK1  0x62 /* from protocol v.2 */
+#define CY_SPI_SYNC_ACK2  0x9D /* from protocol v.2 */
+#define CY_SPI_SYNC_NACK  0x69
+#define CY_SPI_MAX_PACKET 128
+#define CY_SPI_DATA_SIZE  (CY_SPI_MAX_PACKET - CY_SPI_CMD_BYTES)
 #define CY_SPI_DATA_BUF_SIZE (CY_SPI_CMD_BYTES + CY_SPI_DATA_SIZE)
 #define CY_SPI_BITS_PER_WORD 8
+#define SPI_TIMEOUT 100
 
 struct cyttsp_spi {
 	struct cyttsp_bus_ops ops;
@@ -51,105 +54,123 @@ struct cyttsp_spi {
 	void *ttsp_client;
 	u8 wr_buf[CY_SPI_DATA_BUF_SIZE];
 	u8 rd_buf[CY_SPI_DATA_BUF_SIZE];
+	struct hrtimer timer;
+	struct mutex lock;
+	atomic_t timeout;
 };
+
+static void dbg_dump(struct cyttsp_spi *ts_spi, u8 *buf, int size,
+		char const *info)
+{
+#ifdef DEBUG
+	static char b[CY_SPI_DATA_BUF_SIZE * 3 + 1];
+	unsigned i, k;
+
+	for (i = k = 0; i < size; i++)
+		k += snprintf(b + k, sizeof(b) - k, "%02x ", buf[i]);
+	dev_dbg(&ts_spi->spi_client->dev, "%s: %s\n", info, b);
+#endif
+}
 
 static int cyttsp_spi_xfer_(u8 op, struct cyttsp_spi *ts_spi,
 			    u8 reg, u8 *buf, int length)
 {
 	struct spi_message msg;
-	struct spi_transfer xfer[2];
+	struct spi_transfer xfer = { 0 };
 	u8 *wr_buf = ts_spi->wr_buf;
 	u8 *rd_buf = ts_spi->rd_buf;
 	int retval;
-	DBG(printk(KERN_INFO "%s: Enter\n", __func__);)
+	int i;
+	struct device *dev = &ts_spi->spi_client->dev;
+
+	dev_dbg(dev, "%s: Enter\n", __func__);
+
 	if (length > CY_SPI_DATA_SIZE) {
 		printk(KERN_ERR "%s: length %d is too big.\n",
 			__func__, length);
 		return -EINVAL;
 	}
-	DBG(printk(KERN_INFO "%s: OP=%s length=%d\n", __func__,
-		   op == CY_SPI_RD_OP ? "Read" : "Write", length);)
-
-	memset(wr_buf, 0, CY_SPI_DATA_BUF_SIZE);
-	memset(rd_buf, 0, CY_SPI_DATA_BUF_SIZE);
+	dev_dbg(dev, "%s: OP=%s length=%d\n", __func__,
+		   op == CY_SPI_RD_OP ? "Read" : "Write", length);
 
 	wr_buf[0] = 0x00; /* header byte 0 */
 	wr_buf[1] = 0xFF; /* header byte 1 */
 	wr_buf[2] = reg;  /* reg index */
 	wr_buf[3] = op;   /* r/~w */
-	if (op == CY_SPI_WR_OP)
-		memcpy(wr_buf + CY_SPI_CMD_BYTES, buf, length);
-	DBG(
-	if (op == CY_SPI_RD_OP)
-		memset(rd_buf, CY_SPI_SYNC_NACK, CY_SPI_DATA_BUF_SIZE);)
-	DBG(
-	for (i = 0; i < (length + CY_SPI_CMD_BYTES); i++) {
-		if ((op == CY_SPI_RD_OP) && (i < CY_SPI_CMD_BYTES))
-			printk(KERN_INFO "%s: read op. wr[%d]:0x%02x\n",
-				__func__, i, wr_buf[i]);
-		if (op == CY_SPI_WR_OP)
-			printk(KERN_INFO "%s: write op. wr[%d]:0x%02x\n",
-				__func__, i, wr_buf[i]);
-	})
-
-	memset((void *)xfer, 0, sizeof(xfer));
-	spi_message_init(&msg);
-	xfer[0].tx_buf = wr_buf;
-	xfer[0].rx_buf = rd_buf;
 	if (op == CY_SPI_WR_OP) {
-		xfer[0].len = length + CY_SPI_CMD_BYTES;
-		spi_message_add_tail(&xfer[0], &msg);
-	} else if (op == CY_SPI_RD_OP) {
-		xfer[0].len = CY_SPI_CMD_BYTES;
-		spi_message_add_tail(&xfer[0], &msg);
-
-		xfer[1].rx_buf = buf;
-		xfer[1].len = length;
-		spi_message_add_tail(&xfer[1], &msg);
+		memcpy(wr_buf + CY_SPI_CMD_BYTES, buf, length);
+		dbg_dump(ts_spi, wr_buf,
+				length + CY_SPI_CMD_BYTES, "will write");
 	}
+	xfer.tx_buf = wr_buf;
+	xfer.rx_buf = rd_buf;
+	xfer.len = length + CY_SPI_CMD_BYTES;
 
+	if ((op == CY_SPI_RD_OP) && (xfer.len < 32))
+		xfer.len += 1;
+
+	spi_message_init(&msg);
+	spi_message_add_tail(&xfer, &msg);
 	retval = spi_sync(ts_spi->spi_client, &msg);
 	if (retval < 0) {
-		printk(KERN_ERR "%s: spi sync error %d, len=%d, op=%d\n",
-			__func__, retval, xfer[1].len, op);
-		retval = 0;
+		dev_err(dev, "%s: spi_sync() error %d\n",
+			__func__, retval);
+		return retval;
 	}
+	if (op == CY_SPI_RD_OP) {
+		dbg_dump(ts_spi, rd_buf,
+				length + CY_SPI_CMD_BYTES, "received");
 
-	if ((rd_buf[CY_SPI_SYNC_BYTE] == CY_SPI_SYNC_ACK1) &&
-		(rd_buf[CY_SPI_SYNC_BYTE+1] == CY_SPI_SYNC_ACK2))
-		retval = 0;
-	else {
-		DBG(
-		for (i = 0; i < (CY_SPI_CMD_BYTES); i++)
-			printk(KERN_INFO "%s: test rd_buf[%d]:0x%02x\n",
-				__func__, i, rd_buf[i]);
-		for (i = 0; i < (length); i++)
-			printk(KERN_INFO "%s: test buf[%d]:0x%02x\n",
-				__func__, i, buf[i]);)
-		retval = 1;
+		for (i = 0; i < (CY_SPI_DATA_BUF_SIZE -
+			(length + CY_SPI_SYNC_BYTES - 1)); i++) {
+			if ((rd_buf[i] != CY_SPI_SYNC_ACK1) ||
+				(rd_buf[i + 1] != CY_SPI_SYNC_ACK2)) {
+				continue;
+			}
+			memcpy(buf, (rd_buf + i + CY_SPI_SYNC_BYTES), length);
+			return 0;
+		}
+		dev_dbg(dev, "%s: byte sync error\n", __func__);
+		retval = -EAGAIN;
+	} else {
+		if ((rd_buf[CY_SPI_SYNC_BYTE] == CY_SPI_SYNC_ACK1) &&
+			(rd_buf[CY_SPI_SYNC_BYTE+1] == CY_SPI_SYNC_ACK2))
+			retval = 0;
+		else
+			retval = -EAGAIN;
 	}
 	return retval;
+}
+
+static enum hrtimer_restart watchdog(struct hrtimer *timer)
+{
+	struct cyttsp_spi *ts = container_of(timer,
+						struct cyttsp_spi, timer);
+	struct device *dev = &ts->spi_client->dev;
+	atomic_set(&ts->timeout, 1);
+	dev_err(dev, "%s: cyttsp_spi: timeout\n", __func__);
+	return HRTIMER_NORESTART;
 }
 
 static int cyttsp_spi_xfer(u8 op, struct cyttsp_spi *ts,
 			    u8 reg, u8 *buf, int length)
 {
-	int tries;
-	int retval;
-	DBG(printk(KERN_INFO "%s: Enter\n", __func__);)
+	int rc;
+	struct device *dev = &ts->spi_client->dev;
 
-	if (op == CY_SPI_RD_OP) {
-		for (tries = CY_NUM_RETRY; tries; tries--) {
-			retval = cyttsp_spi_xfer_(op, ts, reg, buf, length);
-			if (retval == 0)
-				break;
-			else
-				msleep(10);
-		}
-	} else {
-		retval = cyttsp_spi_xfer_(op, ts, reg, buf, length);
-	}
-	return retval;
+	dev_dbg(dev, "%s: Enter\n", __func__);
+	mutex_lock(&ts->lock);
+	atomic_set(&ts->timeout, 0);
+	hrtimer_start(&ts->timer, ktime_set(0, SPI_TIMEOUT * 1000000L),
+			HRTIMER_MODE_REL);
+	do {
+		rc = cyttsp_spi_xfer_(op, ts, reg, buf, length);
+		if (!rc || rc != -EAGAIN)
+			break;
+	} while (!atomic_read(&ts->timeout));
+	hrtimer_cancel(&ts->timer);
+	mutex_unlock(&ts->lock);
+	return rc;
 }
 
 static s32 ttsp_spi_read_block_data(void *handle, u8 addr,
@@ -157,19 +178,12 @@ static s32 ttsp_spi_read_block_data(void *handle, u8 addr,
 {
 	int retval;
 	struct cyttsp_spi *ts = container_of(handle, struct cyttsp_spi, ops);
+	struct device *dev = &ts->spi_client->dev;
 
-	DBG(printk(KERN_INFO "%s: Enter\n", __func__);)
-
+	dev_dbg(dev, "%s: Enter\n", __func__);
 	retval = cyttsp_spi_xfer(CY_SPI_RD_OP, ts, addr, data, length);
 	if (retval < 0)
-		printk(KERN_ERR "%s: ttsp_spi_read_block_data failed\n",
-			__func__);
-
-	/* Do not print the above error if the data sync bytes were not found.
-	   This is a normal condition for the bootloader loader startup and need
-	   to retry until data sync bytes are found. */
-	if (retval > 0)
-		retval = -1;	/* now signal fail; so retry can be done */
+		dev_err(dev, "%s: ttsp_spi_read_block_data failed\n", __func__);
 
 	return retval;
 }
@@ -179,20 +193,13 @@ static s32 ttsp_spi_write_block_data(void *handle, u8 addr,
 {
 	int retval;
 	struct cyttsp_spi *ts = container_of(handle, struct cyttsp_spi, ops);
+	struct device *dev = &ts->spi_client->dev;
 
-	DBG(printk(KERN_INFO "%s: Enter\n", __func__);)
-
+	dev_dbg(dev, "%s: Enter\n", __func__);
 	retval = cyttsp_spi_xfer(CY_SPI_WR_OP, ts, addr, (void *)data, length);
 	if (retval < 0)
 		printk(KERN_ERR "%s: ttsp_spi_write_block_data failed\n",
 			__func__);
-
-	/* Do not print the above error if the data sync bytes were not found.
-	   This is a normal condition for the bootloader loader startup and need
-	   to retry until data sync bytes are found. */
-	if (retval > 0)
-		retval = -1;	/* now signal fail; so retry can be done */
-
 	return retval;
 }
 
@@ -200,8 +207,9 @@ static s32 ttsp_spi_tch_ext(void *handle, void *values)
 {
 	int retval = 0;
 	struct cyttsp_spi *ts = container_of(handle, struct cyttsp_spi, ops);
+	struct device *dev = &ts->spi_client->dev;
 
-	DBG(printk(KERN_INFO "%s: Enter\n", __func__);)
+	dev_dbg(dev, "%s: Enter\n", __func__);
 
 	/* Add custom touch extension handling code here */
 	/* set: retval < 0 for any returned system errors,
@@ -217,22 +225,27 @@ static int __devinit cyttsp_spi_probe(struct spi_device *spi)
 {
 	struct cyttsp_spi *ts_spi;
 	int retval;
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
+	struct device *dev = &spi->dev;
+
+	dev_info(dev, "probing ...\n");
 
 	/* Set up SPI*/
 	spi->bits_per_word = CY_SPI_BITS_PER_WORD;
 	spi->mode = SPI_MODE_0;
 	retval = spi_setup(spi);
 	if (retval < 0) {
-		printk(KERN_ERR "%s: SPI setup error %d\n", __func__, retval);
+		dev_err(dev, "%s: SPI setup error %d\n", __func__, retval);
 		return retval;
 	}
 	ts_spi = kzalloc(sizeof(*ts_spi), GFP_KERNEL);
 	if (ts_spi == NULL) {
-		printk(KERN_ERR "%s: Error, kzalloc\n", __func__);
+		dev_err(dev, "%s: Error, kzalloc\n", __func__);
 		retval = -ENOMEM;
 		goto error_alloc_data_failed;
 	}
+	mutex_init(&ts_spi->lock);
+	hrtimer_init(&ts_spi->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	ts_spi->timer.function = watchdog;
 	ts_spi->spi_client = spi;
 	dev_set_drvdata(&spi->dev, ts_spi);
 	ts_spi->ops.write = ttsp_spi_write_block_data;
@@ -244,7 +257,7 @@ static int __devinit cyttsp_spi_probe(struct spi_device *spi)
 		retval = -ENODEV;
 		goto ttsp_core_err;
 	}
-	printk(KERN_INFO "%s: Successful registration %s\n",
+	dev_info(dev, "%s: Successful registration %s\n",
 	       __func__, CY_SPI_NAME);
 
 	return 0;
@@ -259,7 +272,8 @@ error_alloc_data_failed:
 static int __devexit cyttsp_spi_remove(struct spi_device *spi)
 {
 	struct cyttsp_spi *ts_spi = dev_get_drvdata(&spi->dev);
-	DBG(printk(KERN_INFO"%s: Enter\n", __func__);)
+	struct device *dev = &spi->dev;
+	dev_dbg(dev, "%s: Enter\n", __func__);
 	cyttsp_core_release(ts_spi->ttsp_client);
 	kfree(ts_spi);
 	return 0;
@@ -276,12 +290,12 @@ static struct spi_driver cyttsp_spi_driver = {
 	.remove = __devexit_p(cyttsp_spi_remove),
 };
 
-static int __init cyttsp_spi_init(void)
+int __init cyttsp_spi_init(void)
 {
 	int err;
 
 	err = spi_register_driver(&cyttsp_spi_driver);
-	printk(KERN_INFO "%s: Cypress TrueTouch(R) Standard Product SPI "
+	pr_info("%s: Cypress TrueTouch(R) Standard Product SPI "
 		"Touchscreen Driver (Built %s @ %s) returned %d\n",
 		 __func__, __DATE__, __TIME__, err);
 
@@ -289,10 +303,10 @@ static int __init cyttsp_spi_init(void)
 }
 module_init(cyttsp_spi_init);
 
-static void __exit cyttsp_spi_exit(void)
+void __exit cyttsp_spi_exit(void)
 {
 	spi_unregister_driver(&cyttsp_spi_driver);
-	printk(KERN_INFO "%s: module exit\n", __func__);
+	pr_info("%s: module exit\n", __func__);
 }
 module_exit(cyttsp_spi_exit);
 

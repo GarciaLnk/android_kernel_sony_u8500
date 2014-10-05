@@ -64,7 +64,7 @@ static ssize_t write_voltage(struct device *dev, struct device_attribute *attr,
 	/* check input */
 	if (strict_strtol(buf, 0, &val) != 0) {
 		dev_err(dev, "Invalid voltage class configured.\n");
-		return count;
+		return -EINVAL;
 	}
 
 	switch (val) {
@@ -75,7 +75,7 @@ static ssize_t write_voltage(struct device *dev, struct device_attribute *attr,
 		break;
 	default:
 		dev_err(dev, "Invalid voltage class configured.\n");
-		return count;
+		return -EINVAL;
 	}
 
 	/* lock */
@@ -117,7 +117,7 @@ out_unlock:
 	return count;
 }
 
-static DEVICE_ATTR(voltage, 0666, show_voltage, write_voltage);
+static DEVICE_ATTR(voltage, S_IWUSR | S_IRUGO, show_voltage, write_voltage);
 
 static struct attribute *sim_attributes[] = {
 	&dev_attr_voltage.attr,
@@ -223,7 +223,9 @@ static int __devinit sim_detect_probe(struct platform_device *pdev)
 	/* request irq */
 	ret = request_threaded_irq(plat->irq_num,
 		       NULL, sim_activity_irq,
-		       IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
+		       IRQF_TRIGGER_FALLING |
+		       IRQF_TRIGGER_RISING |
+		       IRQF_NO_SUSPEND,
 		       "sim activity", sim_detect);
 	if (ret < 0)
 		goto out_put_modem;

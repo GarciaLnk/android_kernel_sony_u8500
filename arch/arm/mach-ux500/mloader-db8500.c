@@ -7,11 +7,13 @@
  * it under the terms of the GNU General Public License version 2, as
  * published by the Free Software Foundation.
  *
+ * Copyright 2012 Sony Ericsson Mobile Communications AB
  */
 #include <linux/types.h>
 #include <linux/platform_device.h>
 
 #include <mach/mloader-dbx500.h>
+#include <mach/hardware.h>
 
 static struct dbx500_ml_area modem_areas[] = {
 	{ .name = "modem_trace", .start = 0x6000000, .size = 0xf00000 },
@@ -21,7 +23,7 @@ static struct dbx500_ml_area modem_areas[] = {
 
 static struct dbx500_ml_fw modem_fws[] = {
 	{ .name = "MODEM", .area = &modem_areas[0], .offset = 0x0 },
-	{ .name = "IPL", .area = &modem_areas[1], .offset = 0x00 },
+	/* S1 boot handles MODEM and IPL in one elf file */
 };
 
 static struct dbx500_mloader_pdata mloader_fw_data = {
@@ -31,13 +33,22 @@ static struct dbx500_mloader_pdata mloader_fw_data = {
 	.nr_areas = ARRAY_SIZE(modem_areas),
 };
 
+static struct resource mloader_fw_rsrc[] = {
+	{
+		.start = (U8500_BACKUPRAM1_BASE + 0xF70),
+		.end   = (U8500_BACKUPRAM1_BASE + 0xF7C),
+		.flags = IORESOURCE_MEM
+	}
+};
+
 struct platform_device mloader_fw_device = {
 	.name = "dbx500_mloader_fw",
 	.id = -1,
 	.dev = {
 		.platform_data	= &mloader_fw_data,
 	},
-	.num_resources = 0,
+	.resource = mloader_fw_rsrc,
+	.num_resources = ARRAY_SIZE(mloader_fw_rsrc)
 };
 
 /* Default areas can be overloaded in cmdline */
@@ -79,4 +90,3 @@ static int __init early_modem_trace(char *p)
 	return 0;
 }
 early_param("mem_mtrace", early_modem_trace);
-

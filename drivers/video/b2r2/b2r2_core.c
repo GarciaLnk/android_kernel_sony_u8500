@@ -48,61 +48,17 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/kref.h>
+#include <linux/ktime.h>
 
+#include "b2r2_internal.h"
 #include "b2r2_core.h"
 #include "b2r2_global.h"
 #include "b2r2_structures.h"
-#include "b2r2_internal.h"
+#include "b2r2_control.h"
 #include "b2r2_profiler_api.h"
 #include "b2r2_timing.h"
 #include "b2r2_debug.h"
-
-/**
- * B2R2_DRIVER_TIMEOUT_VALUE - Busy loop timeout after soft reset
- */
-#define B2R2_DRIVER_TIMEOUT_VALUE (1500)
-
-/**
- * B2R2_CLK_FLAG - Value to write into clock reg to turn clock on
- */
-#define B2R2_CLK_FLAG (0x125)
-
-/**
- * DEBUG_CHECK_ADDREF_RELEASE - Define this to enable addref / release debug
- */
-#define DEBUG_CHECK_ADDREF_RELEASE 1
-
-#ifdef CONFIG_DEBUG_FS
-/**
- * HANDLE_TIMEOUTED_JOBS - Define this to check jobs for timeout and cancel them
- */
-#define HANDLE_TIMEOUTED_JOBS 1
-#endif
-
-/**
- * B2R2_CLOCK_ALWAYS_ON - Define this to disable power save clock turn off
- */
-/* #define B2R2_CLOCK_ALWAYS_ON 1 */
-
-/**
- * START_SENTINEL - Watch guard to detect job overwrites
- */
-#define START_SENTINEL 0xBABEDEEA
-
-/**
- * STOP_SENTINEL - Watch guard to detect job overwrites
- */
-#define END_SENTINEL 0xDADBDCDD
-
-/**
- * B2R2_CORE_LOWEST_PRIO - Lowest prio allowed
- */
-#define B2R2_CORE_LOWEST_PRIO -19
-/**
- * B2R2_CORE_HIGHEST_PRIO - Highest prio allowed
- */
-#define B2R2_CORE_HIGHEST_PRIO 20
-
 
 /**
  * B2R2 Hardware defines below
@@ -169,238 +125,91 @@
 #define	B2R2BLT_STA1AccessType		(INITIAL_TEST)
 #define	B2R2BLT_STA1			(0xa08)
 
-
-#ifdef DEBUG_CHECK_ADDREF_RELEASE
-
 /**
- * struct addref_release - Represents one addref or release. Used
- *                         to debug addref / release problems
- *
- * @addref: true if this represents an addref else it represents
- *          a release.
- * @job: The job that was referenced
- * @caller: The caller of the addref or release
- * @ref_count: The job reference count after addref / release
+ * b2r2_core - Quick link to administration data for B2R2
  */
-struct addref_release {
-	bool addref;
-	struct b2r2_core_job *job;
-	const char *caller;
-	int ref_count;
-};
-
-#endif
-
-/**
- * struct b2r2_core - Administration data for B2R2 core
- *
- * @lock: Spin lock protecting the b2r2_core structure and the B2R2 HW
- * @hw: B2R2 registers memory mapped
- * @pmu_b2r2_clock: Control of B2R2 clock
- * @log_dev: Device used for logging via dev_... functions
- *
- * @prio_queue: Queue of jobs sorted in priority order
- * @active_jobs: Array containing pointer to zero or one job per queue
- * @n_active_jobs: Number of active jobs
- * @jiffies_last_active: jiffie value when adding last active job
- * @jiffies_last_irq: jiffie value when last irq occured
- * @timeout_work: Work structure for timeout work
- *
- * @next_job_id: Contains the job id that will be assigned to the next
- *               added job.
- *
- * @clock_request_count: When non-zero, clock is on
- * @clock_off_timer: Kernel timer to handle delayed turn off of clock
- *
- * @work_queue: Work queue to handle done jobs (callbacks) and timeouts in
- *              non-interrupt context.
- *
- * @stat_n_irq: Number of interrupts (statistics)
- * @stat_n_jobs_added: Number of jobs added (statistics)
- * @stat_n_jobs_removed: Number of jobs removed (statistics)
- * @stat_n_jobs_in_prio_list: Number of jobs in prio list (statistics)
- *
- * @debugfs_root_dir: Root directory for B2R2 debugfs
- *
- * @ar: Circular array of addref / release debug structs
- * @ar_write: Where next write will occur
- * @ar_read: First valid place to read. When ar_read == ar_write then
- *           the array is empty.
- */
-struct b2r2_core {
-	spinlock_t       lock;
-
-	struct b2r2_memory_map *hw;
-
-	u8 op_size;
-	u8 ch_size;
-	u8 pg_size;
-	u8 mg_size;
-	u16 min_req_time;
-	int irq;
-
-	struct device *log_dev;
-
-	struct list_head prio_queue;
-
-	struct b2r2_core_job *active_jobs[B2R2_CORE_QUEUE_NO_OF];
-	unsigned long    n_active_jobs;
-
-	unsigned long    jiffies_last_active;
-	unsigned long    jiffies_last_irq;
-#ifdef HANDLE_TIMEOUTED_JOBS
-	struct delayed_work     timeout_work;
-#endif
-	int              next_job_id;
-
-	unsigned long    clock_request_count;
-	struct timer_list clock_off_timer;
-
-	struct workqueue_struct *work_queue;
-
-	/* Statistics */
-	unsigned long    stat_n_irq;
-	unsigned long    stat_n_jobs_added;
-	unsigned long    stat_n_jobs_removed;
-
-	unsigned long    stat_n_jobs_in_prio_list;
-
-#ifdef CONFIG_DEBUG_FS
-	struct dentry *debugfs_root_dir;
-	struct dentry *debugfs_regs_dir;
-#endif
-
-#ifdef DEBUG_CHECK_ADDREF_RELEASE
-	/* Tracking release bug...*/
-	struct addref_release ar[100];
-	int ar_write;
-	int ar_read;
-#endif
-
-	/* Power management variables */
-	struct mutex domain_lock;
-	struct delayed_work domain_disable_work;
-
-	/*
-	 * We need to keep track of both the number of domain_enable/disable()
-	 * calls and whether the power was actually turned off, since the
-	 * power off is done in a delayed job.
-	 */
-	bool domain_enabled;
-	int domain_request_count;
-
-	struct clk *b2r2_clock;
-	struct regulator *b2r2_reg;
-};
-
-/**
- * b2r2_core - Administration data for B2R2 core (singleton)
- */
-static struct b2r2_core   b2r2_core;
+static struct b2r2_core   *b2r2_core[B2R2_MAX_NBR_DEVICES];
 
 /* Local functions */
-static void check_prio_list(bool atomic);
-static void  clear_interrupts(void);
-static void trigger_job(struct b2r2_core_job *job);
-static void exit_job_list(struct list_head *job_list);
-static int get_next_job_id(void);
+static void check_prio_list(struct b2r2_core *core, bool atomic);
+static void  clear_interrupts(struct b2r2_core *core);
+static void trigger_job(struct b2r2_core *core, struct b2r2_core_job *job);
+static void exit_job_list(struct b2r2_core *core,
+		struct list_head *job_list);
 static void job_work_function(struct work_struct *ptr);
 static void init_job(struct b2r2_core_job *job);
-static void insert_into_prio_list(struct b2r2_core_job *job);
-static struct b2r2_core_job *find_job_in_list(
-	int job_id,
-	struct list_head *list);
-static struct b2r2_core_job *find_job_in_active_jobs(int job_id);
-static struct b2r2_core_job *find_tag_in_list(
-	int tag,
-	struct list_head *list);
-static struct b2r2_core_job *find_tag_in_active_jobs(int tag);
+static void insert_into_prio_list(struct b2r2_core *core,
+		struct b2r2_core_job *job);
+static struct b2r2_core_job *find_job_in_list(int job_id,
+		struct list_head *list);
+static struct b2r2_core_job *find_job_in_active_jobs(struct b2r2_core *core,
+		int job_id);
+static struct b2r2_core_job *find_tag_in_list(struct b2r2_core *core,
+		int tag, struct list_head *list);
+static struct b2r2_core_job *find_tag_in_active_jobs(struct b2r2_core *core,
+		int tag);
 
-static int domain_enable(void);
-static void domain_disable(void);
+static int domain_enable(struct b2r2_core *core);
+static void domain_disable(struct b2r2_core *core);
 
 static void stop_queue(enum b2r2_core_queue queue);
 
 #ifdef HANDLE_TIMEOUTED_JOBS
-static void printk_regs(void);
-static int hw_reset(void);
+static void printk_regs(struct b2r2_core *core);
+static int hw_reset(struct b2r2_core *core);
 static void timeout_work_function(struct work_struct *ptr);
 #endif
 
 static void reset_hw_timer(struct b2r2_core_job *job);
 static void start_hw_timer(struct b2r2_core_job *job);
-static void stop_hw_timer(struct b2r2_core_job *job);
+static void stop_hw_timer(struct b2r2_core *core,
+		struct b2r2_core_job *job);
 
-static int init_hw(void);
-static void exit_hw(void);
+static int init_hw(struct b2r2_core *core);
+static void exit_hw(struct b2r2_core *core);
 
 /* Tracking release bug... */
 #ifdef DEBUG_CHECK_ADDREF_RELEASE
 /**
  * ar_add() - Adds an addref or a release to the array
  *
+ * @core: The b2r2 core entity
  * @job: The job that has been referenced
  * @caller: The caller of addref / release
  * @addref: true if it is an addref else false for release
  */
-void ar_add(struct b2r2_core_job *job, const char *caller, bool addref)
+static void ar_add(struct b2r2_core *core, struct b2r2_core_job *job,
+		const char *caller, bool addref)
 {
-	b2r2_core.ar[b2r2_core.ar_write].addref = addref;
-	b2r2_core.ar[b2r2_core.ar_write].job = job;
-	b2r2_core.ar[b2r2_core.ar_write].caller = caller;
-	b2r2_core.ar[b2r2_core.ar_write].ref_count = job->ref_count;
-	b2r2_core.ar_write = (b2r2_core.ar_write + 1) %
-		ARRAY_SIZE(b2r2_core.ar);
-	if (b2r2_core.ar_write == b2r2_core.ar_read)
-		b2r2_core.ar_read = (b2r2_core.ar_read + 1) %
-			ARRAY_SIZE(b2r2_core.ar);
-}
-
-/**
- * sprintf_ar() - Writes all addref / release to a string buffer
- *
- * @buf: Receiving character bufefr
- * @job: Which job to write or NULL for all
- *
- * NOTE! No buffer size check!!
- */
-char *sprintf_ar(char *buf, struct b2r2_core_job *job)
-{
-	int i;
-	int size = 0;
-
-	for (i = b2r2_core.ar_read;
-	     i != b2r2_core.ar_write;
-	     i = (i + 1) % ARRAY_SIZE(b2r2_core.ar)) {
-		struct addref_release *ar = &b2r2_core.ar[i];
-		if (!job || job == ar->job)
-			size += sprintf(buf + size,
-					"%s on %p from %s, ref = %d\n",
-					ar->addref ? "addref" : "release",
-					ar->job, ar->caller, ar->ref_count);
-	}
-
-	return buf;
+	core->ar[core->ar_write].addref = addref;
+	core->ar[core->ar_write].job = job;
+	core->ar[core->ar_write].caller = caller;
+	core->ar[core->ar_write].ref_count = job->ref_count;
+	core->ar_write = (core->ar_write + 1) %
+		ARRAY_SIZE(core->ar);
+	if (core->ar_write == core->ar_read)
+		core->ar_read = (core->ar_read + 1) %
+			ARRAY_SIZE(core->ar);
 }
 
 /**
  * printk_ar() - Writes all addref / release using dev_info
  *
+ * @core: The b2r2 core entity
  * @job: Which job to write or NULL for all
  */
-void printk_ar(struct b2r2_core_job *job)
+static void printk_ar(struct b2r2_core *core, struct b2r2_core_job *job)
 {
 	int i;
 
-	for (i = b2r2_core.ar_read;
-	     i != b2r2_core.ar_write;
-	     i = (i + 1) % ARRAY_SIZE(b2r2_core.ar)) {
-		struct addref_release *ar = &b2r2_core.ar[i];
+	for (i = core->ar_read; i != core->ar_write;
+			i = (i + 1) % ARRAY_SIZE(core->ar)) {
+		struct addref_release *ar = &core->ar[i];
 		if (!job || job == ar->job)
-			b2r2_log_info("%s on %p from %s,"
-				 " ref = %d\n",
-				 ar->addref ? "addref" : "release",
-				 ar->job, ar->caller, ar->ref_count);
+			b2r2_log_info(core->dev, "%s on %p from %s,"
+				" ref = %d\n",
+				ar->addref ? "addref" : "release",
+				ar->job, ar->caller, ar->ref_count);
 	}
 }
 #endif
@@ -408,32 +217,36 @@ void printk_ar(struct b2r2_core_job *job)
 /**
  * internal_job_addref() - Increments the reference count for a job
  *
+ * @core: The b2r2 core entity
  * @job: Which job to increment reference count for
  * @caller: Name of function calling addref (for debug)
  *
- * Note that b2r2_core.lock _must_ be held
+ * Note that core->lock _must_ be held
  */
-static void internal_job_addref(struct b2r2_core_job *job, const char *caller)
+static void internal_job_addref(struct b2r2_core *core,
+		struct b2r2_core_job *job, const char *caller)
 {
 	u32 ref_count;
 
-	b2r2_log_info("%s (%p) (from %s)\n",
-		__func__, job, caller);
-
 	/* Sanity checks */
+	BUG_ON(core == NULL);
 	BUG_ON(job == NULL);
 
+	b2r2_log_info(core->dev, "%s (core: %p, job: %p) (from %s)\n",
+		__func__, core, job, caller);
+
+
 	if (job->start_sentinel != START_SENTINEL ||
-	    job->end_sentinel != END_SENTINEL ||
-	    job->ref_count == 0 || job->ref_count > 10)	{
-		b2r2_log_info(
-			 "%s: (%p) start=%X end=%X ref_count=%d\n",
-			 __func__, job, job->start_sentinel,
-			 job->end_sentinel, job->ref_count);
+			job->end_sentinel != END_SENTINEL ||
+			job->ref_count == 0 || job->ref_count > 10)	{
+		b2r2_log_info(core->dev, "%s: (core: %p, job: %p) "
+			"start=%X end=%X ref_count=%d\n",
+			__func__, core, job, job->start_sentinel,
+			job->end_sentinel, job->ref_count);
 
 	/* Something is wrong, print the addref / release array */
 #ifdef DEBUG_CHECK_ADDREF_RELEASE
-		printk_ar(NULL);
+		printk_ar(core, NULL);
 #endif
 	}
 
@@ -446,61 +259,61 @@ static void internal_job_addref(struct b2r2_core_job *job, const char *caller)
 
 #ifdef DEBUG_CHECK_ADDREF_RELEASE
 	/* Keep track of addref / release */
-	ar_add(job, caller, true);
+	ar_add(core, job, caller, true);
 #endif
 
-	b2r2_log_info("%s called from %s (%p): Ref Count is %d\n",
-		__func__, caller, job, job->ref_count);
+	b2r2_log_info(core->dev, "%s called from %s (core: %p, job: %p): Ref "
+		"Count is %d\n", __func__, caller, core, job, job->ref_count);
 }
 
 /**
  * internal_job_release() - Decrements the reference count for a job
  *
+ * @core: The b2r2 core entity
  * @job: Which job to decrement reference count for
  * @caller: Name of function calling release (for debug)
  *
  * Returns true if job_release should be called by caller
  * (reference count reached zero).
  *
- * Note that b2r2_core.lock _must_ be held
+ * Note that core->lock _must_ be held
  */
-bool internal_job_release(struct b2r2_core_job *job, const char *caller)
+static bool internal_job_release(struct b2r2_core *core,
+		struct b2r2_core_job *job, const char *caller)
 {
 	u32 ref_count;
 	bool call_release = false;
 
-	b2r2_log_info("%s (%p) (from %s)\n",
-		__func__, job, caller);
-
 	/* Sanity checks */
 	BUG_ON(job == NULL);
 
+	b2r2_log_info(core->dev, "%s (core: %p, job: %p) (from %s)\n",
+		__func__, core, job, caller);
+
 	if (job->start_sentinel != START_SENTINEL ||
-	    job->end_sentinel != END_SENTINEL ||
-	    job->ref_count == 0 || job->ref_count > 10) {
-		b2r2_log_info(
-			 "%s: (%p) start=%X end=%X ref_count=%d\n",
-			 __func__, job, job->start_sentinel,
-			 job->end_sentinel, job->ref_count);
+			job->end_sentinel != END_SENTINEL ||
+			job->ref_count == 0 || job->ref_count > 10) {
+		b2r2_log_info(core->dev, "%s: (core: %p, job: %p) start=%X "
+			"end=%X ref_count=%d\n", __func__, core, job,
+			job->start_sentinel, job->end_sentinel,
+			job->ref_count);
 
 #ifdef DEBUG_CHECK_ADDREF_RELEASE
-		printk_ar(NULL);
+		printk_ar(core, NULL);
 #endif
 	}
 
-
 	BUG_ON(job->start_sentinel != START_SENTINEL);
 	BUG_ON(job->end_sentinel != END_SENTINEL);
-
 	BUG_ON(job->ref_count == 0 || job->ref_count > 10);
 
 	/* Do the actual decrement */
 	ref_count = --job->ref_count;
 #ifdef DEBUG_CHECK_ADDREF_RELEASE
-	ar_add(job, caller, false);
+	ar_add(core, job, caller, false);
 #endif
-	b2r2_log_info("%s called from %s (%p) Ref Count is %d\n",
-		__func__, caller, job, ref_count);
+	b2r2_log_info(core->dev, "%s called from %s (core: %p, job: %p) "
+		"Ref Count is %d\n", __func__, caller, core, job, ref_count);
 
 	if (!ref_count && job->release) {
 		call_release = true;
@@ -515,40 +328,65 @@ bool internal_job_release(struct b2r2_core_job *job, const char *caller)
 
 /* Exported functions */
 
-/* b2r2_core.lock _must_ _NOT_ be held when calling this function */
+/**
+ * core->lock _must_ _NOT_ be held when calling this function
+ */
 void b2r2_core_job_addref(struct b2r2_core_job *job, const char *caller)
 {
 	unsigned long flags;
-	spin_lock_irqsave(&b2r2_core.lock, flags);
-	internal_job_addref(job, caller);
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	struct b2r2_core *core;
+
+	BUG_ON(job == NULL || job->data == 0);
+	core = (struct b2r2_core *) job->data;
+
+	spin_lock_irqsave(&core->lock, flags);
+	internal_job_addref(core, job, caller);
+	spin_unlock_irqrestore(&core->lock, flags);
 }
 
-/* b2r2_core.lock _must_ _NOT_ be held when calling this function */
+/**
+ * core->lock _must_ _NOT_ be held when calling this function
+ */
 void b2r2_core_job_release(struct b2r2_core_job *job, const char *caller)
 {
 	unsigned long flags;
 	bool call_release = false;
-	spin_lock_irqsave(&b2r2_core.lock, flags);
-	call_release = internal_job_release(job, caller);
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	struct b2r2_core *core;
+
+	BUG_ON(job == NULL || job->data == 0);
+	core = (struct b2r2_core *) job->data;
+
+	spin_lock_irqsave(&core->lock, flags);
+	call_release = internal_job_release(core, job, caller);
+	spin_unlock_irqrestore(&core->lock, flags);
 
 	if (call_release)
 		job->release(job);
 }
 
-/* b2r2_core.lock _must_ _NOT_ be held when calling this function */
-int b2r2_core_job_add(struct b2r2_core_job *job)
+/**
+ * core->lock _must_ _NOT_ be held when calling this function
+ */
+int b2r2_core_job_add(struct b2r2_control *control,
+		struct b2r2_core_job *job)
 {
 	unsigned long flags;
+	struct b2r2_core *core = control->data;
 
-	b2r2_log_info("%s (%p)\n", __func__, job);
+	b2r2_log_info(core->dev, "%s (core: %p, job: %p)\n",
+		__func__, core, job);
 
 	/* Enable B2R2 */
-	domain_enable();
+	domain_enable(core);
 
-	spin_lock_irqsave(&b2r2_core.lock, flags);
-	b2r2_core.stat_n_jobs_added++;
+	spin_lock_irqsave(&core->lock, flags);
+	/* Check that we have not been powered down */
+	if (!core->domain_enabled) {
+		spin_unlock_irqrestore(&core->lock, flags);
+		return -ENOSYS;
+	}
+
+	core->stat_n_jobs_added++;
 
 	/* Initialise internal job data */
 	init_job(job);
@@ -557,51 +395,61 @@ int b2r2_core_job_add(struct b2r2_core_job *job)
 	job->ref_count = 1;
 
 	/* Insert job into prio list */
-	insert_into_prio_list(job);
+	insert_into_prio_list(core, job);
 
 	/* Check if we can dispatch job */
-	check_prio_list(false);
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	check_prio_list(core, false);
+	spin_unlock_irqrestore(&core->lock, flags);
 
-	return 0;
+	return job->job_id;
 }
 
-/* b2r2_core.lock _must_ _NOT_ be held when calling this function */
-struct b2r2_core_job *b2r2_core_job_find(int job_id)
+/**
+ * core->lock _must_ _NOT_ be held when calling this function
+ */
+struct b2r2_core_job *b2r2_core_job_find(struct b2r2_control *control,
+		int job_id)
 {
 	unsigned long flags;
 	struct b2r2_core_job *job;
+	struct b2r2_core *core = control->data;
 
-	b2r2_log_info("%s (%d)\n", __func__, job_id);
+	b2r2_log_info(core->dev, "%s (core: %p, job_id: %d)\n",
+		__func__, core, job_id);
 
-	spin_lock_irqsave(&b2r2_core.lock, flags);
+	spin_lock_irqsave(&core->lock, flags);
 	/* Look through prio queue */
-	job = find_job_in_list(job_id, &b2r2_core.prio_queue);
+	job = find_job_in_list(job_id, &core->prio_queue);
 
 	if (!job)
-		job = find_job_in_active_jobs(job_id);
+		job = find_job_in_active_jobs(core, job_id);
 
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	spin_unlock_irqrestore(&core->lock, flags);
 
 	return job;
 }
 
-/* b2r2_core.lock _must_ _NOT_ be held when calling this function */
-struct b2r2_core_job *b2r2_core_job_find_first_with_tag(int tag)
+/**
+ * core->lock _must_ _NOT_ be held when calling this function
+ */
+struct b2r2_core_job *b2r2_core_job_find_first_with_tag(
+		struct b2r2_control *control, int tag)
 {
 	unsigned long flags;
 	struct b2r2_core_job *job;
+	struct b2r2_core *core = control->data;
 
-	b2r2_log_info("%s (%d)\n", __func__, tag);
+	b2r2_log_info(core->dev,
+		"%s (core: %p, tag: %d)\n", __func__, core, tag);
 
-	spin_lock_irqsave(&b2r2_core.lock, flags);
+	spin_lock_irqsave(&core->lock, flags);
 	/* Look through prio queue */
-	job = find_tag_in_list(tag, &b2r2_core.prio_queue);
+	job = find_tag_in_list(core, tag, &core->prio_queue);
 
 	if (!job)
-		job = find_tag_in_active_jobs(tag);
+		job = find_tag_in_active_jobs(core, tag);
 
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	spin_unlock_irqrestore(&core->lock, flags);
 
 	return job;
 }
@@ -613,32 +461,43 @@ struct b2r2_core_job *b2r2_core_job_find_first_with_tag(int tag)
  *
  * Returns true if job is done or cancelled
  *
- * b2r2_core.lock must _NOT_ be held when calling this function
+ * core->lock must _NOT_ be held when calling this function
  */
 static bool is_job_done(struct b2r2_core_job *job)
 {
 	unsigned long flags;
 	bool job_is_done;
+	struct b2r2_core *core = (struct b2r2_core *) job->data;
 
-	spin_lock_irqsave(&b2r2_core.lock, flags);
+	spin_lock_irqsave(&core->lock, flags);
 	job_is_done =
 		job->job_state != B2R2_CORE_JOB_QUEUED &&
 		job->job_state != B2R2_CORE_JOB_RUNNING;
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	spin_unlock_irqrestore(&core->lock, flags);
 
 	return job_is_done;
 }
 
-/* b2r2_core.lock _must_ _NOT_ be held when calling this function */
+/**
+ * b2r2_core_job_wait()
+ *
+ * @job:
+ *
+ * core->lock _must_ _NOT_ be held when calling this function
+ */
 int b2r2_core_job_wait(struct b2r2_core_job *job)
 {
 	int ret = 0;
+#ifdef CONFIG_B2R2_DEBUG
+	struct b2r2_core *core = (struct b2r2_core *) job->data;
+#endif
 
-	b2r2_log_info("%s (%p)\n", __func__, job);
+	b2r2_log_info(core->dev, "%s (core: %p, job: %p)\n",
+		__func__, core, job);
 	/* Check that we have the job */
 	if (job->job_state == B2R2_CORE_JOB_IDLE) {
 		/* Never or not queued */
-		b2r2_log_info("%s: Job not queued\n", __func__);
+		b2r2_log_info(core->dev, "%s: Job not queued\n", __func__);
 		return -ENOENT;
 	}
 
@@ -648,9 +507,9 @@ int b2r2_core_job_wait(struct b2r2_core_job *job)
 		is_job_done(job));
 
 	if (ret)
-		b2r2_log_warn(
-			 "%s: wait_event_interruptible returns %d, state is %d",
-			 __func__, ret, job->job_state);
+		b2r2_log_warn(core->dev,
+			"%s: wait_event_interruptible returns %d state is %d",
+			__func__, ret, job->job_state);
 	return ret;
 }
 
@@ -662,9 +521,9 @@ int b2r2_core_job_wait(struct b2r2_core_job *job)
  *
  * Returns true if the job was found and cancelled
  *
- * b2r2_core.lock must be held when calling this function
+ * core->lock must be held when calling this function
  */
-static bool cancel_job(struct b2r2_core_job *job)
+static bool cancel_job(struct b2r2_core *core, struct b2r2_core_job *job)
 {
 	bool found_job = false;
 	bool job_was_active = false;
@@ -676,152 +535,175 @@ static bool cancel_job(struct b2r2_core_job *job)
 	}
 
 	/* Remove from active jobs */
-	if (!found_job) {
-		if (b2r2_core.n_active_jobs > 0) {
-			int i;
+	if (!found_job && core->n_active_jobs > 0) {
+		int i;
 
-			/* Look for timeout:ed jobs and put them in tmp list */
-			for (i = 0;
-			     i < ARRAY_SIZE(b2r2_core.active_jobs);
-			     i++) {
-				if (b2r2_core.active_jobs[i] == job) {
-					stop_queue((enum b2r2_core_queue)i);
-					stop_hw_timer(job);
-					b2r2_core.active_jobs[i] = NULL;
-					b2r2_core.n_active_jobs--;
-					found_job = true;
-					job_was_active = true;
-				}
+		/* Look for timeout:ed jobs and put them in tmp list */
+		for (i = 0; i < ARRAY_SIZE(core->active_jobs); i++) {
+			if (core->active_jobs[i] == job) {
+				stop_queue((enum b2r2_core_queue)i);
+				stop_hw_timer(core, job);
+				core->active_jobs[i] = NULL;
+				core->n_active_jobs--;
+				found_job = true;
+				job_was_active = true;
 			}
 		}
 	}
-
 
 	/* Handle done list & callback */
 	if (found_job) {
 		/* Job is canceled */
 		job->job_state = B2R2_CORE_JOB_CANCELED;
 
-		queue_work(b2r2_core.work_queue, &job->work);
+		queue_work(core->work_queue, &job->work);
 
 		/* Statistics */
 		if (!job_was_active)
-			b2r2_core.stat_n_jobs_in_prio_list--;
+			core->stat_n_jobs_in_prio_list--;
 
 	}
 
 	return found_job;
 }
 
-/* b2r2_core.lock _must_ _NOT_ be held when calling this function */
+/* core->lock _must_ _NOT_ be held when calling this function */
 int b2r2_core_job_cancel(struct b2r2_core_job *job)
 {
 	unsigned long flags;
 	int ret = 0;
+	struct b2r2_core *core = (struct b2r2_core *) job->data;
 
-	b2r2_log_info("%s (%p) (%d)\n", __func__,
-		job, job->job_state);
+	b2r2_log_info(core->dev, "%s (core: %p, job: %p) (st: %d)\n",
+		__func__, core, job, job->job_state);
 	/* Check that we have the job */
 	if (job->job_state == B2R2_CORE_JOB_IDLE) {
 		/* Never or not queued */
-		b2r2_log_info("%s: Job not queued\n", __func__);
+		b2r2_log_info(core->dev, "%s: Job not queued\n", __func__);
 		return -ENOENT;
 	}
 
 	/* Remove from prio list */
-	spin_lock_irqsave(&b2r2_core.lock, flags);
-	cancel_job(job);
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	spin_lock_irqsave(&core->lock, flags);
+	cancel_job(core, job);
+	spin_unlock_irqrestore(&core->lock, flags);
 
 	return ret;
 }
 
 /* LOCAL FUNCTIONS BELOW */
 
-#define B2R2_DOMAIN_DISABLE_TIMEOUT (HZ/100)
-
+/**
+ * domain_disable_work_function()
+ *
+ * @core: The b2r2 core entity
+ */
 static void domain_disable_work_function(struct work_struct *work)
 {
-	if (!mutex_trylock(&b2r2_core.domain_lock))
+	struct delayed_work *twork = to_delayed_work(work);
+	struct b2r2_core *core = container_of(
+			twork, struct b2r2_core, domain_disable_work);
+
+	if (!mutex_trylock(&core->domain_lock))
 		return;
 
-	if (b2r2_core.domain_request_count == 0) {
-		exit_hw();
-		clk_disable(b2r2_core.b2r2_clock);
-		regulator_disable(b2r2_core.b2r2_reg);
-		b2r2_core.domain_enabled = false;
+	if (core->domain_request_count == 0) {
+		core->valid = false;
+		exit_hw(core);
+		clk_disable(core->b2r2_clock);
+		regulator_disable(core->b2r2_reg);
+		core->domain_enabled = false;
 	}
 
-	mutex_unlock(&b2r2_core.domain_lock);
+	mutex_unlock(&core->domain_lock);
 }
 
-#define B2R2_REGULATOR_RETRY_COUNT 10
-
-static int domain_enable(void)
+/**
+ * domain_enable()
+ *
+ * @core: The b2r2 core entity
+ */
+static int domain_enable(struct b2r2_core *core)
 {
-	mutex_lock(&b2r2_core.domain_lock);
-	b2r2_core.domain_request_count++;
+	mutex_lock(&core->domain_lock);
+	if (core->lockdown) {
+		mutex_unlock(&core->domain_lock);
+		return -ENOSYS;
+	}
+	core->domain_request_count++;
 
-	if (!b2r2_core.domain_enabled) {
+	if (!core->domain_enabled) {
 		int retry = 0;
 		int ret;
-
 again:
 		/*
 		 * Since regulator_enable() may sleep we have to handle
 		 * interrupts.
 		 */
-		ret = regulator_enable(b2r2_core.b2r2_reg);
+		ret = regulator_enable(core->b2r2_reg);
 		if ((ret == -EAGAIN) &&
 				((retry++) < B2R2_REGULATOR_RETRY_COUNT))
 			goto again;
 		else if (ret < 0)
 			goto regulator_enable_failed;
 
-		clk_enable(b2r2_core.b2r2_clock);
-		if (init_hw() < 0)
+		ret = clk_enable(core->b2r2_clock);
+		if (ret < 0) {
+			b2r2_log_err(core->dev,
+				"%s: Could not enable clock\n", __func__);
+			goto enable_clk_failed;
+		}
+		if (init_hw(core) < 0)
 			goto init_hw_failed;
-		b2r2_core.domain_enabled = true;
+		core->domain_enabled = true;
+		core->valid = true;
 	}
 
-	mutex_unlock(&b2r2_core.domain_lock);
+	mutex_unlock(&core->domain_lock);
 
 	return 0;
 
 init_hw_failed:
-	b2r2_log_err("%s: Could not initialize hardware!\n", __func__);
+	b2r2_log_err(core->dev,
+		"%s: Could not initialize hardware!\n", __func__);
+	clk_disable(core->b2r2_clock);
 
-	clk_disable(b2r2_core.b2r2_clock);
-
-	if (regulator_disable(b2r2_core.b2r2_reg) < 0)
-		b2r2_log_err("%s: regulator_disable failed!\n", __func__);
+enable_clk_failed:
+	if (regulator_disable(core->b2r2_reg) < 0)
+		b2r2_log_err(core->dev, "%s: regulator_disable failed!\n",
+				__func__);
 
 regulator_enable_failed:
-	b2r2_core.domain_request_count--;
-	mutex_unlock(&b2r2_core.domain_lock);
+	core->domain_request_count--;
+	mutex_unlock(&core->domain_lock);
 
 	return -EFAULT;
 }
 
-static void domain_disable(void)
+/**
+ * domain_disable()
+ *
+ * @core: The b2r2 core entity
+ */
+static void domain_disable(struct b2r2_core *core)
 {
-	mutex_lock(&b2r2_core.domain_lock);
+	mutex_lock(&core->domain_lock);
 
-	if (b2r2_core.domain_request_count == 0) {
-		b2r2_log_err("%s: Unbalanced domain_disable()\n", __func__);
+	if (core->domain_request_count == 0) {
+		b2r2_log_err(core->dev,
+			"%s: Unbalanced domain_disable()\n", __func__);
 	} else {
-		b2r2_core.domain_request_count--;
+		core->domain_request_count--;
 
 		/* Cancel any existing work */
-		cancel_delayed_work_sync(&b2r2_core.domain_disable_work);
+		cancel_delayed_work_sync(&core->domain_disable_work);
 
 		/* Add a work to disable the power and clock after a delay */
-		queue_delayed_work(b2r2_core.work_queue,
-				&b2r2_core.domain_disable_work,
+		queue_delayed_work(core->work_queue, &core->domain_disable_work,
 				B2R2_DOMAIN_DISABLE_TIMEOUT);
 	}
 
-	mutex_unlock(&b2r2_core.domain_lock);
+	mutex_unlock(&core->domain_lock);
 }
 
 /**
@@ -829,49 +711,41 @@ static void domain_disable(void)
  */
 static void stop_queue(enum b2r2_core_queue queue)
 {
-	/* TODO: Implement! If this function is not implemented canceled jobs will
-	use b2r2 which is a waste of resources. Not stopping jobs will also screw up
-	the hardware timing, the job the canceled job intrerrupted (if any) will be
-	billed for the time between the point where the job is cancelled and when it
-	stops. */
+	/* TODO: Implement! If this function is not implemented canceled jobs
+	 * will use b2r2 which is a waste of resources. Not stopping jobs will
+	 * also screw up the hardware timing, the job the canceled job
+	 * intrerrupted (if any) will be billed for the time between the point
+	 * where the job is cancelled and when it stops.
+	 */
 }
 
 /**
  * exit_job_list() - Empties a job queue by canceling the jobs
  *
- * b2r2_core.lock _must_ be held when calling this function
+ * @core: The b2r2 core entity
+ *
+ * core->lock _must_ be held when calling this function
  */
-static void exit_job_list(struct list_head *job_queue)
+static void exit_job_list(struct b2r2_core *core,
+		struct list_head *job_queue)
 {
 	while (!list_empty(job_queue)) {
 		struct b2r2_core_job *job =
 			list_entry(job_queue->next,
-				   struct b2r2_core_job,
-				   list);
-		/* Add reference to prevent job from disappearing
-		   in the middle of our work, released below */
-		internal_job_addref(job, __func__);
+				struct b2r2_core_job,
+				list);
+		/*
+		 * Add reference to prevent job from disappearing
+		 * in the middle of our work, released below
+		 */
+		internal_job_addref(core, job, __func__);
 
-		cancel_job(job);
+		cancel_job(core, job);
 
 		/* Matching release to addref above */
-		internal_job_release(job, __func__);
+		internal_job_release(core, job, __func__);
 
 	}
-}
-
-/**
- * get_next_job_id() - Return a new job id.
- */
-static int get_next_job_id(void)
-{
-	int job_id;
-
-	if (b2r2_core.next_job_id < 1)
-		b2r2_core.next_job_id = 1;
-	job_id = b2r2_core.next_job_id++;
-
-	return job_id;
 }
 
 /**
@@ -883,29 +757,32 @@ static int get_next_job_id(void)
 static void job_work_function(struct work_struct *ptr)
 {
 	unsigned long flags;
-	struct b2r2_core_job    *job = container_of(
-		ptr, struct b2r2_core_job, work);
+	struct b2r2_core_job *job =
+			container_of(ptr, struct b2r2_core_job, work);
+	struct b2r2_core *core = (struct b2r2_core *) job->data;
 
 	/* Disable B2R2 */
-	domain_disable();
+	domain_disable(core);
 
 	/* Release resources */
 	if (job->release_resources)
 		job->release_resources(job, false);
 
-	spin_lock_irqsave(&b2r2_core.lock, flags);
+	spin_lock_irqsave(&core->lock, flags);
 
 	/* Dispatch a new job if possible */
-	check_prio_list(false);
+	check_prio_list(core, false);
 
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	spin_unlock_irqrestore(&core->lock, flags);
 
 	/* Tell the client */
 	if (job->callback)
 		job->callback(job);
 
-	/* Drop our reference, matches the
-	   addref in handle_queue_event or b2r2_core_job_cancel */
+	/*
+	 * Drop our reference, matches the
+	 * addref in handle_queue_event or b2r2_core_job_cancel
+	 */
 	b2r2_core_job_release(job, __func__);
 }
 
@@ -922,53 +799,56 @@ static void timeout_work_function(struct work_struct *ptr)
 {
 	unsigned long flags;
 	struct list_head job_list;
+	struct delayed_work *twork = to_delayed_work(ptr);
+	struct b2r2_core *core = container_of(twork, struct b2r2_core,
+			timeout_work);
 
 	INIT_LIST_HEAD(&job_list);
 
 	/* Cancel all jobs if too long time since last irq */
-	spin_lock_irqsave(&b2r2_core.lock, flags);
-	if (b2r2_core.n_active_jobs > 0) {
+	spin_lock_irqsave(&core->lock, flags);
+	if (core->n_active_jobs > 0) {
 		unsigned long diff =
-			(long) jiffies - (long) b2r2_core.jiffies_last_irq;
-		if (diff > HZ/2) {
+			(long) jiffies - (long) core->jiffies_last_irq;
+		if (diff > JOB_TIMEOUT) {
 			/* Active jobs and more than a second since last irq! */
 			int i;
 
-			/* Look for timeout:ed jobs and put them in tmp list. It's
-			important that the application queues are killed in order
-			of decreasing priority */
-			for (i = 0;
-			     i < ARRAY_SIZE(b2r2_core.active_jobs);
-			     i++) {
+			b2r2_core_print_stats(core);
+
+			/*
+			 * Look for timeout:ed jobs and put them in tmp list.
+			 * It's important that the application queues are
+			 * killed in order of decreasing priority
+			 */
+			for (i = 0; i < ARRAY_SIZE(core->active_jobs); i++) {
 				struct b2r2_core_job *job =
-					b2r2_core.active_jobs[i];
+					core->active_jobs[i];
 
 				if (job) {
-					stop_hw_timer(job);
-
-					b2r2_core.active_jobs[i] = NULL;
-					b2r2_core.n_active_jobs--;
-					list_add_tail(&job->list,
-						      &job_list);
+					stop_hw_timer(core, job);
+					core->active_jobs[i] = NULL;
+					core->n_active_jobs--;
+					list_add_tail(&job->list, &job_list);
 				}
 			}
 
 			/* Print the B2R2 register and reset B2R2 */
-			printk_regs();
-			hw_reset();
+			printk_regs(core);
+			hw_reset(core);
 		}
 	}
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	spin_unlock_irqrestore(&core->lock, flags);
 
 	/* Handle timeout:ed jobs */
-	spin_lock_irqsave(&b2r2_core.lock, flags);
+	spin_lock_irqsave(&core->lock, flags);
 	while (!list_empty(&job_list)) {
 		struct b2r2_core_job *job =
 			list_entry(job_list.next,
-				   struct b2r2_core_job,
-				   list);
+				struct b2r2_core_job,
+				list);
 
-		b2r2_log_warn("%s: Job timeout\n", __func__);
+		b2r2_log_warn(core->dev, "%s: Job timeout\n", __func__);
 
 		list_del_init(&job->list);
 
@@ -979,16 +859,16 @@ static void timeout_work_function(struct work_struct *ptr)
 		wake_up_interruptible(&job->event);
 
 		/* Job callbacks handled via work queue */
-		queue_work(b2r2_core.work_queue, &job->work);
+		queue_work(core->work_queue, &job->work);
 	}
 
 	/* Requeue delayed work */
-	if (b2r2_core.n_active_jobs)
+	if (core->n_active_jobs)
 		queue_delayed_work(
-			b2r2_core.work_queue,
-			&b2r2_core.timeout_work, HZ/2);
+			core->work_queue,
+			&core->timeout_work, JOB_TIMEOUT);
 
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	spin_unlock_irqrestore(&core->lock, flags);
 }
 #endif
 
@@ -998,7 +878,7 @@ static void timeout_work_function(struct work_struct *ptr)
  *
  * @job: Pointer to job struct
  *
- * b2r2_core.lock _must_ be held when calling this function
+ * core->lock _must_ be held when calling this function
  */
 static void reset_hw_timer(struct b2r2_core_job *job)
 {
@@ -1012,11 +892,11 @@ static void reset_hw_timer(struct b2r2_core_job *job)
  *
  * @job: Pointer to job struct
  *
- * b2r2_core.lock _must_ be held when calling this function
+ * core->lock _must_ be held when calling this function
  */
 static void start_hw_timer(struct b2r2_core_job *job)
 {
-	job->hw_start_time = b2r2_get_curr_nsec();
+	ktime_get_ts(&job->hw_ts_start);
 }
 
 /**
@@ -1024,68 +904,74 @@ static void start_hw_timer(struct b2r2_core_job *job)
  *                   Should be called immediatly after the hardware has
  *                   finished.
  *
+ * @core: The b2r2 core entity
  * @job: Pointer to job struct
  *
- * b2r2_core.lock _must_ be held when calling this function
+ * core->lock _must_ be held when calling this function
  */
-static void stop_hw_timer(struct b2r2_core_job *job)
+static void stop_hw_timer(struct b2r2_core *core, struct b2r2_core_job *job)
 {
 	/* Assumes only app queues are used, which is the case right now. */
-	/* Not 100% accurate. When a higher prio job interrupts a lower prio job it does
-	so after the current node of the low prio job has finished. Currently we can not
-	sense when the actual switch takes place so the time reported for a job that
-	interrupts a lower prio job will on average contain the time it takes to process
-	half a node in the lower prio job in addition to the time it takes to process the
-	job's own nodes. This could possibly be solved by adding node notifications but
-	that would involve a significant amount of work and consume system resources due
-	to the extra interrupts. */
-	/* If a job takes more than ~2s (absolute time, including idleing in the hardware)
-	the state of the hardware timer will be corrupted and it will not report valid
-	values until b2r2 becomes idle (no active jobs on any queues). The maximum length
-	can possibly be increased by using 64 bit integers. */
+	/*
+	 * Not 100% accurate. When a higher prio job interrupts a lower prio
+	 * job it does so after the current node of the low prio job has
+	 * finished. Currently we can not sense when the actual switch takes
+	 * place so the time reported for a job that interrupts a lower prio
+	 * job will on average contain the time it takes to process half a node
+	 * in the lower prio job in addition to the time it takes to process
+	 * the job's own nodes. This could possibly be solved by adding node
+	 * notifications but that would involve a significant amount of work
+	 * and consume system resources due to the extra interrupts.
+	 */
 
 	int i;
+	struct timespec ts_stop;
+	struct timespec ts_diff;
+	s64 nsec_in_hw;
 
-	u32 stop_time_raw = b2r2_get_curr_nsec();
-	/* We'll add an offset to all positions in time to make the current time equal to
-	0xFFFFFFFF. This way we can compare positions in time to each other without having
-	to wory about wrapping (so long as all positions in time are in the past). */
-	u32 stop_time = 0xFFFFFFFF;
-	u32 time_pos_offset = 0xFFFFFFFF - stop_time_raw;
-	u32 nsec_in_hw = stop_time - (job->hw_start_time + time_pos_offset);
-	job->nsec_active_in_hw += (s32)nsec_in_hw;
+	ktime_get_ts(&ts_stop);
+	ts_diff = timespec_sub(ts_stop, job->hw_ts_start);
+	nsec_in_hw = timespec_to_ns(&ts_diff);
+	job->nsec_active_in_hw += nsec_in_hw;
 
-	/* Check if we have delayed the start of higher prio jobs. Can happen as queue
-	switching only can be done between nodes. */
+	/*
+	 * Check if we have delayed the start of higher prio jobs. Can happen
+	 * as queue switching only can be done between nodes.
+	 */
 	for (i = (int)job->queue - 1; i >= (int)B2R2_CORE_QUEUE_AQ1; i--) {
-		struct b2r2_core_job *queue_active_job = b2r2_core.active_jobs[i];
-		if (NULL == queue_active_job)
+		struct b2r2_core_job *qj = core->active_jobs[i];
+
+		if (NULL == qj)
 			continue;
 
-		queue_active_job->hw_start_time = stop_time_raw;
+		qj->hw_ts_start = ts_stop;
 	}
 
 	/* Check if the job has stolen time from lower prio jobs */
 	for (i = (int)job->queue + 1; i < B2R2_NUM_APPLICATIONS_QUEUES; i++) {
-		struct b2r2_core_job *queue_active_job = b2r2_core.active_jobs[i];
-		u32 queue_active_job_hw_start_time;
+		struct b2r2_core_job *qj = core->active_jobs[i];
 
-		if (NULL == queue_active_job)
+		if (NULL == qj)
 			continue;
 
-		queue_active_job_hw_start_time = queue_active_job->hw_start_time + time_pos_offset;
+		if (timespec_to_ns(&qj->hw_ts_start) > 0 &&
+				timespec_compare(&qj->hw_ts_start,
+					&ts_stop) < 0) {
+			struct timespec qj_ts_diff =
+				timespec_sub(ts_stop, qj->hw_ts_start);
+			s64 qj_nsec_in_hw = timespec_to_ns(&qj_ts_diff);
 
-		if (queue_active_job_hw_start_time < stop_time) {
-			u32 queue_active_job_nsec_in_hw = stop_time - queue_active_job_hw_start_time;
-			u32 num_stolen_nsec = min(queue_active_job_nsec_in_hw, nsec_in_hw);
+			s64 num_stolen_nsec = min(qj_nsec_in_hw,
+				nsec_in_hw);
 
-			queue_active_job->nsec_active_in_hw -= (s32)num_stolen_nsec;
+			qj->nsec_active_in_hw -= num_stolen_nsec;
 
 			nsec_in_hw -= num_stolen_nsec;
-			stop_time -= num_stolen_nsec;
+			set_normalized_timespec(&ts_stop, ts_stop.tv_sec,
+				ts_stop.tv_nsec - num_stolen_nsec);
 		}
 
-		if (0 == nsec_in_hw)
+		if (nsec_in_hw <= 0)
 			break;
 	}
 }
@@ -1098,11 +984,9 @@ static void stop_hw_timer(struct b2r2_core_job *job)
  */
 static void init_job(struct b2r2_core_job *job)
 {
+
 	job->start_sentinel = START_SENTINEL;
 	job->end_sentinel = END_SENTINEL;
-
-	/* Get a job id*/
-	job->job_id = get_next_job_id();
 
 	/* Job is idle, never queued */
 	job->job_state = B2R2_CORE_JOB_IDLE;
@@ -1144,62 +1028,62 @@ static void init_job(struct b2r2_core_job *job)
 /**
  * clear_interrupts() - Disables all interrupts
  *
- * b2r2_core.lock must be held
+ * core->lock _must_ be held
  */
-static void  clear_interrupts(void)
+static void  clear_interrupts(struct b2r2_core *core)
 {
-	writel(0x0, &b2r2_core.hw->BLT_ITM0);
-	writel(0x0, &b2r2_core.hw->BLT_ITM1);
-	writel(0x0, &b2r2_core.hw->BLT_ITM2);
-	writel(0x0, &b2r2_core.hw->BLT_ITM3);
+	writel(0x0, &core->hw->BLT_ITM0);
+	writel(0x0, &core->hw->BLT_ITM1);
+	writel(0x0, &core->hw->BLT_ITM2);
+	writel(0x0, &core->hw->BLT_ITM3);
 }
 
 /**
  * insert_into_prio_list() - Inserts the job into the sorted list of jobs.
  *                           The list is sorted by priority.
  *
+ * @core: The b2r2 core entity
  * @job: Job to insert
  *
- * b2r2_core.lock must be held
+ * core->lock _must_ be held
  */
-static void insert_into_prio_list(struct b2r2_core_job *job)
+static void insert_into_prio_list(struct b2r2_core *core,
+		struct b2r2_core_job *job)
 {
-	/* Ref count is increased when job put in list,
-	   should be released when job is removed from list */
-	internal_job_addref(job, __func__);
+	/*
+	 * Ref count is increased when job put in list,
+	 * should be released when job is removed from list
+	 */
+	internal_job_addref(core, job, __func__);
 
-	b2r2_core.stat_n_jobs_in_prio_list++;
+	core->stat_n_jobs_in_prio_list++;
 
 	/* Sort in the job */
-	if (list_empty(&b2r2_core.prio_queue))
-		list_add_tail(&job->list, &b2r2_core.prio_queue);
+	if (list_empty(&core->prio_queue))
+		list_add_tail(&job->list, &core->prio_queue);
 	else {
-		struct b2r2_core_job *first_job =
-			list_entry(b2r2_core.prio_queue.next,
+		struct b2r2_core_job *first_job = list_entry(
+			core->prio_queue.next,
 				   struct b2r2_core_job, list);
-		struct b2r2_core_job *last_job =
-			list_entry(b2r2_core.prio_queue.prev,
+		struct b2r2_core_job *last_job = list_entry(
+			core->prio_queue.prev,
 				   struct b2r2_core_job, list);
 
-		/* High prio job? */
 		if (job->prio > first_job->prio)
-			/* Insert first */
-			list_add(&job->list, &b2r2_core.prio_queue);
+			list_add(&job->list, &core->prio_queue);
 		else if (job->prio <= last_job->prio)
-			/* Insert last */
-			list_add_tail(&job->list, &b2r2_core.prio_queue);
+			list_add_tail(&job->list, &core->prio_queue);
 		else {
 			/* We need to find where to put it */
 			struct list_head *ptr;
 
-			list_for_each(ptr, &b2r2_core.prio_queue) {
+			list_for_each(ptr, &core->prio_queue) {
 				struct b2r2_core_job *list_job =
 					list_entry(ptr, struct b2r2_core_job,
-						   list);
+						list);
 				if (job->prio > list_job->prio) {
-					/* Add before */
 					list_add_tail(&job->list,
-						      &list_job->list);
+						&list_job->list);
 					break;
 				}
 			}
@@ -1213,71 +1097,67 @@ static void insert_into_prio_list(struct b2r2_core_job *job)
  * check_prio_list() - Checks if the first job(s) in the prio list can
  *                     be dispatched to B2R2
  *
+ * @core: The b2r2 core entity
  * @atomic: true if in atomic context (i.e. interrupt context)
  *
- * b2r2_core.lock must be held
+ * core->lock _must_ be held
  */
-static void check_prio_list(bool atomic)
+static void check_prio_list(struct b2r2_core *core, bool atomic)
 {
 	bool dispatched_job;
 	int n_dispatched = 0;
+	struct b2r2_core_job *job;
 
-	/* Do we have anything in our prio list? */
 	do {
 		dispatched_job = false;
-		if (!list_empty(&b2r2_core.prio_queue)) {
-			/* The first job waiting */
-			struct b2r2_core_job *job =
-				list_first_entry(&b2r2_core.prio_queue,
-						 struct b2r2_core_job,
-						 list);
 
-			/* Is the B2R2 queue available? */
-			if (b2r2_core.active_jobs[job->queue] == NULL) {
-				/* Can we acquire resources? */
-				if (!job->acquire_resources ||
-				    job->acquire_resources(job, atomic) == 0) {
-					/* Ok to dispatch job */
+		/* Do we have anything in our prio list? */
+		if (list_empty(&core->prio_queue))
+			break;
 
-					/* Remove from list */
-					list_del_init(&job->list);
+		/* The first job waiting */
+		job = list_first_entry(&core->prio_queue,
+				 struct b2r2_core_job, list);
 
-					/* The job is now active */
-					b2r2_core.active_jobs[job->queue] = job;
-					b2r2_core.n_active_jobs++;
-					job->jiffies = jiffies;
-					b2r2_core.jiffies_last_active =
-						jiffies;
+		/* Is the B2R2 queue available? */
+		if (core->active_jobs[job->queue] != NULL)
+			break;
 
-					/* Kick off B2R2 */
-					trigger_job(job);
+		/* Can we acquire resources? */
+		if (!job->acquire_resources ||
+			job->acquire_resources(job, atomic) == 0) {
+			/* Ok to dispatch job */
 
-					dispatched_job = true;
-					n_dispatched++;
+			/* Remove from list */
+			list_del_init(&job->list);
+
+			/* The job is now active */
+			core->active_jobs[job->queue] = job;
+			core->n_active_jobs++;
+			job->jiffies = jiffies;
+			core->jiffies_last_active = jiffies;
+
+			/* Kick off B2R2 */
+			trigger_job(core, job);
+			dispatched_job = true;
+			n_dispatched++;
 
 #ifdef HANDLE_TIMEOUTED_JOBS
-					/* Check in one half second
-					   if it hangs */
-					queue_delayed_work(
-						b2r2_core.work_queue,
-						&b2r2_core.timeout_work,
-						HZ/2);
+			/* Check in one half second if it hangs */
+			queue_delayed_work(core->work_queue,
+				&core->timeout_work, JOB_TIMEOUT);
 #endif
-				} else {
-					/* No resources */
-					if (!atomic &&
-					    b2r2_core.n_active_jobs == 0) {
-						b2r2_log_warn(
-							"%s: No resource",
-							__func__);
-						cancel_job(job);
-					}
-				}
+		} else {
+			/* No resources */
+			if (!atomic && core->n_active_jobs == 0) {
+				b2r2_log_warn(core->dev,
+					"%s: No resource", __func__);
+				cancel_job(core, job);
 			}
 		}
 	} while (dispatched_job);
 
-	b2r2_core.stat_n_jobs_in_prio_list -= n_dispatched;
+	core->stat_n_jobs_in_prio_list -= n_dispatched;
 }
 
 /**
@@ -1288,7 +1168,7 @@ static void check_prio_list(bool atomic)
  *
  * Reference count will be incremented for found job.
  *
- * b2r2_core.lock must be held
+ * core->lock _must_ be held
  */
 static struct b2r2_core_job *find_job_in_list(int job_id,
 					      struct list_head *list)
@@ -1296,12 +1176,15 @@ static struct b2r2_core_job *find_job_in_list(int job_id,
 	struct list_head *ptr;
 
 	list_for_each(ptr, list) {
-		struct b2r2_core_job *job =
-			list_entry(ptr, struct b2r2_core_job, list);
+		struct b2r2_core_job *job = list_entry(
+				ptr, struct b2r2_core_job, list);
 		if (job->job_id == job_id) {
-			/* Increase reference count, should be released by
-			   the caller of b2r2_core_job_find */
-			internal_job_addref(job, __func__);
+			struct b2r2_core *core = (struct b2r2_core *) job->data;
+			/*
+			 * Increase reference count, should be released by
+			 * the caller of b2r2_core_job_find
+			 */
+			internal_job_addref(core, job, __func__);
 			return job;
 		}
 	}
@@ -1311,23 +1194,25 @@ static struct b2r2_core_job *find_job_in_list(int job_id,
 /**
  * find_job_in_active_jobs() - Finds job in active job queues
  *
- * @jobid: Job id to find
+ * @core: The b2r2 core entity
+ * @job_id: Job id to find
  *
  * Reference count will be incremented for found job.
  *
- * b2r2_core.lock must be held
+ * core->lock _must_ be held
  */
-static struct b2r2_core_job *find_job_in_active_jobs(int job_id)
+static struct b2r2_core_job *find_job_in_active_jobs(struct b2r2_core *core,
+		int job_id)
 {
 	int i;
 	struct b2r2_core_job *found_job = NULL;
 
-	if (b2r2_core.n_active_jobs) {
-		for (i = 0; i < ARRAY_SIZE(b2r2_core.active_jobs); i++) {
-			struct b2r2_core_job *job = b2r2_core.active_jobs[i];
+	if (core->n_active_jobs) {
+		for (i = 0; i < ARRAY_SIZE(core->active_jobs); i++) {
+			struct b2r2_core_job *job = core->active_jobs[i];
 
 			if (job && job->job_id == job_id) {
-				internal_job_addref(job, __func__);
+				internal_job_addref(core, job, __func__);
 				found_job = job;
 				break;
 			}
@@ -1344,19 +1229,22 @@ static struct b2r2_core_job *find_job_in_active_jobs(int job_id)
  *
  * Reference count will be incremented for found job.
  *
- * b2r2_core.lock must be held
+ * core->lock must be held
  */
-static struct b2r2_core_job *find_tag_in_list(int tag, struct list_head *list)
+static struct b2r2_core_job *find_tag_in_list(struct b2r2_core *core,
+		int tag, struct list_head *list)
 {
 	struct list_head *ptr;
 
 	list_for_each(ptr, list) {
 		struct b2r2_core_job *job =
-			list_entry(ptr, struct b2r2_core_job, list);
+				list_entry(ptr, struct b2r2_core_job, list);
 		if (job->tag == tag) {
-			/* Increase reference count, should be released by
-			   the caller of b2r2_core_job_find */
-			internal_job_addref(job, __func__);
+			/*
+			 * Increase reference count, should be released by
+			 * the caller of b2r2_core_job_find
+			 */
+			internal_job_addref(core, job, __func__);
 			return job;
 		}
 	}
@@ -1370,19 +1258,20 @@ static struct b2r2_core_job *find_tag_in_list(int tag, struct list_head *list)
  *
  * Reference count will be incremented for found job.
  *
- * b2r2_core.lock must be held
+ * core->lock must be held
  */
-static struct b2r2_core_job *find_tag_in_active_jobs(int tag)
+static struct b2r2_core_job *find_tag_in_active_jobs(struct b2r2_core *core,
+		int tag)
 {
 	int i;
 	struct b2r2_core_job *found_job = NULL;
 
-	if (b2r2_core.n_active_jobs) {
-		for (i = 0; i < ARRAY_SIZE(b2r2_core.active_jobs); i++) {
-			struct b2r2_core_job *job = b2r2_core.active_jobs[i];
+	if (core->n_active_jobs) {
+		for (i = 0; i < ARRAY_SIZE(core->active_jobs); i++) {
+			struct b2r2_core_job *job = core->active_jobs[i];
 
 			if (job && job->tag == tag) {
-				internal_job_addref(job, __func__);
+				internal_job_addref(core, job, __func__);
 				found_job = job;
 				break;
 			}
@@ -1396,27 +1285,27 @@ static struct b2r2_core_job *find_tag_in_active_jobs(int tag)
 /**
  * hw_reset() - Resets B2R2 hardware
  *
- * b2r2_core.lock must be held
+ * core->lock must be held
  */
-static int hw_reset(void)
+static int hw_reset(struct b2r2_core *core)
 {
-	u32 uTimeOut = B2R2_DRIVER_TIMEOUT_VALUE;
+	u32 uTimeOut = B2R2_RESET_TIMEOUT_VALUE;
 
 	/* Tell B2R2 to reset */
-	writel(readl(&b2r2_core.hw->BLT_CTL) | B2R2BLT_CTLGLOBAL_soft_reset,
-		&b2r2_core.hw->BLT_CTL);
-	writel(0x00000000, &b2r2_core.hw->BLT_CTL);
+	writel(readl(&core->hw->BLT_CTL) | B2R2BLT_CTLGLOBAL_soft_reset,
+		&core->hw->BLT_CTL);
+	writel(0x00000000, &core->hw->BLT_CTL);
 
-	b2r2_log_info("wait for B2R2 to be idle..\n");
+	b2r2_log_info(core->dev, "wait for B2R2 to be idle..\n");
 
-	/** Wait for B2R2 to be idle (on a timeout rather than while loop) */
+	/* Wait for B2R2 to be idle (on a timeout rather than while loop) */
 	while ((uTimeOut > 0) &&
-	       ((readl(&b2r2_core.hw->BLT_STA1) &
+	       ((readl(&core->hw->BLT_STA1) &
 		 B2R2BLT_STA1BDISP_IDLE) == 0x0))
 		uTimeOut--;
 
 	if (uTimeOut == 0) {
-		b2r2_log_warn(
+		b2r2_log_warn(core->dev,
 			 "error-> after software reset B2R2 is not idle\n");
 		return -EAGAIN;
 	}
@@ -1431,117 +1320,109 @@ static int hw_reset(void)
  *
  * @job: Job to trigger
  *
- * b2r2_core.lock must be held
+ * core->lock must be held
  */
-static void trigger_job(struct b2r2_core_job *job)
+static void trigger_job(struct b2r2_core *core, struct b2r2_core_job *job)
 {
 	/* Debug prints */
-	b2r2_log_info("queue 0x%x \n", job->queue);
-	b2r2_log_info("BLT TRIG_IP 0x%x (first node)\n",
+	b2r2_log_info(core->dev, "queue 0x%x\n", job->queue);
+	b2r2_log_info(core->dev, "BLT TRIG_IP 0x%x (first node)\n",
 		job->first_node_address);
-	b2r2_log_info("BLT LNA_CTL 0x%x (last node)\n",
+	b2r2_log_info(core->dev, "BLT LNA_CTL 0x%x (last node)\n",
 		job->last_node_address);
-	b2r2_log_info("BLT TRIG_CTL 0x%x \n", job->control);
-	b2r2_log_info("BLT PACE_CTL 0x%x \n", job->pace_control);
+	b2r2_log_info(core->dev, "BLT TRIG_CTL 0x%x\n", job->control);
+	b2r2_log_info(core->dev, "BLT PACE_CTL 0x%x\n", job->pace_control);
 
 	reset_hw_timer(job);
 	job->job_state = B2R2_CORE_JOB_RUNNING;
 
 	/* Enable interrupt */
-	writel(readl(&b2r2_core.hw->BLT_ITM0) | job->interrupt_context,
-		&b2r2_core.hw->BLT_ITM0);
+	writel(readl(&core->hw->BLT_ITM0) | job->interrupt_context,
+			&core->hw->BLT_ITM0);
 
-	writel(min_t(u8, max_t(u8, b2r2_core.op_size, B2R2_PLUG_OPCODE_SIZE_8),
-				B2R2_PLUG_OPCODE_SIZE_64),
-			&b2r2_core.hw->PLUGS1_OP2);
-	writel(min_t(u8, b2r2_core.ch_size, B2R2_PLUG_CHUNK_SIZE_128),
-			&b2r2_core.hw->PLUGS1_CHZ);
-	writel(min_t(u8, b2r2_core.mg_size, B2R2_PLUG_MESSAGE_SIZE_128) |
-				(b2r2_core.min_req_time << 16),
-			&b2r2_core.hw->PLUGS1_MSZ);
-	writel(min_t(u8, b2r2_core.pg_size, B2R2_PLUG_PAGE_SIZE_256),
-			&b2r2_core.hw->PLUGS1_PGZ);
+	writel(min_t(u8, max_t(u8, core->op_size, B2R2_PLUG_OPCODE_SIZE_8),
+			B2R2_PLUG_OPCODE_SIZE_64), &core->hw->PLUGS1_OP2);
+	writel(min_t(u8, core->ch_size, B2R2_PLUG_CHUNK_SIZE_128),
+			&core->hw->PLUGS1_CHZ);
+	writel(min_t(u8, core->mg_size, B2R2_PLUG_MESSAGE_SIZE_128) |
+			(core->min_req_time << 16), &core->hw->PLUGS1_MSZ);
+	writel(min_t(u8, core->pg_size, B2R2_PLUG_PAGE_SIZE_256),
+			&core->hw->PLUGS1_PGZ);
 
-	writel(min_t(u8, max_t(u8, b2r2_core.op_size, B2R2_PLUG_OPCODE_SIZE_8),
-				B2R2_PLUG_OPCODE_SIZE_64),
-			&b2r2_core.hw->PLUGS2_OP2);
-	writel(min_t(u8, b2r2_core.ch_size, B2R2_PLUG_CHUNK_SIZE_128),
-			&b2r2_core.hw->PLUGS2_CHZ);
-	writel(min_t(u8, b2r2_core.mg_size, B2R2_PLUG_MESSAGE_SIZE_128) |
-				(b2r2_core.min_req_time << 16),
-			&b2r2_core.hw->PLUGS2_MSZ);
-	writel(min_t(u8, b2r2_core.pg_size, B2R2_PLUG_PAGE_SIZE_256),
-			&b2r2_core.hw->PLUGS2_PGZ);
+	writel(min_t(u8, max_t(u8, core->op_size, B2R2_PLUG_OPCODE_SIZE_8),
+			B2R2_PLUG_OPCODE_SIZE_64), &core->hw->PLUGS2_OP2);
+	writel(min_t(u8, core->ch_size, B2R2_PLUG_CHUNK_SIZE_128),
+			&core->hw->PLUGS2_CHZ);
+	writel(min_t(u8, core->mg_size, B2R2_PLUG_MESSAGE_SIZE_128) |
+			(core->min_req_time << 16), &core->hw->PLUGS2_MSZ);
+	writel(min_t(u8, core->pg_size, B2R2_PLUG_PAGE_SIZE_256),
+			&core->hw->PLUGS2_PGZ);
 
-	writel(min_t(u8, max_t(u8, b2r2_core.op_size, B2R2_PLUG_OPCODE_SIZE_8),
-				B2R2_PLUG_OPCODE_SIZE_64),
-			&b2r2_core.hw->PLUGS3_OP2);
-	writel(min_t(u8, b2r2_core.ch_size, B2R2_PLUG_CHUNK_SIZE_128),
-			&b2r2_core.hw->PLUGS3_CHZ);
-	writel(min_t(u8, b2r2_core.mg_size, B2R2_PLUG_MESSAGE_SIZE_128) |
-				(b2r2_core.min_req_time << 16),
-			&b2r2_core.hw->PLUGS3_MSZ);
-	writel(min_t(u8, b2r2_core.pg_size, B2R2_PLUG_PAGE_SIZE_256),
-			&b2r2_core.hw->PLUGS3_PGZ);
+	writel(min_t(u8, max_t(u8, core->op_size, B2R2_PLUG_OPCODE_SIZE_8),
+			B2R2_PLUG_OPCODE_SIZE_64), &core->hw->PLUGS3_OP2);
+	writel(min_t(u8, core->ch_size, B2R2_PLUG_CHUNK_SIZE_128),
+			&core->hw->PLUGS3_CHZ);
+	writel(min_t(u8, core->mg_size, B2R2_PLUG_MESSAGE_SIZE_128) |
+			(core->min_req_time << 16), &core->hw->PLUGS3_MSZ);
+	writel(min_t(u8, core->pg_size, B2R2_PLUG_PAGE_SIZE_256),
+			&core->hw->PLUGS3_PGZ);
 
-	writel(min_t(u8, max_t(u8, b2r2_core.op_size, B2R2_PLUG_OPCODE_SIZE_8),
-				B2R2_PLUG_OPCODE_SIZE_64),
-			&b2r2_core.hw->PLUGT_OP2);
-	writel(min_t(u8, b2r2_core.ch_size, B2R2_PLUG_CHUNK_SIZE_128),
-			&b2r2_core.hw->PLUGT_CHZ);
-	writel(min_t(u8, b2r2_core.mg_size, B2R2_PLUG_MESSAGE_SIZE_128) |
-				(b2r2_core.min_req_time << 16),
-			&b2r2_core.hw->PLUGT_MSZ);
-	writel(min_t(u8, b2r2_core.pg_size, B2R2_PLUG_PAGE_SIZE_256),
-			&b2r2_core.hw->PLUGT_PGZ);
+	writel(min_t(u8, max_t(u8, core->op_size, B2R2_PLUG_OPCODE_SIZE_8),
+			B2R2_PLUG_OPCODE_SIZE_64), &core->hw->PLUGT_OP2);
+	writel(min_t(u8, core->ch_size, B2R2_PLUG_CHUNK_SIZE_128),
+			&core->hw->PLUGT_CHZ);
+	writel(min_t(u8, core->mg_size, B2R2_PLUG_MESSAGE_SIZE_128) |
+			(core->min_req_time << 16), &core->hw->PLUGT_MSZ);
+	writel(min_t(u8, core->pg_size, B2R2_PLUG_PAGE_SIZE_256),
+			&core->hw->PLUGT_PGZ);
 
 	/* B2R2 kicks off when LNA is written, LNA write must be last! */
 	switch (job->queue) {
 	case B2R2_CORE_QUEUE_CQ1:
-		writel(job->first_node_address, &b2r2_core.hw->BLT_CQ1_TRIG_IP);
-		writel(job->control, &b2r2_core.hw->BLT_CQ1_TRIG_CTL);
-		writel(job->pace_control, &b2r2_core.hw->BLT_CQ1_PACE_CTL);
+		writel(job->first_node_address, &core->hw->BLT_CQ1_TRIG_IP);
+		writel(job->control, &core->hw->BLT_CQ1_TRIG_CTL);
+		writel(job->pace_control, &core->hw->BLT_CQ1_PACE_CTL);
 		break;
 
 	case B2R2_CORE_QUEUE_CQ2:
-		writel(job->first_node_address, &b2r2_core.hw->BLT_CQ2_TRIG_IP);
-		writel(job->control, &b2r2_core.hw->BLT_CQ2_TRIG_CTL);
-		writel(job->pace_control, &b2r2_core.hw->BLT_CQ2_PACE_CTL);
+		writel(job->first_node_address, &core->hw->BLT_CQ2_TRIG_IP);
+		writel(job->control, &core->hw->BLT_CQ2_TRIG_CTL);
+		writel(job->pace_control, &core->hw->BLT_CQ2_PACE_CTL);
 		break;
 
 	case B2R2_CORE_QUEUE_AQ1:
-		writel(job->control, &b2r2_core.hw->BLT_AQ1_CTL);
-		writel(job->first_node_address, &b2r2_core.hw->BLT_AQ1_IP);
+		writel(job->control, &core->hw->BLT_AQ1_CTL);
+		writel(job->first_node_address, &core->hw->BLT_AQ1_IP);
 		wmb();
 		start_hw_timer(job);
-		writel(job->last_node_address, &b2r2_core.hw->BLT_AQ1_LNA);
+		writel(job->last_node_address, &core->hw->BLT_AQ1_LNA);
 		break;
 
 	case B2R2_CORE_QUEUE_AQ2:
-		writel(job->control, &b2r2_core.hw->BLT_AQ2_CTL);
-		writel(job->first_node_address, &b2r2_core.hw->BLT_AQ2_IP);
+		writel(job->control, &core->hw->BLT_AQ2_CTL);
+		writel(job->first_node_address, &core->hw->BLT_AQ2_IP);
 		wmb();
 		start_hw_timer(job);
-		writel(job->last_node_address, &b2r2_core.hw->BLT_AQ2_LNA);
+		writel(job->last_node_address, &core->hw->BLT_AQ2_LNA);
 		break;
 
 	case B2R2_CORE_QUEUE_AQ3:
-		writel(job->control, &b2r2_core.hw->BLT_AQ3_CTL);
-		writel(job->first_node_address, &b2r2_core.hw->BLT_AQ3_IP);
+		writel(job->control, &core->hw->BLT_AQ3_CTL);
+		writel(job->first_node_address, &core->hw->BLT_AQ3_IP);
 		wmb();
 		start_hw_timer(job);
-		writel(job->last_node_address, &b2r2_core.hw->BLT_AQ3_LNA);
+		writel(job->last_node_address, &core->hw->BLT_AQ3_LNA);
 		break;
 
 	case B2R2_CORE_QUEUE_AQ4:
-		writel(job->control, &b2r2_core.hw->BLT_AQ4_CTL);
-		writel(job->first_node_address, &b2r2_core.hw->BLT_AQ4_IP);
+		writel(job->control, &core->hw->BLT_AQ4_CTL);
+		writel(job->first_node_address, &core->hw->BLT_AQ4_IP);
 		wmb();
 		start_hw_timer(job);
-		writel(job->last_node_address, &b2r2_core.hw->BLT_AQ4_LNA);
+		writel(job->last_node_address, &core->hw->BLT_AQ4_LNA);
 		break;
 
-		/** Handle the default case */
+		/* Handle the default case */
 	default:
 		break;
 
@@ -1554,37 +1435,42 @@ static void trigger_job(struct b2r2_core_job *job)
  *
  * @queue: Queue to handle event for
  *
- * b2r2_core.lock must be held
+ * core->lock must be held
  */
-static void handle_queue_event(enum b2r2_core_queue queue)
+static void handle_queue_event(struct b2r2_core *core,
+		enum b2r2_core_queue queue)
 {
 	struct b2r2_core_job *job;
 
-	job = b2r2_core.active_jobs[queue];
+	job = core->active_jobs[queue];
 	if (job) {
 		if (job->job_state != B2R2_CORE_JOB_RUNNING)
-			/* Should be running
-			   Severe error. TBD */
-			b2r2_log_warn(
+			/*
+			 * Should be running
+			 * Severe error. TBD
+			 */
+			b2r2_log_warn(core->dev,
 				 "%s: Job is not running", __func__);
 
-		stop_hw_timer(job);
+		stop_hw_timer(core, job);
 
 		/* Remove from queue */
-		BUG_ON(b2r2_core.n_active_jobs == 0);
-		b2r2_core.active_jobs[queue] = NULL;
-		b2r2_core.n_active_jobs--;
+		BUG_ON(core->n_active_jobs == 0);
+		core->active_jobs[queue] = NULL;
+		core->n_active_jobs--;
 	}
 
 	if (!job) {
 		/* No job, error?  */
-		b2r2_log_warn("%s: No job", __func__);
+		b2r2_log_warn(core->dev, "%s: No job", __func__);
 		return;
 	}
 
 
-	/* Atomic context release resources, release resources will
-	   be called again later from process context (work queue) */
+	/*
+	 * Atomic context release resources, release resources will
+	 * be called again later from process context (work queue)
+	 */
 	if (job->release_resources)
 		job->release_resources(job, true);
 
@@ -1595,7 +1481,7 @@ static void handle_queue_event(enum b2r2_core_queue queue)
 	wake_up_interruptible(&job->event);
 
 	/* Dispatch to work queue to handle callbacks */
-	queue_work(b2r2_core.work_queue, &job->work);
+	queue_work(core->work_queue, &job->work);
 }
 
 /**
@@ -1603,90 +1489,112 @@ static void handle_queue_event(enum b2r2_core_queue queue)
  *
  * @status: Contents of the B2R2 ITS register
  */
-static void process_events(u32 status)
+static void process_events(struct b2r2_core *core, u32 status)
 {
 	u32 mask = 0xF;
 	u32 disable_itm_mask = 0;
 
-	b2r2_log_info("Enters process_events \n");
-	b2r2_log_info("status 0x%x \n", status);
+	b2r2_log_info(core->dev, "Enters process_events\n");
+	b2r2_log_info(core->dev, "status 0x%x\n", status);
 
 	/* Composition queue 1 */
 	if (status & mask) {
-		handle_queue_event(B2R2_CORE_QUEUE_CQ1);
+		handle_queue_event(core, B2R2_CORE_QUEUE_CQ1);
 		disable_itm_mask |= mask;
 	}
 	mask <<= 4;
 
 	/* Composition queue 2 */
 	if (status & mask) {
-		handle_queue_event(B2R2_CORE_QUEUE_CQ2);
+		handle_queue_event(core, B2R2_CORE_QUEUE_CQ2);
 		disable_itm_mask |= mask;
 	}
 	mask <<= 8;
 
 	/* Application queue 1 */
 	if (status & mask) {
-		handle_queue_event(B2R2_CORE_QUEUE_AQ1);
+		handle_queue_event(core, B2R2_CORE_QUEUE_AQ1);
 		disable_itm_mask |= mask;
 	}
 	mask <<= 4;
 
 	/* Application queue 2 */
 	if (status & mask) {
-		handle_queue_event(B2R2_CORE_QUEUE_AQ2);
+		handle_queue_event(core, B2R2_CORE_QUEUE_AQ2);
 		disable_itm_mask |= mask;
 	}
 	mask <<= 4;
 
 	/* Application queue 3 */
 	if (status & mask) {
-		handle_queue_event(B2R2_CORE_QUEUE_AQ3);
+		handle_queue_event(core, B2R2_CORE_QUEUE_AQ3);
 		disable_itm_mask |= mask;
 	}
 	mask <<= 4;
 
 	/* Application queue 4 */
 	if (status & mask) {
-		handle_queue_event(B2R2_CORE_QUEUE_AQ4);
+		handle_queue_event(core, B2R2_CORE_QUEUE_AQ4);
 		disable_itm_mask |= mask;
 	}
 
 	/* Clear received interrupt flags */
-	writel(status, &b2r2_core.hw->BLT_ITS);
+	writel(status, &core->hw->BLT_ITS);
 	/* Disable handled interrupts */
-	writel(readl(&b2r2_core.hw->BLT_ITM0) & ~disable_itm_mask,
-		 &b2r2_core.hw->BLT_ITM0);
+	writel(readl(&core->hw->BLT_ITM0) & ~disable_itm_mask,
+		 &core->hw->BLT_ITM0);
 
-	b2r2_log_info("Returns process_events \n");
+	b2r2_log_info(core->dev, "Returns process_events\n");
 }
 
 /**
  * b2r2_irq_handler() - B2R2 interrupt handler
  *
  * @irq: Interrupt number (not used)
- * @x: ??? (Not used)
+ * @dev_id: A pointer to the b2r2 core entity
  */
-static irqreturn_t b2r2_irq_handler(int irq, void *x)
+static irqreturn_t b2r2_irq_handler(int irq, void *dev_id)
 {
 	unsigned long flags;
+	struct b2r2_core *core;
+	int i;
+	static unsigned int irq_count;
+
+	/* Interleave access to eliminate starvation of cores >= 1 */
+	for (i = 0; i < B2R2_MAX_NBR_DEVICES; i++) {
+		core = b2r2_core[irq_count++ % B2R2_MAX_NBR_DEVICES];
+		if (core != NULL)
+			break;
+	}
+
+	if (core == NULL)
+		/* ERROR */
+		return IRQ_HANDLED;
 
 	/* Spin lock is need in irq handler (SMP) */
-	spin_lock_irqsave(&b2r2_core.lock, flags);
+	spin_lock_irqsave(&core->lock, flags);
 
-	/* Make sure that we have a clock */
+	/* Make a quick exit if this device was not interrupting */
+	if (!core->valid ||
+		((readl(&core->hw->BLT_ITS) & B2R2_ITS_MASK) == 0)) {
+		core->stat_n_irq_skipped++;
+		spin_unlock_irqrestore(&core->lock, flags);
+		return IRQ_NONE;
+	}
 
 	/* Remember time for last irq (for timeout mgmt) */
-	b2r2_core.jiffies_last_irq = jiffies;
-	b2r2_core.stat_n_irq++;
+	core->jiffies_last_irq = jiffies;
+	core->stat_n_irq++;
 
 	/* Handle the interrupt(s) */
-	process_events(readl(&b2r2_core.hw->BLT_ITS));
+	process_events(core, readl(&core->hw->BLT_ITS));
 
 	/* Check if we can dispatch new jobs */
-	check_prio_list(true);
+	check_prio_list(core, true);
 
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	core->stat_n_irq_exit++;
+
+	spin_unlock_irqrestore(&core->lock, flags);
 
 	return IRQ_HANDLED;
 }
@@ -1902,18 +1810,18 @@ static const struct debugfs_reg debugfs_regs[] = {
 /**
  * printk_regs() - Print B2R2 registers to printk
  */
-static void printk_regs(void)
+static void printk_regs(struct b2r2_core *core)
 {
 #ifdef CONFIG_B2R2_DEBUG
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(debugfs_regs); i++) {
 		unsigned long value = readl(
-			(unsigned long *) (((u8 *) b2r2_core.hw) +
-					   debugfs_regs[i].offset));
-		b2r2_log_regdump("%s: %08lX\n",
-			 debugfs_regs[i].name,
-			 value);
+			(unsigned long *) (((u8 *) core->hw) +
+				debugfs_regs[i].offset));
+		b2r2_log_regdump(core->dev, "%s: %08lX\n",
+			debugfs_regs[i].name,
+			value);
 	}
 #endif
 }
@@ -1934,22 +1842,20 @@ static int debugfs_b2r2_reg_read(struct file *filp, char __user *buf,
 {
 	size_t dev_size;
 	int ret = 0;
-
 	unsigned long value;
-	char *Buf = kmalloc(sizeof(char) * 4096, GFP_KERNEL);
+	char *tmpbuf = kmalloc(sizeof(char) * 4096, GFP_KERNEL);
 
-	if (Buf == NULL) {
+	if (tmpbuf == NULL) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
 	/* Read from B2R2 */
-	value = readl((unsigned long *) (((u8 *) b2r2_core.hw) +
-					 (u32) filp->f_dentry->
-					 d_inode->i_private));
+	value = readl((unsigned long *)
+		filp->f_dentry->d_inode->i_private);
 
 	/* Build the string */
-	dev_size = sprintf(Buf, "%8lX\n", value);
+	dev_size = sprintf(tmpbuf, "%8lX\n", value);
 
 	/* No more to read if offset != 0 */
 	if (*f_pos > dev_size)
@@ -1959,14 +1865,14 @@ static int debugfs_b2r2_reg_read(struct file *filp, char __user *buf,
 		count = dev_size - *f_pos;
 
 	/* Return it to user space */
-	if (copy_to_user(buf, Buf, count))
+	if (copy_to_user(buf, tmpbuf, count))
 		ret = -EINVAL;
 	*f_pos += count;
 	ret = count;
 
 out:
-	if (Buf != NULL)
-		kfree(Buf);
+	if (tmpbuf != NULL)
+		kfree(tmpbuf);
 	return ret;
 }
 
@@ -1983,23 +1889,23 @@ out:
 static int debugfs_b2r2_reg_write(struct file *filp, const char __user *buf,
 				  size_t count, loff_t *f_pos)
 {
-	char Buf[80];
+	char tmpbuf[80];
 	u32 reg_value;
 	int ret = 0;
 
 	/* Adjust count */
-	if (count >= sizeof(Buf))
-		count = sizeof(Buf) - 1;
+	if (count >= sizeof(tmpbuf))
+		count = sizeof(tmpbuf) - 1;
 	/* Get it from user space */
-	if (copy_from_user(Buf, buf, count))
+	if (copy_from_user(tmpbuf, buf, count))
 		return -EINVAL;
-	Buf[count] = 0;
+	tmpbuf[count] = 0;
 	/* Convert from hex string */
-	if (sscanf(Buf, "%8lX", (unsigned long *) &reg_value) != 1)
+	if (sscanf(tmpbuf, "%8lX", (unsigned long *) &reg_value) != 1)
 		return -EINVAL;
 
-	writel(reg_value, (u32 *) (((u8 *) b2r2_core.hw) +
-			(u32) filp->f_dentry->d_inode->i_private));
+	writel(reg_value, (u32 *)
+		filp->f_dentry->d_inode->i_private);
 
 	*f_pos += count;
 	ret = count;
@@ -2032,9 +1938,9 @@ static int debugfs_b2r2_regs_read(struct file *filp, char __user *buf,
 	size_t dev_size = 0;
 	int ret = 0;
 	int i;
-	char *Buf = kmalloc(sizeof(char) * 4096, GFP_KERNEL);
+	char *tmpbuf = kmalloc(sizeof(char) * 4096, GFP_KERNEL);
 
-	if (Buf == NULL) {
+	if (tmpbuf == NULL) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -2042,11 +1948,12 @@ static int debugfs_b2r2_regs_read(struct file *filp, char __user *buf,
 	/* Build a giant string containing all registers */
 	for (i = 0; i < ARRAY_SIZE(debugfs_regs); i++) {
 		unsigned long value =
-			readl((unsigned long *) (((u8 *) b2r2_core.hw) +
-						 debugfs_regs[i].offset));
-		dev_size += sprintf(Buf + dev_size, "%s: %08lX\n",
-				    debugfs_regs[i].name,
-				    value);
+			readl((u32 *) (((u8 *)
+				filp->f_dentry->d_inode->i_private) +
+				debugfs_regs[i].offset));
+		dev_size += sprintf(tmpbuf + dev_size, "%s: %08lX\n",
+			debugfs_regs[i].name,
+			value);
 	}
 
 	/* No more to read if offset != 0 */
@@ -2056,14 +1963,14 @@ static int debugfs_b2r2_regs_read(struct file *filp, char __user *buf,
 	if (*f_pos + count > dev_size)
 		count = dev_size - *f_pos;
 
-	if (copy_to_user(buf, Buf, count))
+	if (copy_to_user(buf, tmpbuf, count))
 		ret = -EINVAL;
 	*f_pos += count;
 	ret = count;
 
 out:
-	if (Buf != NULL)
-		kfree(Buf);
+	if (tmpbuf != NULL)
+		kfree(tmpbuf);
 	return ret;
 }
 
@@ -2091,29 +1998,31 @@ static int debugfs_b2r2_stat_read(struct file *filp, char __user *buf,
 	size_t dev_size = 0;
 	int ret = 0;
 	int i = 0;
-	char *Buf = kmalloc(sizeof(char) * 4096, GFP_KERNEL);
+	char *tmpbuf = kmalloc(sizeof(char) * 4096, GFP_KERNEL);
+	struct b2r2_core *core = filp->f_dentry->d_inode->i_private;
 
-	if (Buf == NULL) {
+	if (tmpbuf == NULL) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
 	/* Build a string containing all statistics */
-	dev_size += sprintf(Buf + dev_size, "Interrupts: %lu\n",
-			    b2r2_core.stat_n_irq);
-	dev_size += sprintf(Buf + dev_size, "Added jobs: %lu\n",
-			    b2r2_core.stat_n_jobs_added);
-	dev_size += sprintf(Buf + dev_size, "Removed jobs: %lu\n",
-			    b2r2_core.stat_n_jobs_removed);
-	dev_size += sprintf(Buf + dev_size, "Jobs in prio list: %lu\n",
-			    b2r2_core.stat_n_jobs_in_prio_list);
-	dev_size += sprintf(Buf + dev_size, "Active jobs: %lu\n",
-			    b2r2_core.n_active_jobs);
-	for (i = 0; i < ARRAY_SIZE(b2r2_core.active_jobs); i++)
-		dev_size += sprintf(Buf + dev_size, "Job in queue %d: %p\n",
-				    i, b2r2_core.active_jobs[i]);
-	dev_size += sprintf(Buf + dev_size, "Clock requests: %lu\n",
-			    b2r2_core.clock_request_count);
+	dev_size += sprintf(tmpbuf + dev_size, "Interrupts        : %lu\n",
+			core->stat_n_irq);
+	dev_size += sprintf(tmpbuf + dev_size, "Added jobs        : %lu\n",
+			core->stat_n_jobs_added);
+	dev_size += sprintf(tmpbuf + dev_size, "Removed jobs      : %lu\n",
+			core->stat_n_jobs_removed);
+	dev_size += sprintf(tmpbuf + dev_size, "Jobs in prio list : %lu\n",
+			core->stat_n_jobs_in_prio_list);
+	dev_size += sprintf(tmpbuf + dev_size, "Active jobs       : %lu\n",
+			core->n_active_jobs);
+	for (i = 0; i < ARRAY_SIZE(core->active_jobs); i++)
+		dev_size += sprintf(tmpbuf + dev_size,
+				"   Job in queue %d : 0x%08lx\n",
+				i, (unsigned long) core->active_jobs[i]);
+	dev_size += sprintf(tmpbuf + dev_size, "Clock requests    : %lu\n",
+			core->clock_request_count);
 
 	/* No more to read if offset != 0 */
 	if (*f_pos > dev_size)
@@ -2122,14 +2031,14 @@ static int debugfs_b2r2_stat_read(struct file *filp, char __user *buf,
 	if (*f_pos + count > dev_size)
 		count = dev_size - *f_pos;
 
-	if (copy_to_user(buf, Buf, count))
+	if (copy_to_user(buf, tmpbuf, count))
 		ret = -EINVAL;
 	*f_pos += count;
 	ret = count;
 
 out:
-	if (Buf != NULL)
-		kfree(Buf);
+	if (tmpbuf != NULL)
+		kfree(tmpbuf);
 	return ret;
 }
 
@@ -2156,13 +2065,14 @@ static int debugfs_b2r2_clock_read(struct file *filp, char __user *buf,
 				   size_t count, loff_t *f_pos)
 {
 	/* 10 characters hex number + newline + string terminator; */
-	char Buf[10+2];
+	char tmpbuf[10+2];
 	size_t dev_size;
 	int ret = 0;
+	struct b2r2_core *core = filp->f_dentry->d_inode->i_private;
 
-	unsigned long value = clk_get_rate(b2r2_core.b2r2_clock);
+	unsigned long value = clk_get_rate(core->b2r2_clock);
 
-	dev_size = sprintf(Buf, "%#010lX\n", value);
+	dev_size = sprintf(tmpbuf, "%#010lx\n", value);
 
 	/* No more to read if offset != 0 */
 	if (*f_pos > dev_size)
@@ -2171,7 +2081,7 @@ static int debugfs_b2r2_clock_read(struct file *filp, char __user *buf,
 	if (*f_pos + count > dev_size)
 		count = dev_size - *f_pos;
 
-	if (copy_to_user(buf, Buf, count))
+	if (copy_to_user(buf, tmpbuf, count))
 		ret = -EINVAL;
 	*f_pos += count;
 	ret = count;
@@ -2193,19 +2103,19 @@ out:
 static int debugfs_b2r2_clock_write(struct file *filp, const char __user *buf,
 				    size_t count, loff_t *f_pos)
 {
-	char Buf[80];
+	char tmpbuf[80];
 	u32 reg_value;
 	int ret = 0;
 
-	if (count >= sizeof(Buf))
-		count = sizeof(Buf) - 1;
-	if (copy_from_user(Buf, buf, count))
+	if (count >= sizeof(tmpbuf))
+		count = sizeof(tmpbuf) - 1;
+	if (copy_from_user(tmpbuf, buf, count))
 		return -EINVAL;
-	Buf[count] = 0;
-	if (sscanf(Buf, "%8lX", (unsigned long *) &reg_value) != 1)
+	tmpbuf[count] = 0;
+	if (sscanf(tmpbuf, "%8lX", (unsigned long *) &reg_value) != 1)
 		return -EINVAL;
 
-	/*not working yet*/
+	/* NOTE: Not working yet */
 	/*clk_set_rate(b2r2_core.b2r2_clock, (unsigned long) reg_value);*/
 
 	*f_pos += count;
@@ -2223,10 +2133,91 @@ static const struct file_operations debugfs_b2r2_clock_fops = {
 	.write = debugfs_b2r2_clock_write,
 };
 
+/**
+ * debugfs_b2r2_enabled_read() - Implements debugfs read for
+ *                             B2R2 Core Enable/Disable
+ * @filp: File pointer
+ * @buf: User space buffer
+ * @count: Number of bytes to read
+ * @f_pos: File position
+ *
+ * Returns number of bytes read or negative error code
+ */
+static int debugfs_b2r2_enabled_read(struct file *filp, char __user *buf,
+				   size_t count, loff_t *f_pos)
+{
+	/* 4 characters hex number + newline + string terminator; */
+	char tmpbuf[4+2];
+	size_t dev_size;
+	int ret = 0;
+	struct b2r2_core *core = filp->f_dentry->d_inode->i_private;
+
+	dev_size = sprintf(tmpbuf, "%02X\n", core->control->enabled);
+
+	/* No more to read if offset != 0 */
+	if (*f_pos > dev_size)
+		goto out;
+
+	if (*f_pos + count > dev_size)
+		count = dev_size - *f_pos;
+
+	if (copy_to_user(buf, tmpbuf, count))
+		ret = -EINVAL;
+	*f_pos += count;
+	ret = count;
+out:
+	return ret;
+}
+
+/**
+ * debugfs_b2r2_enabled_write() - Implements debugfs write for
+ *                              B2R2 Core Enable/Disable
+ * @filp: File pointer
+ * @buf: User space buffer
+ * @count: Number of bytes to write
+ * @f_pos: File position
+ *
+ * Returns number of bytes written or negative error code
+ */
+static int debugfs_b2r2_enabled_write(struct file *filp, const char __user *buf,
+				    size_t count, loff_t *f_pos)
+{
+	char tmpbuf[80];
+	unsigned int enable;
+	int ret = 0;
+	struct b2r2_core *core = filp->f_dentry->d_inode->i_private;
+
+	if (count >= sizeof(tmpbuf))
+		count = sizeof(tmpbuf) - 1;
+	if (copy_from_user(tmpbuf, buf, count))
+		return -EINVAL;
+	tmpbuf[count] = 0;
+	if (sscanf(tmpbuf, "%02X", &enable) != 1)
+		return -EINVAL;
+
+	if (enable)
+		core->control->enabled = true;
+	else
+		core->control->enabled = false;
+
+	*f_pos += count;
+	ret = count;
+
+	return ret;
+}
+
+/**
+ * debugfs_b2r2_enabled_fops() - File operations for B2R2 Core Enable/Disable debugfs
+ */
+static const struct file_operations debugfs_b2r2_enabled_fops = {
+	.owner = THIS_MODULE,
+	.read  = debugfs_b2r2_enabled_read,
+	.write = debugfs_b2r2_enabled_write,
+};
+
 #endif
 
 /**
- *
  * init_hw() - B2R2 Hardware reset & initiliaze
  *
  * @pdev: B2R2 platform device
@@ -2244,42 +2235,41 @@ static const struct file_operations debugfs_b2r2_clock_fops = {
  * 5)Driver status reset
  *
  * 6)Recover from any error without any leaks.
- *
  */
-static int init_hw(void)
+static int init_hw(struct b2r2_core *core)
 {
 	int result = 0;
-	u32 uTimeOut = B2R2_DRIVER_TIMEOUT_VALUE;
+	u32 uTimeOut = B2R2_RESET_TIMEOUT_VALUE;
 
 	/* Put B2R2 into reset */
-	clear_interrupts();
+	clear_interrupts(core);
 
-	writel(readl(&b2r2_core.hw->BLT_CTL) | B2R2BLT_CTLGLOBAL_soft_reset,
-		&b2r2_core.hw->BLT_CTL);
-
+	writel(readl(&core->hw->BLT_CTL) | B2R2BLT_CTLGLOBAL_soft_reset,
+		&core->hw->BLT_CTL);
 
 	/* Set up interrupt handler */
-	result = request_irq(b2r2_core.irq, b2r2_irq_handler, 0,
-			     "b2r2-interrupt", 0);
+	result = request_irq(core->irq, b2r2_irq_handler, IRQF_SHARED,
+			     "b2r2-interrupt", core);
 	if (result) {
-		b2r2_log_err("%s: failed to register IRQ for B2R2\n", __func__);
+		b2r2_log_err(core->dev,
+			"%s: failed to register IRQ for B2R2\n", __func__);
 		goto b2r2_init_request_irq_failed;
 	}
 
-	b2r2_log_info("do a global reset..\n");
+	b2r2_log_info(core->dev, "do a global reset..\n");
 
 	/* Release reset */
-	writel(0x00000000, &b2r2_core.hw->BLT_CTL);
+	writel(0x00000000, &core->hw->BLT_CTL);
 
-	b2r2_log_info("wait for B2R2 to be idle..\n");
+	b2r2_log_info(core->dev, "wait for B2R2 to be idle..\n");
 
-	/** Wait for B2R2 to be idle (on a timeout rather than while loop) */
+	/* Wait for B2R2 to be idle (on a timeout rather than while loop) */
 	while ((uTimeOut > 0) &&
-	       ((readl(&b2r2_core.hw->BLT_STA1) &
+	       ((readl(&core->hw->BLT_STA1) &
 		 B2R2BLT_STA1BDISP_IDLE) == 0x0))
 		uTimeOut--;
 	if (uTimeOut == 0) {
-		b2r2_log_err(
+		b2r2_log_err(core->dev,
 			 "%s: B2R2 not idle after SW reset\n", __func__);
 		result = -EAGAIN;
 		goto b2r2_core_init_hw_timeout;
@@ -2287,85 +2277,86 @@ static int init_hw(void)
 
 #ifdef CONFIG_DEBUG_FS
 	/* Register debug fs files for register access */
-	if (b2r2_core.debugfs_root_dir && !b2r2_core.debugfs_regs_dir) {
+	if (!IS_ERR_OR_NULL(core->debugfs_core_root_dir) &&
+			IS_ERR_OR_NULL(core->debugfs_regs_dir)) {
+		core->debugfs_regs_dir = debugfs_create_dir("regs",
+				core->debugfs_core_root_dir);
+	}
+	if (!IS_ERR_OR_NULL(core->debugfs_regs_dir)) {
 		int i;
-		b2r2_core.debugfs_regs_dir = debugfs_create_dir("regs",
-				b2r2_core.debugfs_root_dir);
-		debugfs_create_file("all", 0666, b2r2_core.debugfs_regs_dir,
-				0, &debugfs_b2r2_regs_fops);
+		debugfs_create_file("all", 0666, core->debugfs_regs_dir,
+				(void *)core->hw, &debugfs_b2r2_regs_fops);
 		/* Create debugfs entries for all static registers */
 		for (i = 0; i < ARRAY_SIZE(debugfs_regs); i++)
 			debugfs_create_file(debugfs_regs[i].name, 0666,
-					b2r2_core.debugfs_regs_dir,
-					(void *) debugfs_regs[i].offset,
+					core->debugfs_regs_dir,
+					(void *)(((u8 *) core->hw) +
+							debugfs_regs[i].offset),
 					&debugfs_b2r2_reg_fops);
 	}
 #endif
 
-	b2r2_log_info("%s ended..\n", __func__);
+	b2r2_log_info(core->dev, "%s ended..\n", __func__);
 	return result;
 
-/** Recover from any error without any leaks */
-
+	/* Recover from any error without any leaks */
 b2r2_core_init_hw_timeout:
-
-	/** Free B2R2 interrupt handler */
-
-	free_irq(b2r2_core.irq, 0);
+	/* Free B2R2 interrupt handler */
+	free_irq(core->irq, core);
 
 b2r2_init_request_irq_failed:
-
-	if (b2r2_core.hw)
-		iounmap(b2r2_core.hw);
-	b2r2_core.hw = NULL;
+	if (core->hw)
+		iounmap(core->hw);
+	core->hw = NULL;
 
 	return result;
-
 }
 
 
 /**
  * exit_hw() - B2R2 Hardware exit
  *
- * b2r2_core.lock _must_ NOT be held
+ * core->lock _must_ NOT be held
  */
-static void exit_hw(void)
+static void exit_hw(struct b2r2_core *core)
 {
 	unsigned long flags;
 
-	b2r2_log_info("%s started..\n", __func__);
+	b2r2_log_info(core->dev, "%s started..\n", __func__);
 
 #ifdef CONFIG_DEBUG_FS
 	/* Unregister our debugfs entries */
-	if (b2r2_core.debugfs_regs_dir) {
-		debugfs_remove_recursive(b2r2_core.debugfs_regs_dir);
-		b2r2_core.debugfs_regs_dir = NULL;
+	if (!IS_ERR_OR_NULL(core->debugfs_regs_dir)) {
+		debugfs_remove_recursive(core->debugfs_regs_dir);
+		core->debugfs_regs_dir = NULL;
 	}
 #endif
-	b2r2_log_debug("%s: locking b2r2_core.lock\n", __func__);
-	spin_lock_irqsave(&b2r2_core.lock, flags);
+	b2r2_log_debug(core->dev, "%s: locking core->lock\n", __func__);
+	spin_lock_irqsave(&core->lock, flags);
 
 	/* Cancel all pending jobs */
-	b2r2_log_debug("%s: canceling pending jobs\n", __func__);
-	exit_job_list(&b2r2_core.prio_queue);
+	b2r2_log_debug(core->dev, "%s: canceling pending jobs\n", __func__);
+	exit_job_list(core, &core->prio_queue);
 
-	/* Soft reset B2R2 (Close all DMA,
-	   reset all state to idle, reset regs)*/
-	b2r2_log_debug("%s: putting b2r2 in reset\n", __func__);
-	writel(readl(&b2r2_core.hw->BLT_CTL) | B2R2BLT_CTLGLOBAL_soft_reset,
-		&b2r2_core.hw->BLT_CTL);
+	/*
+	 * Soft reset B2R2 (Close all DMA,
+	 * reset all state to idle, reset regs)
+	 */
+	b2r2_log_debug(core->dev, "%s: putting b2r2 in reset\n", __func__);
+	writel(readl(&core->hw->BLT_CTL) | B2R2BLT_CTLGLOBAL_soft_reset,
+		&core->hw->BLT_CTL);
 
-	b2r2_log_debug("%s: clearing interrupts\n", __func__);
-	clear_interrupts();
+	b2r2_log_debug(core->dev, "%s: clearing interrupts\n", __func__);
+	clear_interrupts(core);
 
-	/** Free B2R2 interrupt handler */
-	b2r2_log_debug("%s: freeing interrupt handler\n", __func__);
-	free_irq(b2r2_core.irq, 0);
+	/* Free B2R2 interrupt handler */
+	b2r2_log_debug(core->dev, "%s: freeing interrupt handler\n", __func__);
+	free_irq(core->irq, core);
 
-	b2r2_log_debug("%s: unlocking b2r2_core.lock\n", __func__);
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
+	b2r2_log_debug(core->dev, "%s: unlocking core->lock\n", __func__);
+	spin_unlock_irqrestore(&core->lock, flags);
 
-	b2r2_log_info("%s ended...\n", __func__);
+	b2r2_log_info(core->dev, "%s ended...\n", __func__);
 }
 
 /**
@@ -2376,143 +2367,260 @@ static void exit_hw(void)
 static int b2r2_probe(struct platform_device *pdev)
 {
 	int ret = 0;
-	struct resource *res;
+	struct resource *res = NULL;
+	struct b2r2_core *core = NULL;
+	struct b2r2_control *control = NULL;
+	struct b2r2_platform_data *pdata = NULL;
+	int debug_init = 0;
 
 	BUG_ON(pdev == NULL);
+	BUG_ON(pdev->id < 0 || pdev->id >= B2R2_MAX_NBR_DEVICES);
 
-	ret = b2r2_debug_init(&pdev->dev);
-	if (ret < 0) {
-		dev_err(b2r2_core.log_dev, "b2r2_debug_init failed\n");
-		goto b2r2_probe_debug_init_failed;
+	pdata = pdev->dev.platform_data;
+
+	core = kzalloc(sizeof(*core), GFP_KERNEL);
+	if (!core) {
+		dev_err(&pdev->dev, "b2r2 core alloc failed\n");
+		ret = -EINVAL;
+		goto error_exit;
 	}
 
-	b2r2_core.log_dev = &pdev->dev;
-	b2r2_log_info("init started.\n");
+	core->dev = &pdev->dev;
+	dev_set_drvdata(core->dev, core);
+	if (pdev->id)
+		snprintf(core->name, sizeof(core->name), "b2r2_%d", pdev->id);
+	else
+		snprintf(core->name, sizeof(core->name), "b2r2");
+
+	dev_info(&pdev->dev, "init started.\n");
 
 	/* Init spin locks */
-	spin_lock_init(&b2r2_core.lock);
+	spin_lock_init(&core->lock);
 
 	/* Init job queues */
-	INIT_LIST_HEAD(&b2r2_core.prio_queue);
+	INIT_LIST_HEAD(&core->prio_queue);
 
 #ifdef HANDLE_TIMEOUTED_JOBS
 	/* Create work queue for callbacks & timeout */
-	INIT_DELAYED_WORK(&b2r2_core.timeout_work, timeout_work_function);
+	INIT_DELAYED_WORK(&core->timeout_work, timeout_work_function);
 #endif
 
 	/* Work queue for callbacks and timeout management */
-	b2r2_core.work_queue = create_workqueue("B2R2");
-	if (!b2r2_core.work_queue) {
+	core->work_queue = create_workqueue("B2R2");
+	if (!core->work_queue) {
 		ret = -ENOMEM;
-		goto b2r2_probe_no_work_queue;
+		goto error_exit;
 	}
 
 	/* Get the clock for B2R2 */
-	b2r2_core.b2r2_clock = clk_get(&pdev->dev, "b2r2");
-	if (IS_ERR(b2r2_core.b2r2_clock)) {
-		ret = PTR_ERR(b2r2_core.b2r2_clock);
-		b2r2_log_err("clk_get b2r2 failed\n");
-		goto b2r2_probe_no_clk;
+	core->b2r2_clock = clk_get(core->dev, pdata->clock_id);
+	if (IS_ERR(core->b2r2_clock)) {
+		ret = PTR_ERR(core->b2r2_clock);
+		dev_err(&pdev->dev, "clk_get %s failed\n", pdata->clock_id);
+		goto error_exit;
 	}
 
 	/* Get the B2R2 regulator */
-	b2r2_core.b2r2_reg = regulator_get(&pdev->dev, "vsupply");
-	if (IS_ERR(b2r2_core.b2r2_reg)) {
-		ret = PTR_ERR(b2r2_core.b2r2_reg);
-		b2r2_log_err("regulator_get vsupply failed (dev_name=%s)\n",
-				dev_name(&pdev->dev));
-		goto b2r2_probe_no_reg;
+	core->b2r2_reg = regulator_get(core->dev, pdata->regulator_id);
+	if (IS_ERR(core->b2r2_reg)) {
+		ret = PTR_ERR(core->b2r2_reg);
+		dev_err(&pdev->dev, "regulator_get %s failed "
+			"(dev_name=%s)\n", pdata->regulator_id,
+			dev_name(core->dev));
+		goto error_exit;
 	}
 
 	/* Init power management */
-	mutex_init(&b2r2_core.domain_lock);
-	INIT_DELAYED_WORK_DEFERRABLE(&b2r2_core.domain_disable_work,
+	mutex_init(&core->domain_lock);
+	INIT_DELAYED_WORK_DEFERRABLE(&core->domain_disable_work,
 			domain_disable_work_function);
-	b2r2_core.domain_enabled = false;
+	core->domain_enabled = false;
+	core->valid = false;
+	core->lockdown = false;
 
 	/* Map B2R2 into kernel virtual memory space */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (res == NULL)
-		goto b2r2_probe_no_res;
+		goto error_exit;
 
 	/* Hook up irq */
-	b2r2_core.irq = platform_get_irq(pdev, 0);
-	if (b2r2_core.irq <= 0) {
-		b2r2_log_info("%s: Failed to request irq (irq=%d)\n", __func__,
-								b2r2_core.irq);
-		goto b2r2_failed_irq_get;
+	core->irq = platform_get_irq(pdev, 0);
+	if (core->irq <= 0) {
+		dev_err(&pdev->dev, "%s: Failed to request irq (irq=%d)\n",
+			__func__, core->irq);
+		goto error_exit;
 	}
 
-	b2r2_core.hw = (struct b2r2_memory_map *) ioremap(res->start,
+	core->hw = (struct b2r2_memory_map *) ioremap(res->start,
 			 res->end - res->start + 1);
-	if (b2r2_core.hw == NULL) {
-
-		b2r2_log_info("%s: ioremap failed\n", __func__);
+	if (core->hw == NULL) {
+		dev_err(&pdev->dev, "%s: ioremap failed\n", __func__);
 		ret = -ENOMEM;
-		goto b2r2_probe_ioremap_failed;
+		goto error_exit;
 	}
 
-	dev_dbg(b2r2_core.log_dev,
-		"b2r2 structure address %p\n",
-		b2r2_core.hw);
+	dev_dbg(core->dev, "b2r2 structure address %p\n", core->hw);
 
-	/* Initialize b2r2_blt module. FIXME: Module of it's own
-	   or perhaps a dedicated module init c file? */
-	ret = b2r2_blt_module_init();
-	if (ret < 0) {
-		b2r2_log_err("b2r2_blt_module_init failed\n");
-		goto b2r2_probe_blt_init_fail;
+	control = kzalloc(sizeof(*control), GFP_KERNEL);
+	if (!control) {
+		dev_err(&pdev->dev, "b2r2 control alloc failed\n");
+		ret = -EINVAL;
+		goto error_exit;
 	}
 
-	b2r2_core.op_size = B2R2_PLUG_OPCODE_SIZE_DEFAULT;
-	b2r2_core.ch_size = B2R2_PLUG_CHUNK_SIZE_DEFAULT;
-	b2r2_core.pg_size = B2R2_PLUG_PAGE_SIZE_DEFAULT;
-	b2r2_core.mg_size = B2R2_PLUG_MESSAGE_SIZE_DEFAULT;
-	b2r2_core.min_req_time = 0;
+	control->data = (void *)core;
+	control->id = pdev->id;
+	control->dev = &pdev->dev; /* Temporary device */
+
+	core->op_size = B2R2_PLUG_OPCODE_SIZE_DEFAULT;
+	core->ch_size = B2R2_PLUG_CHUNK_SIZE_DEFAULT;
+	core->pg_size = B2R2_PLUG_PAGE_SIZE_DEFAULT;
+	core->mg_size = B2R2_PLUG_MESSAGE_SIZE_DEFAULT;
+	core->min_req_time = 0;
 
 #ifdef CONFIG_DEBUG_FS
-	b2r2_core.debugfs_root_dir = debugfs_create_dir("b2r2", NULL);
-	debugfs_create_file("stat", 0666, b2r2_core.debugfs_root_dir,
-			0, &debugfs_b2r2_stat_fops);
-	debugfs_create_file("clock", 0666, b2r2_core.debugfs_root_dir,
-			0, &debugfs_b2r2_clock_fops);
+	core->debugfs_root_dir = debugfs_create_dir(core->name, NULL);
+	if (!IS_ERR_OR_NULL(core->debugfs_root_dir)) {
+		core->debugfs_core_root_dir = debugfs_create_dir("core",
+				core->debugfs_root_dir);
+		control->debugfs_debug_root_dir = debugfs_create_dir("debug",
+				core->debugfs_root_dir);
+		control->mem_heap.debugfs_root_dir = debugfs_create_dir("mem",
+				core->debugfs_root_dir);
+		control->debugfs_root_dir = debugfs_create_dir("blt",
+				core->debugfs_root_dir);
+	}
 
-	debugfs_create_u8("op_size", 0666, b2r2_core.debugfs_root_dir,
-			&b2r2_core.op_size);
-	debugfs_create_u8("ch_size", 0666, b2r2_core.debugfs_root_dir,
-			&b2r2_core.ch_size);
-	debugfs_create_u8("pg_size", 0666, b2r2_core.debugfs_root_dir,
-			&b2r2_core.pg_size);
-	debugfs_create_u8("mg_size", 0666, b2r2_core.debugfs_root_dir,
-			&b2r2_core.mg_size);
-	debugfs_create_u16("min_req_time", 0666, b2r2_core.debugfs_root_dir,
-			&b2r2_core.min_req_time);
+	if (!IS_ERR_OR_NULL(core->debugfs_core_root_dir)) {
+		debugfs_create_file("stats", 0666, core->debugfs_core_root_dir,
+				core, &debugfs_b2r2_stat_fops);
+		debugfs_create_file("clock", 0666, core->debugfs_core_root_dir,
+				core, &debugfs_b2r2_clock_fops);
+		debugfs_create_file("enabled", 0666,
+				core->debugfs_core_root_dir,
+				core, &debugfs_b2r2_enabled_fops);
+		debugfs_create_u8("op_size", 0666, core->debugfs_core_root_dir,
+				&core->op_size);
+		debugfs_create_u8("ch_size", 0666, core->debugfs_core_root_dir,
+				&core->ch_size);
+		debugfs_create_u8("pg_size", 0666, core->debugfs_core_root_dir,
+				&core->pg_size);
+		debugfs_create_u8("mg_size", 0666, core->debugfs_core_root_dir,
+				&core->mg_size);
+		debugfs_create_u16("min_req_time", 0666,
+			core->debugfs_core_root_dir, &core->min_req_time);
+	}
 #endif
 
-	b2r2_log_info("init done.\n");
+	ret = b2r2_debug_init(control);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "b2r2_debug_init failed\n");
+		goto error_exit;
+	}
+	debug_init = 1;
+
+	/* Initialize b2r2_control */
+	ret = b2r2_control_init(control);
+	if (ret < 0) {
+		b2r2_log_err(&pdev->dev, "b2r2_control_init failed\n");
+		goto error_exit;
+	}
+	core->control = control;
+
+	/* Add the control to the blitter */
+	kref_init(&control->ref);
+	control->enabled = true;
+	control->bypass = false;
+	b2r2_blt_add_control(control);
+
+	b2r2_core[pdev->id] = core;
+	dev_info(&pdev->dev, "%s done.\n", __func__);
 
 	return ret;
 
-/** Recover from any error if something fails */
-b2r2_probe_blt_init_fail:
-b2r2_probe_ioremap_failed:
-b2r2_failed_irq_get:
-b2r2_probe_no_res:
-	regulator_put(b2r2_core.b2r2_reg);
-b2r2_probe_no_reg:
-	clk_put(b2r2_core.b2r2_clock);
-b2r2_probe_no_clk:
-	destroy_workqueue(b2r2_core.work_queue);
-	b2r2_core.work_queue = NULL;
-b2r2_probe_no_work_queue:
+	/* Recover from any error if something fails */
+error_exit:
+	kfree(control);
 
-	b2r2_log_info("init done with errors.\n");
-b2r2_probe_debug_init_failed:
+	if (!IS_ERR_OR_NULL(core->b2r2_reg))
+		regulator_put(core->b2r2_reg);
+
+	if (!IS_ERR_OR_NULL(core->b2r2_clock))
+		clk_put(core->b2r2_clock);
+
+	if (!IS_ERR_OR_NULL(core->work_queue))
+		destroy_workqueue(core->work_queue);
+
+	if (debug_init)
+		b2r2_debug_exit();
+
+#ifdef CONFIG_DEBUG_FS
+	if (!IS_ERR_OR_NULL(core->debugfs_root_dir)) {
+		debugfs_remove_recursive(core->debugfs_root_dir);
+		core->debugfs_root_dir = NULL;
+	}
+#endif
+	kfree(core);
+
+	dev_info(&pdev->dev, "%s done with errors (%d).\n", __func__, ret);
 
 	return ret;
-
 }
 
+void b2r2_core_release(struct kref *control_ref)
+{
+	struct b2r2_control *control = container_of(
+			control_ref, struct b2r2_control, ref);
+	struct b2r2_core *core = control->data;
+	int id = control->id;
+	unsigned long flags;
+#ifdef CONFIG_B2R2_DEBUG
+	struct device *dev = core->dev;
+#endif
+
+	b2r2_log_info(dev, "%s: enter\n", __func__);
+
+	/* Exit b2r2 control module */
+	b2r2_control_exit(control);
+	kfree(control);
+	b2r2_debug_exit();
+
+#ifdef HANDLE_TIMEOUTED_JOBS
+	cancel_delayed_work(&core->timeout_work);
+#endif
+
+	/*
+	 * Flush B2R2 work queue (call all callbacks for
+	 * cancelled jobs)
+	 */
+	flush_workqueue(core->work_queue);
+
+	/* Make sure the power is turned off */
+	cancel_delayed_work_sync(&core->domain_disable_work);
+
+	/* Unmap B2R2 registers */
+	b2r2_log_info(dev, "%s: unmap b2r2 registers..\n", __func__);
+	if (core->hw) {
+		iounmap(core->hw);
+		core->hw = NULL;
+	}
+
+	destroy_workqueue(core->work_queue);
+
+	spin_lock_irqsave(&core->lock, flags);
+	core->work_queue = NULL;
+	spin_unlock_irqrestore(&core->lock, flags);
+
+	/* Return the clock */
+	clk_put(core->b2r2_clock);
+	regulator_put(core->b2r2_reg);
+
+	core->dev = NULL;
+	kfree(core);
+	b2r2_core[id] = NULL;
+
+	b2r2_log_info(dev, "%s: exit\n", __func__);
+}
 
 
 /**
@@ -2522,84 +2630,131 @@ b2r2_probe_debug_init_failed:
  */
 static int b2r2_remove(struct platform_device *pdev)
 {
-	unsigned long flags;
+	struct b2r2_core *core;
 
 	BUG_ON(pdev == NULL);
 
-	b2r2_log_info("%s started\n", __func__);
+	core = dev_get_drvdata(&pdev->dev);
+	BUG_ON(core == NULL);
+	b2r2_log_info(&pdev->dev, "%s: Started\n", __func__);
 
 #ifdef CONFIG_DEBUG_FS
-	debugfs_remove_recursive(b2r2_core.debugfs_root_dir);
+	if (!IS_ERR_OR_NULL(core->debugfs_root_dir)) {
+		debugfs_remove_recursive(core->debugfs_root_dir);
+		core->debugfs_root_dir = NULL;
+	}
 #endif
 
 	/* Flush B2R2 work queue (call all callbacks) */
-	flush_workqueue(b2r2_core.work_queue);
+	flush_workqueue(core->work_queue);
 
-	/* Exit b2r2 blt module */
-	b2r2_blt_module_exit();
+	/* Remove control from blitter */
+	core->control->enabled = false;
+	b2r2_blt_remove_control(core->control);
+	kref_put(&core->control->ref, b2r2_core_release);
 
-#ifdef HANDLE_TIMEOUTED_JOBS
-	cancel_delayed_work(&b2r2_core.timeout_work);
-#endif
-
-	/* Flush B2R2 work queue (call all callbacks for
-	   cancelled jobs) */
-	flush_workqueue(b2r2_core.work_queue);
-
-	/* Make sure the power is turned off */
-	cancel_delayed_work_sync(&b2r2_core.domain_disable_work);
-
-	/** Unmap B2R2 registers */
-	b2r2_log_info("unmap b2r2 registers..\n");
-	if (b2r2_core.hw) {
-		iounmap(b2r2_core.hw);
-
-		b2r2_core.hw = NULL;
-	}
-
-	destroy_workqueue(b2r2_core.work_queue);
-
-	spin_lock_irqsave(&b2r2_core.lock, flags);
-	b2r2_core.work_queue = NULL;
-	spin_unlock_irqrestore(&b2r2_core.lock, flags);
-
-	/* Return the clock */
-	clk_put(b2r2_core.b2r2_clock);
-	regulator_put(b2r2_core.b2r2_reg);
-
-	b2r2_log_info("%s ended\n", __func__);
-
-	b2r2_core.log_dev = NULL;
-
-	b2r2_debug_exit();
+	b2r2_log_info(&pdev->dev, "%s: Ended\n", __func__);
 
 	return 0;
-
 }
+
+/**
+ * b2r2_reset_hold() - This routine resets b2r2 in a controlled fashion and
+ *                     holds the cores in a suspended state.
+ *
+ */
+int b2r2_reset_hold(void)
+{
+	struct b2r2_core *core;
+	int i;
+
+	for (i = 0; i < B2R2_MAX_NBR_DEVICES; i++) {
+		core = b2r2_core[i];
+		if (core) {
+			mutex_lock(&core->domain_lock);
+			core->lockdown = true;
+			core->domain_request_count = 0;
+			exit_hw(core);
+			clk_disable(core->b2r2_clock);
+			regulator_disable(core->b2r2_reg);
+			core->domain_enabled = false;
+
+			/* Flush B2R2 work queue (call all callbacks) */
+			flush_workqueue(core->work_queue);
+
+#ifdef HANDLE_TIMEOUTED_JOBS
+			cancel_delayed_work(&core->timeout_work);
+#endif
+
+			/*
+			 * Flush B2R2 work queue (call all callbacks for
+			 * cancelled jobs)
+			 */
+			flush_workqueue(core->work_queue);
+
+			/* Make sure power is turned off */
+			cancel_delayed_work_sync(&core->domain_disable_work);
+
+			mutex_unlock(&core->domain_lock);
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * b2r2_reset_release() - This routine lets go of the b2r2 reset
+ *
+ */
+int b2r2_reset_release(void)
+{
+	struct b2r2_core *core;
+	int i;
+
+	for (i = 0; i < B2R2_MAX_NBR_DEVICES; i++) {
+		core = b2r2_core[i];
+		if (core) {
+			mutex_lock(&core->domain_lock);
+			core->lockdown = false;
+			mutex_unlock(&core->domain_lock);
+		}
+	}
+
+	return 0;
+}
+
 /**
  * b2r2_suspend() - This routine puts the B2R2 device in to sustend state.
  * @pdev: platform device.
  *
- * This routine stores the current state of the b2r2 device and puts in to suspend state.
+ * This routine stores the current state of the b2r2 device and puts in to
+ * suspend state.
  *
  */
-int b2r2_suspend(struct platform_device *pdev, pm_message_t state)
+static int b2r2_suspend(struct platform_device *pdev, pm_message_t state)
 {
-	b2r2_log_info("%s\n", __func__);
+	struct b2r2_core *core;
+
+	BUG_ON(pdev == NULL);
+	core = dev_get_drvdata(&pdev->dev);
+	BUG_ON(core == NULL);
+	b2r2_log_info(core->dev, "%s\n", __func__);
 
 	/* Flush B2R2 work queue (call all callbacks) */
-	flush_workqueue(b2r2_core.work_queue);
+	flush_workqueue(core->work_queue);
 
 #ifdef HANDLE_TIMEOUTED_JOBS
-	cancel_delayed_work(&b2r2_core.timeout_work);
+	cancel_delayed_work(&core->timeout_work);
 #endif
 
-	/* Flush B2R2 work queue (call all callbacks for
-	   cancelled jobs) */
-	flush_workqueue(b2r2_core.work_queue);
+	/*
+	 * Flush B2R2 work queue (call all callbacks for
+	 * cancelled jobs)
+	 */
+	flush_workqueue(core->work_queue);
 
 	/* Make sure power is turned off */
-	cancel_delayed_work_sync(&b2r2_core.domain_disable_work);
+	cancel_delayed_work_sync(&core->domain_disable_work);
 
 	return 0;
 }
@@ -2612,11 +2767,33 @@ int b2r2_suspend(struct platform_device *pdev, pm_message_t state)
  * This routine restore back the current state of the b2r2 device resumes.
  *
  */
-int b2r2_resume(struct platform_device *pdev)
+static int b2r2_resume(struct platform_device *pdev)
 {
-	b2r2_log_info("%s\n", __func__);
+	struct b2r2_core *core;
+
+	BUG_ON(pdev == NULL);
+	core = dev_get_drvdata(&pdev->dev);
+	BUG_ON(core == NULL);
+	b2r2_log_info(core->dev, "%s\n", __func__);
 
 	return 0;
+}
+
+void b2r2_core_print_stats(struct b2r2_core *core)
+{
+	b2r2_log_info(core->dev,
+		"%s: n_irq %ld, n_irq_exit %ld, n_irq_skipped %ld,\n"
+		"n_jobs_added %ld, n_active_jobs %ld, "
+		"n_jobs_in_prio_list %ld,\n"
+		"n_jobs_removed %ld\n",
+		__func__,
+		core->stat_n_irq,
+		core->stat_n_irq_exit,
+		core->stat_n_irq_skipped,
+		core->stat_n_jobs_added,
+		core->n_active_jobs,
+		core->stat_n_jobs_in_prio_list,
+		core->stat_n_jobs_removed);
 }
 
 /**
@@ -2628,7 +2805,7 @@ static struct platform_driver platform_b2r2_driver = {
 	.driver = {
 		.name	= "b2r2",
 	},
-	/** TODO implement power mgmt functions */
+	/* TODO implement power mgmt functions */
 	.suspend = b2r2_suspend,
 	.resume =  b2r2_resume,
 };

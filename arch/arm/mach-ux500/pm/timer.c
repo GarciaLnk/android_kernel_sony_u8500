@@ -23,10 +23,12 @@
 #include <linux/io.h>
 #include <linux/ktime.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 
 #include <asm/errno.h>
 
 #include <mach/hardware.h>
+#include <mach/irqs-db8500.h>
 
 #define RTC_IMSC	0x10
 #define RTC_MIS		0x18
@@ -65,14 +67,13 @@
 /* Just a value bigger than any reason able scheduled timeout. */
 #define MEASURE_VAL_LIMIT 0xf0000000
 
-
-#define TICKS_TO_NS(x) ((s64)x * 30512)
-#define US_TO_TICKS(x) ((u32)((1000 * x) / 30512))
+#define TICKS_TO_NS(x) ((s64)x * 30518)
+#define US_TO_TICKS(x) ((u32)((1000 * x) / 30518))
 
 static void __iomem *rtc_base;
 static bool measure_latency;
 
-#ifdef CONFIG_U8500_CPUIDLE_DEBUG
+#ifdef CONFIG_DBX500_CPUIDLE_DEBUG
 
 /*
  * The plan here is to be able to measure the ApSleep/ApDeepSleep exit latency
@@ -144,14 +145,17 @@ void ux500_rtcrtt_measure_latency(bool enable)
 		measure_latency_start();
 	} else {
 		writel(RTC_TCR_RTTSS | RTC_TCR_RTTOS, rtc_base + RTC_TCR);
-		writel(RTC_ICR_TIC, rtc_base + RTC_ICR);
 		writel(RTC_IMSC_TIMSC, rtc_base + RTC_IMSC);
 	}
 	measure_latency = enable;
 }
 #else
 static inline void measure_latency_start(void) { }
-static inline void ux500_rtcrtt_measure_latency(bool enable) { }
+static inline void ux500_rtcrtt_measure_latency(bool enable)
+{
+	writel(RTC_TCR_RTTSS | RTC_TCR_RTTOS, rtc_base + RTC_TCR);
+	writel(RTC_IMSC_TIMSC, rtc_base + RTC_IMSC);
+}
 #endif
 
 void ux500_rtcrtt_off(void)
@@ -159,10 +163,6 @@ void ux500_rtcrtt_off(void)
 	if (measure_latency) {
 		measure_latency_start();
 	} else {
-		/* Clear eventual interrupts */
-		if (readl(rtc_base + RTC_MIS) & RTC_MIS_RTCTMIS)
-			writel(RTC_ICR_TIC, rtc_base + RTC_ICR);
-
 		/* Disable, self start and oneshot mode */
 		writel(RTC_TCR_RTTSS | RTC_TCR_RTTOS, rtc_base + RTC_TCR);
 	}
@@ -173,16 +173,32 @@ void ux500_rtcrtt_next(u32 time_us)
 	writel(US_TO_TICKS(time_us), rtc_base + RTC_TLR1);
 }
 
+static irqreturn_t rtcrtt_interrupt(int irq, void *data)
+{
+	if (readl(rtc_base + RTC_MIS) & RTC_MIS_RTCTMIS) {
+		/* Clear timer bit, leave clockwatch bit uncleared */
+		writel(RTC_ICR_TIC, rtc_base + RTC_ICR);
+		return IRQ_HANDLED;
+	}
+
+	return IRQ_NONE;
+}
+
 static int __init ux500_rtcrtt_init(void)
 {
-	if (cpu_is_u8500()) {
+	if (cpu_is_u8500() || cpu_is_u9540()) {
 		rtc_base  = __io_address(U8500_RTC_BASE);
-	} else if (cpu_is_u5500()) {
-		rtc_base  = __io_address(U5500_RTC_BASE);
 	} else {
 		pr_err("timer-rtt: Unknown DB Asic!\n");
 		return -EINVAL;
 	}
+
+	if (request_irq(IRQ_DB8500_RTC, rtcrtt_interrupt,
+			IRQF_SHARED | IRQF_NO_SUSPEND,
+			"rtc-pl031-timer", rtc_base)) {
+		pr_err("rtc-rtt: failed to register irq\n");
+	}
+
 	ux500_rtcrtt_measure_latency(false);
 	return 0;
 }

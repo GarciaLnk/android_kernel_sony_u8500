@@ -14,17 +14,21 @@
 #include <linux/kobject.h>
 #include <linux/slab.h>
 #include <linux/mfd/abx500.h>
+#include <linux/mfd/ab8500.h>
 #include <linux/regulator/ab8500-debug.h>
 #include <linux/io.h>
+
 #include <mach/db8500-regs.h> /* U8500_BACKUPRAM1_BASE */
 #include <mach/hardware.h>
 
+#include "ab8500-debug.h"
+
 /* board profile address - to determine if suspend-force is default */
-#define BOOT_INFO_BACKUPRAM1 (U8500_BACKUPRAM1_BASE + 0xffc)
+#define BOOT_INFO_BACKUPRAM1 (U8500_BACKUPRAM1_BASE + 0xf7c)
 #define BOARD_PROFILE_BACKUPRAM1 (0x3)
 
 /* board profile option */
-#define OPTION_BOARD_VERSION_V5X 50
+#define OPTION_BOARD_VERSION_500_V5X 1010
 
 /* for error prints */
 struct device *dev;
@@ -74,6 +78,7 @@ enum ab8500_register_id {
 	AB8500_REGU_SW_HP_REQ_VALID2,
 	AB8500_REGU_SYSCLK_REQ1_VALID,
 	AB8500_REGU_SYSCLK_REQ2_VALID,
+	AB9540_REGU_VAUX4_REQ_VALID,
 	AB8500_REGU_MISC1,
 	AB8500_REGU_OTG_SUPPLY_CTRL,
 	AB8500_REGU_VUSB_CTRL,
@@ -96,6 +101,9 @@ enum ab8500_register_id {
 	AB8500_REGU_VAPE_SEL1,
 	AB8500_REGU_VAPE_SEL2,
 	AB8500_REGU_VAPE_SEL3,
+	AB9540_REGU_VAUX4_REQ_CTRL,
+	AB9540_REGU_VAUX4_REGU,
+	AB9540_REGU_VAUX4_SEL,
 	AB8500_REGU_VBB_SEL1,
 	AB8500_REGU_VBB_SEL2,
 	AB8500_REGU_VSMPS1_SEL1,
@@ -116,10 +124,10 @@ enum ab8500_register_id {
 	AB8500_REGU_VMOD_SEL2,
 	AB8500_REGU_CTRL_DISCH,
 	AB8500_REGU_CTRL_DISCH2,
+	AB9540_REGU_CTRL_DISCH3,
 	AB8500_OTHER_SYSCLK_CTRL, /* Other */
 	AB8500_OTHER_VSIM_SYSCLK_CTRL, /* Other */
 	AB8500_OTHER_SYSULPCLK_CTRL1, /* Other */
-	AB8500_OTHER_TVOUT_CTRL, /* Other */
 	NUM_AB8500_REGISTER
 };
 
@@ -127,6 +135,7 @@ struct ab8500_register {
 	const char *name;
 	u8 bank;
 	u8 addr;
+	u8 unavailable; /* Used to flag when AB doesn't support a register */
 };
 
 static struct ab8500_register
@@ -200,6 +209,12 @@ static struct ab8500_register
 		.name = "ReguSysClkReqValid2",
 		.bank = 0x03,
 		.addr = 0x10,
+	},
+	[AB9540_REGU_VAUX4_REQ_VALID] = {
+		.name = "ReguVaux4ReqValid",
+		.bank = 0x03,
+		.addr = 0x11,
+		.unavailable = true, /* ab9540 register */
 	},
 	[AB8500_REGU_MISC1] = {
 		.name = "ReguMisc1",
@@ -311,6 +326,24 @@ static struct ab8500_register
 		.bank = 0x04,
 		.addr = 0x10,
 	},
+	[AB9540_REGU_VAUX4_REQ_CTRL] = {
+		.name = "Vaux4ReqCtrl",
+		.bank = 0x04,
+		.addr = 0x2d,
+		.unavailable = true, /* ab9540 register */
+	},
+	[AB9540_REGU_VAUX4_REGU] = {
+		.name = "Vaux4Regu",
+		.bank = 0x04,
+		.addr = 0x2e,
+		.unavailable = true, /* ab9540 register */
+	},
+	[AB9540_REGU_VAUX4_SEL] = {
+		.name = "Vaux4Sel",
+		.bank = 0x04,
+		.addr = 0x2f,
+		.unavailable = true, /* ab9540 register */
+	},
 	[AB8500_REGU_VBB_SEL1] = {
 		.name = "VBBSel1",
 		.bank = 0x04,
@@ -411,6 +444,12 @@ static struct ab8500_register
 		.bank = 0x04,
 		.addr = 0x44,
 	},
+	[AB9540_REGU_CTRL_DISCH3] = {
+		.name = "ReguCtrlDisch3",
+		.bank = 0x04,
+		.addr = 0x48,
+		.unavailable = true, /* ab9540 register */
+	},
 	/* Outside regulator banks */
 	[AB8500_OTHER_SYSCLK_CTRL] = {
 		.name = "SysClkCtrl",
@@ -427,12 +466,68 @@ static struct ab8500_register
 		.bank = 0x02,
 		.addr = 0x0b,
 	},
-	[AB8500_OTHER_TVOUT_CTRL] = {
-		.name = "TVoutCtrl",
-		.bank = 0x06,
-		.addr = 0x80,
+};
+
+struct ab9540_register_update {
+	/* Identity of register to be updated */
+	u8 bank;
+	u8 addr;
+	/* New value for unavailable flag */
+	u8 unavailable;
+};
+
+static const struct ab9540_register_update ab9540_update[] = {
+	/* AB8500 register which is unavailable to AB9540 */
+	/* AB8500_REGU_VREF_DDR */
+	{
+		.bank = 0x04,
+		.addr = 0x07,
+		.unavailable = true,
+	},
+
+	/* Registers which were not available to AB8500 but are on the
+	 * AB9540. */
+	/* AB9540_REGU_VAUX4_REQ_VALID */
+	{
+		.bank = 0x03,
+		.addr = 0x11,
+	},
+	/* AB9540_REGU_VAUX4_REQ_CTRL */
+	{
+		.bank = 0x04,
+		.addr = 0x2d,
+	},
+	/* AB9540_REGU_VAUX4_REGU */
+	{
+		.bank = 0x04,
+		.addr = 0x2e,
+	},
+	/* AB9540_REGU_VAUX4_SEL */
+	{
+		.bank = 0x04,
+		.addr = 0x2f,
+	},
+	/* AB9540_REGU_CTRL_DISCH3 */
+	{
+		.bank = 0x04,
+		.addr = 0x48,
 	},
 };
+
+static void ab9540_registers_update(void)
+{
+	int i;
+	int j;
+
+	for (i = 0; i < NUM_AB8500_REGISTER; i++)
+		for (j = 0; j < ARRAY_SIZE(ab9540_update); j++)
+			if (ab8500_register[i].bank == ab9540_update[j].bank &&
+			    ab8500_register[i].addr == ab9540_update[j].addr) {
+				ab8500_register[i].unavailable =
+					ab9540_update[j].unavailable;
+				break;
+			}
+}
 
 static u8 ab8500_register_state[NUM_REGULATOR_STATE][NUM_AB8500_REGISTER];
 static bool ab8500_register_state_saved[NUM_REGULATOR_STATE];
@@ -445,7 +540,7 @@ static int ab8500_regulator_record_state(int state)
 	int ret;
 
 	/* check arguments */
-	if ((state > NUM_REGULATOR_STATE) || (state < 0)) {
+	if ((state >= NUM_REGULATOR_STATE) || (state < 0)) {
 		dev_err(dev, "Wrong state specified\n");
 		return -EINVAL;
 	}
@@ -457,6 +552,9 @@ static int ab8500_regulator_record_state(int state)
 	ab8500_register_state_saved[state] = true;
 
 	for (i = 1; i < NUM_AB8500_REGISTER; i++) {
+		if (ab8500_register[i].unavailable)
+			continue;
+
 		ret = abx500_get_register_interruptible(dev,
 			ab8500_register[i].bank,
 			ab8500_register[i].addr,
@@ -524,6 +622,9 @@ static int ab8500_regulator_dump_print(struct seq_file *s, void *p)
 
 	/* dump registers */
 	for (reg_id = 1; reg_id < NUM_AB8500_REGISTER; reg_id++) {
+		if (ab8500_register[reg_id].unavailable)
+			continue;
+
 		err = seq_printf(s, "%22s 0x%02x%02x:",
 			ab8500_register[reg_id].name,
 			ab8500_register[reg_id].bank,
@@ -563,40 +664,6 @@ static const struct file_operations ab8500_regulator_dump_fops = {
 };
 
 /*
- * regulator status print
- */
-enum ab8500_regulator_id {
-	AB8500_VARM,
-	AB8500_VBBP,
-	AB8500_VBBN,
-	AB8500_VAPE,
-	AB8500_VSMPS1,
-	AB8500_VSMPS2,
-	AB8500_VSMPS3,
-	AB8500_VPLL,
-	AB8500_VREFDDR,
-	AB8500_VMOD,
-	AB8500_VEXTSUPPLY1,
-	AB8500_VEXTSUPPLY2,
-	AB8500_VEXTSUPPLY3,
-	AB8500_VRF1,
-	AB8500_VANA,
-	AB8500_VAUX1,
-	AB8500_VAUX2,
-	AB8500_VAUX3,
-	AB8500_VINTCORE,
-	AB8500_VTVOUT,
-	AB8500_VAUDIO,
-	AB8500_VANAMIC1,
-	AB8500_VANAMIC2,
-	AB8500_VDMIC,
-	AB8500_VUSB,
-	AB8500_VOTG,
-	AB8500_VBUSBIS,
-	AB8500_NUM_REGULATORS,
-};
-
-/*
  * regulator_voltage
  */
 struct regulator_volt {
@@ -628,6 +695,7 @@ struct regulator_volt_range {
  * @vsel_mask
  * @vsel_range
  * @vsel_range_len
+ * @unavailable {true/false depending on whether AB supports the regulator}
  */
 struct ab8500_regulator {
 	const char *name;
@@ -646,6 +714,7 @@ struct ab8500_regulator {
 	u8 vsel_mask[3];
 	struct regulator_volt_range const *vsel_range[3];
 	int vsel_range_len[3];
+	u8 unavailable;
 };
 
 static const char *update_val_name[] = {
@@ -665,23 +734,48 @@ static const char *hw_mode_val_name[] = {
 };
 
 /* voltage selection */
-static const struct regulator_volt_range varm_vape_vmod_vsel[] = {
+/* AB8500 device - Varm_vsel in 12.5mV steps */
+#define AB8500_VARM_VSEL_MASK 0x3f
+static const struct regulator_volt_range ab8500_varm_vsel[] = {
 	{ {0x00,  700000}, {0x01,   12500}, {0x35, 1362500} },
 	{ {0x36, 1362500}, {0x01,       0}, {0x3f, 1362500} },
 };
 
-static const struct regulator_volt_range vbbp_vsel[] = {
+/* AB9540 device - Varm_vsel in 6.25mV steps */
+#define AB9540_VARM_VSEL_MASK 0x7f
+static const struct regulator_volt_range ab9540_varm_vsel[] = {
+	{ {0x00,  600000}, {0x01,    6250}, {0x7f, 1393750} },
+};
+
+static const struct regulator_volt_range vape_vmod_vsel[] = {
+	{ {0x00,  700000}, {0x01,   12500}, {0x35, 1362500} },
+	{ {0x36, 1362500}, {0x01,       0}, {0x3f, 1362500} },
+};
+
+/* AB8500 device - Vbbp_vsel and Vbbn_sel in 100mV steps */
+static const struct regulator_volt_range ab8500_vbbp_vsel[] = {
 	{ {0x00,       0}, {0x10,  100000}, {0x40,  400000} },
 	{ {0x50,  400000}, {0x10,       0}, {0x70,  400000} },
 	{ {0x80, -400000}, {0x10,       0}, {0xb0, -400000} },
 	{ {0xc0, -400000}, {0x10,  100000}, {0xf0, -100000} },
 };
 
-static const struct regulator_volt_range vbbn_vsel[] = {
+static const struct regulator_volt_range ab8500_vbbn_vsel[] = {
 	{ {0x00,       0}, {0x01, -100000}, {0x04, -400000} },
 	{ {0x05, -400000}, {0x01,       0}, {0x07, -400000} },
 	{ {0x08,       0}, {0x01,  100000}, {0x0c,  400000} },
 	{ {0x0d,  400000}, {0x01,       0}, {0x0f,  400000} },
+};
+
+/* AB9540 device - Vbbp_vsel and Vbbn_sel in 50mV steps */
+static const struct regulator_volt_range ab9540_vbbp_vsel[] = {
+	{ {0x00,       0}, {0x10,  -50000}, {0x70, -350000} },
+	{ {0x80,   50000}, {0x10,   50000}, {0xf0,  400000} },
+};
+
+static const struct regulator_volt_range ab9540_vbbn_vsel[] = {
+	{ {0x00,       0}, {0x01,  -50000}, {0x07, -350000} },
+	{ {0x08,   50000}, {0x01,   50000}, {0x0f,  400000} },
 };
 
 static const struct regulator_volt_range vsmps1_vsel[] = {
@@ -700,7 +794,8 @@ static const struct regulator_volt_range vsmps3_vsel[] = {
 	{ {0x36, 1363500}, {0x01,       0}, {0x7f, 1363500} },
 };
 
-static const struct regulator_volt_range vaux1_vaux2_vsel[] = {
+/* for Vaux1, Vaux2 and Vaux4 */
+static const struct regulator_volt_range vauxn_vsel[] = {
 	{ {0x00, 1100000}, {0x01,  100000}, {0x04, 1500000} },
 	{ {0x05, 1800000}, {0x01,   50000}, {0x07, 1900000} },
 	{ {0x08, 2500000}, {0x01,       0}, {0x08, 2500000} },
@@ -730,7 +825,7 @@ static const struct regulator_volt_range vintcore12_vsel[] = {
 /* regulators */
 static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 	[AB8500_VARM] = {
-		.name              = "Varm",
+		.name		   = "Varm",
 		.update_regid      = AB8500_REGU_ARM_REGU1,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -745,20 +840,20 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_sel_mask     = 0x0c,
 		.vsel_sel_val      = {0x00, 0x04, 0x08, 0x0c},
 		.vsel_regid[0]     = AB8500_REGU_VARM_SEL1,
-		.vsel_mask[0]      = 0x3f,
-		.vsel_range[0]     = varm_vape_vmod_vsel,
-		.vsel_range_len[0] = ARRAY_SIZE(varm_vape_vmod_vsel),
+		.vsel_mask[0]      = AB8500_VARM_VSEL_MASK,
+		.vsel_range[0]     = ab8500_varm_vsel,
+		.vsel_range_len[0] = ARRAY_SIZE(ab8500_varm_vsel),
 		.vsel_regid[1]     = AB8500_REGU_VARM_SEL2,
-		.vsel_mask[1]      = 0x3f,
-		.vsel_range[1]     = varm_vape_vmod_vsel,
-		.vsel_range_len[1] = ARRAY_SIZE(varm_vape_vmod_vsel),
+		.vsel_mask[1]      = AB8500_VARM_VSEL_MASK,
+		.vsel_range[1]     = ab8500_varm_vsel,
+		.vsel_range_len[1] = ARRAY_SIZE(ab8500_varm_vsel),
 		.vsel_regid[2]     = AB8500_REGU_VARM_SEL3,
-		.vsel_mask[2]      = 0x3f,
-		.vsel_range[2]     = varm_vape_vmod_vsel,
-		.vsel_range_len[2] = ARRAY_SIZE(varm_vape_vmod_vsel),
+		.vsel_mask[2]      = AB8500_VARM_VSEL_MASK,
+		.vsel_range[2]     = ab8500_varm_vsel,
+		.vsel_range_len[2] = ARRAY_SIZE(ab8500_varm_vsel),
 	},
 	[AB8500_VBBP] = {
-		.name              = "Vbbp",
+		.name		   = "Vbbp",
 		.update_regid      = AB8500_REGU_ARM_REGU2,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x00},
@@ -769,15 +864,15 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_sel_val      = {0x00, 0x10, 0x00, 0x00},
 		.vsel_regid[0]     = AB8500_REGU_VBB_SEL1,
 		.vsel_mask[0]      = 0xf0,
-		.vsel_range[0]     = vbbp_vsel,
-		.vsel_range_len[0] = ARRAY_SIZE(vbbp_vsel),
+		.vsel_range[0]     = ab8500_vbbp_vsel,
+		.vsel_range_len[0] = ARRAY_SIZE(ab8500_vbbp_vsel),
 		.vsel_regid[1]     = AB8500_REGU_VBB_SEL2,
 		.vsel_mask[1]      = 0xf0,
-		.vsel_range[1]     = vbbp_vsel,
-		.vsel_range_len[1] = ARRAY_SIZE(vbbp_vsel),
+		.vsel_range[1]     = ab8500_vbbp_vsel,
+		.vsel_range_len[1] = ARRAY_SIZE(ab8500_vbbp_vsel),
 	},
 	[AB8500_VBBN] = {
-		.name              = "Vbbn",
+		.name		   = "Vbbn",
 		.update_regid      = AB8500_REGU_ARM_REGU2,
 		.update_mask       = 0x0c,
 		.update_val        = {0x00, 0x04, 0x08, 0x00},
@@ -788,15 +883,15 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_sel_val      = {0x00, 0x20, 0x00, 0x00},
 		.vsel_regid[0]     = AB8500_REGU_VBB_SEL1,
 		.vsel_mask[0]      = 0x0f,
-		.vsel_range[0]     = vbbn_vsel,
-		.vsel_range_len[0] = ARRAY_SIZE(vbbn_vsel),
+		.vsel_range[0]     = ab8500_vbbn_vsel,
+		.vsel_range_len[0] = ARRAY_SIZE(ab8500_vbbn_vsel),
 		.vsel_regid[1]     = AB8500_REGU_VBB_SEL2,
 		.vsel_mask[1]      = 0x0f,
-		.vsel_range[1]     = vbbn_vsel,
-		.vsel_range_len[1] = ARRAY_SIZE(vbbn_vsel),
+		.vsel_range[1]     = ab8500_vbbn_vsel,
+		.vsel_range_len[1] = ARRAY_SIZE(ab8500_vbbn_vsel),
 	},
 	[AB8500_VAPE] = {
-		.name              = "Vape",
+		.name		   = "Vape",
 		.update_regid      = AB8500_REGU_VAPE_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -812,19 +907,19 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_sel_val      = {0x00, 0x04, 0x20, 0x24},
 		.vsel_regid[0]     = AB8500_REGU_VAPE_SEL1,
 		.vsel_mask[0]      = 0x3f,
-		.vsel_range[0]     = varm_vape_vmod_vsel,
-		.vsel_range_len[0] = ARRAY_SIZE(varm_vape_vmod_vsel),
+		.vsel_range[0]     = vape_vmod_vsel,
+		.vsel_range_len[0] = ARRAY_SIZE(vape_vmod_vsel),
 		.vsel_regid[1]     = AB8500_REGU_VAPE_SEL2,
 		.vsel_mask[1]      = 0x3f,
-		.vsel_range[1]     = varm_vape_vmod_vsel,
-		.vsel_range_len[1] = ARRAY_SIZE(varm_vape_vmod_vsel),
+		.vsel_range[1]     = vape_vmod_vsel,
+		.vsel_range_len[1] = ARRAY_SIZE(vape_vmod_vsel),
 		.vsel_regid[2]     = AB8500_REGU_VAPE_SEL3,
 		.vsel_mask[2]      = 0x3f,
-		.vsel_range[2]     = varm_vape_vmod_vsel,
-		.vsel_range_len[2] = ARRAY_SIZE(varm_vape_vmod_vsel),
+		.vsel_range[2]     = vape_vmod_vsel,
+		.vsel_range_len[2] = ARRAY_SIZE(vape_vmod_vsel),
 	},
 	[AB8500_VSMPS1] = {
-		.name              = "Vsmps1",
+		.name		   = "Vsmps1",
 		.update_regid      = AB8500_REGU_VSMPS1_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -856,7 +951,7 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_range_len[2] = ARRAY_SIZE(vsmps1_vsel),
 	},
 	[AB8500_VSMPS2] = {
-		.name              = "Vsmps2",
+		.name		   = "Vsmps2",
 		.update_regid      = AB8500_REGU_VSMPS2_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -888,7 +983,7 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_range_len[2] = ARRAY_SIZE(vsmps2_vsel),
 	},
 	[AB8500_VSMPS3] = {
-		.name              = "Vsmps3",
+		.name		   = "Vsmps3",
 		.update_regid      = AB8500_REGU_VSMPS3_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -920,7 +1015,7 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_range_len[2] = ARRAY_SIZE(vsmps3_vsel),
 	},
 	[AB8500_VPLL] = {
-		.name              = "Vpll",
+		.name		   = "Vpll",
 		.update_regid      = AB8500_REGU_VPLL_VANA_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -937,13 +1032,13 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.hw_valid_mask[3]  = 0x40,
 	},
 	[AB8500_VREFDDR] = {
-		.name              = "VrefDDR",
+		.name		   = "VrefDDR",
 		.update_regid      = AB8500_REGU_VREF_DDR,
 		.update_mask       = 0x01,
 		.update_val        = {0x00, 0x01, 0x00, 0x00},
 	},
 	[AB8500_VMOD] = {
-		.name              = "Vmod",
+		.name		   = "Vmod",
 		.update_regid      = AB8500_REGU_VMOD_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -963,15 +1058,15 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_sel_val      = {0x00, 0x04, 0x00, 0x00},
 		.vsel_regid[0]     = AB8500_REGU_VMOD_SEL1,
 		.vsel_mask[0]      = 0x3f,
-		.vsel_range[0]     = varm_vape_vmod_vsel,
-		.vsel_range_len[0] = ARRAY_SIZE(varm_vape_vmod_vsel),
+		.vsel_range[0]     = vape_vmod_vsel,
+		.vsel_range_len[0] = ARRAY_SIZE(vape_vmod_vsel),
 		.vsel_regid[1]     = AB8500_REGU_VMOD_SEL2,
 		.vsel_mask[1]      = 0x3f,
-		.vsel_range[1]     = varm_vape_vmod_vsel,
-		.vsel_range_len[1] = ARRAY_SIZE(varm_vape_vmod_vsel),
+		.vsel_range[1]     = vape_vmod_vsel,
+		.vsel_range_len[1] = ARRAY_SIZE(vape_vmod_vsel),
 	},
 	[AB8500_VEXTSUPPLY1] = {
-		.name              = "Vextsupply1",
+		.name		   = "Vextsupply1",
 		.update_regid      = AB8500_REGU_EXT_SUPPLY_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -988,7 +1083,7 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.hw_valid_mask[3]  = 0x04,
 	},
 	[AB8500_VEXTSUPPLY2] = {
-		.name              = "VextSupply2",
+		.name		   = "VextSupply2",
 		.update_regid      = AB8500_REGU_EXT_SUPPLY_REGU,
 		.update_mask       = 0x0c,
 		.update_val        = {0x00, 0x04, 0x08, 0x0c},
@@ -1005,7 +1100,7 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.hw_valid_mask[3]  = 0x08,
 	},
 	[AB8500_VEXTSUPPLY3] = {
-		.name              = "VextSupply3",
+		.name		   = "VextSupply3",
 		.update_regid      = AB8500_REGU_EXT_SUPPLY_REGU,
 		.update_mask       = 0x30,
 		.update_val        = {0x00, 0x10, 0x20, 0x30},
@@ -1022,7 +1117,7 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.hw_valid_mask[3]  = 0x10,
 	},
 	[AB8500_VRF1] = {
-		.name              = "Vrf1",
+		.name		   = "Vrf1",
 		.update_regid      = AB8500_REGU_VRF1_VAUX3_REGU,
 		.update_mask       = 0x0c,
 		.update_val        = {0x00, 0x04, 0x08, 0x0c},
@@ -1032,7 +1127,7 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_range_len[0] = ARRAY_SIZE(vrf1_vsel),
 	},
 	[AB8500_VANA] = {
-		.name              = "Vana",
+		.name		   = "Vana",
 		.update_regid      = AB8500_REGU_VPLL_VANA_REGU,
 		.update_mask       = 0x0c,
 		.update_val        = {0x00, 0x04, 0x08, 0x0c},
@@ -1049,7 +1144,7 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.hw_valid_mask[3]  = 0x20,
 	},
 	[AB8500_VAUX1] = {
-		.name              = "Vaux1",
+		.name		   = "Vaux1",
 		.update_regid      = AB8500_REGU_VAUX12_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -1066,11 +1161,11 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.hw_valid_mask[3]  = 0x80,
 		.vsel_regid[0]     = AB8500_REGU_VAUX1_SEL,
 		.vsel_mask[0]      = 0x0f,
-		.vsel_range[0]     = vaux1_vaux2_vsel,
-		.vsel_range_len[0] = ARRAY_SIZE(vaux1_vaux2_vsel),
+		.vsel_range[0]     = vauxn_vsel,
+		.vsel_range_len[0] = ARRAY_SIZE(vauxn_vsel),
 	},
 	[AB8500_VAUX2] = {
-		.name              = "Vaux2",
+		.name		   = "Vaux2",
 		.update_regid      = AB8500_REGU_VAUX12_REGU,
 		.update_mask       = 0x0c,
 		.update_val        = {0x00, 0x04, 0x08, 0x0c},
@@ -1087,11 +1182,11 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.hw_valid_mask[3]  = 0x01,
 		.vsel_regid[0]     = AB8500_REGU_VAUX2_SEL,
 		.vsel_mask[0]      = 0x0f,
-		.vsel_range[0]     = vaux1_vaux2_vsel,
-		.vsel_range_len[0] = ARRAY_SIZE(vaux1_vaux2_vsel),
+		.vsel_range[0]     = vauxn_vsel,
+		.vsel_range_len[0] = ARRAY_SIZE(vauxn_vsel),
 	},
 	[AB8500_VAUX3] = {
-		.name              = "Vaux3",
+		.name		   = "Vaux3",
 		.update_regid      = AB8500_REGU_VRF1_VAUX3_REGU,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x02, 0x03},
@@ -1111,8 +1206,30 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_range[0]     = vaux3_vsel,
 		.vsel_range_len[0] = ARRAY_SIZE(vaux3_vsel),
 	},
+	[AB9540_VAUX4] = {
+		.name              = "Vaux4",
+		.update_regid      = AB9540_REGU_VAUX4_REGU,
+		.update_mask       = 0x03,
+		.update_val        = {0x00, 0x01, 0x02, 0x03},
+		.hw_mode_regid     = AB9540_REGU_VAUX4_REQ_CTRL,
+		.hw_mode_mask      = 0x03,
+		.hw_mode_val       = {0x00, 0x01, 0x02, 0x03},
+		.hw_valid_regid[0] = AB9540_REGU_VAUX4_REQ_VALID,
+		.hw_valid_mask[0]  = 0x08,
+		.hw_valid_regid[1] = AB9540_REGU_VAUX4_REQ_VALID,
+		.hw_valid_mask[1]  = 0x04,
+		.hw_valid_regid[2] = AB9540_REGU_VAUX4_REQ_VALID,
+		.hw_valid_mask[2]  = 0x02,
+		.hw_valid_regid[3] = AB9540_REGU_VAUX4_REQ_VALID,
+		.hw_valid_mask[3]  = 0x01,
+		.vsel_regid[0]     = AB9540_REGU_VAUX4_SEL,
+		.vsel_mask[0]      = 0x0f,
+		.vsel_range[0]     = vauxn_vsel,
+		.vsel_range_len[0] = ARRAY_SIZE(vauxn_vsel),
+		.unavailable       = true, /* AB9540 regulator */
+	},
 	[AB8500_VINTCORE] = {
-		.name              = "VintCore12",
+		.name		   = "VintCore12",
 		.update_regid      = AB8500_REGU_MISC1,
 		.update_mask       = 0x44,
 		.update_val        = {0x00, 0x04, 0x00, 0x44},
@@ -1122,56 +1239,91 @@ static struct ab8500_regulator ab8500_regulator[AB8500_NUM_REGULATORS] = {
 		.vsel_range_len[0] = ARRAY_SIZE(vintcore12_vsel),
 	},
 	[AB8500_VTVOUT] = {
-		.name              = "VTVout",
+		.name		   = "VTVout",
 		.update_regid      = AB8500_REGU_MISC1,
 		.update_mask       = 0x82,
 		.update_val        = {0x00, 0x02, 0x00, 0x82},
 	},
 	[AB8500_VAUDIO] = {
-		.name              = "Vaudio",
+		.name		   = "Vaudio",
 		.update_regid      = AB8500_REGU_VAUDIO_SUPPLY,
 		.update_mask       = 0x02,
 		.update_val        = {0x00, 0x02, 0x00, 0x00},
 	},
 	[AB8500_VANAMIC1] = {
-		.name              = "Vanamic1",
+		.name		   = "Vanamic1",
 		.update_regid      = AB8500_REGU_VAUDIO_SUPPLY,
 		.update_mask       = 0x08,
 		.update_val        = {0x00, 0x08, 0x00, 0x00},
 	},
 	[AB8500_VANAMIC2] = {
-		.name              = "Vanamic2",
+		.name		   = "Vanamic2",
 		.update_regid      = AB8500_REGU_VAUDIO_SUPPLY,
 		.update_mask       = 0x10,
 		.update_val        = {0x00, 0x10, 0x00, 0x00},
 	},
 	[AB8500_VDMIC] = {
-		.name              = "Vdmic",
+		.name		   = "Vdmic",
 		.update_regid      = AB8500_REGU_VAUDIO_SUPPLY,
 		.update_mask       = 0x04,
 		.update_val        = {0x00, 0x04, 0x00, 0x00},
 	},
 	[AB8500_VUSB] = {
-		.name              = "Vusb",
+		.name		   = "Vusb",
 		.update_regid      = AB8500_REGU_VUSB_CTRL,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x00, 0x03},
 	},
 	[AB8500_VOTG] = {
-		.name              = "VOTG",
+		.name		   = "VOTG",
 		.update_regid      = AB8500_REGU_OTG_SUPPLY_CTRL,
 		.update_mask       = 0x03,
 		.update_val        = {0x00, 0x01, 0x00, 0x03},
 	},
 	[AB8500_VBUSBIS] = {
-		.name              = "Vbusbis",
+		.name		   = "Vbusbis",
 		.update_regid      = AB8500_REGU_OTG_SUPPLY_CTRL,
 		.update_mask       = 0x08,
 		.update_val        = {0x00, 0x08, 0x00, 0x00},
 	},
 };
 
-static int status_state;
+static void ab9540_regulators_update(void)
+{
+	/* Update unavailable regulators */
+	ab8500_regulator[AB8500_VREFDDR].unavailable = true;
+	ab8500_regulator[AB9540_VAUX4].unavailable = false;
+
+	/* Update regulator characteristics for AB9540 */
+	ab8500_regulator[AB8500_VARM].vsel_mask[0] = AB9540_VARM_VSEL_MASK;
+	ab8500_regulator[AB8500_VARM].vsel_range[0] = ab9540_varm_vsel;
+	ab8500_regulator[AB8500_VARM].vsel_range_len[0] =
+		ARRAY_SIZE(ab9540_varm_vsel);
+	ab8500_regulator[AB8500_VARM].vsel_mask[1] = AB9540_VARM_VSEL_MASK;
+	ab8500_regulator[AB8500_VARM].vsel_range[1] = ab9540_varm_vsel;
+	ab8500_regulator[AB8500_VARM].vsel_range_len[1] =
+		ARRAY_SIZE(ab9540_varm_vsel);
+	ab8500_regulator[AB8500_VARM].vsel_mask[2] = AB9540_VARM_VSEL_MASK;
+	ab8500_regulator[AB8500_VARM].vsel_range[2] = ab9540_varm_vsel;
+	ab8500_regulator[AB8500_VARM].vsel_range_len[2] =
+		ARRAY_SIZE(ab9540_varm_vsel);
+
+	ab8500_regulator[AB8500_VBBP].vsel_range[0] = ab9540_vbbp_vsel;
+	ab8500_regulator[AB8500_VBBP].vsel_range_len[0] =
+		ARRAY_SIZE(ab9540_vbbp_vsel);
+	ab8500_regulator[AB8500_VBBP].vsel_range[1] = ab9540_vbbp_vsel;
+	ab8500_regulator[AB8500_VBBP].vsel_range_len[1] =
+		ARRAY_SIZE(ab9540_vbbp_vsel);
+
+	ab8500_regulator[AB8500_VBBN].vsel_range[0] = ab9540_vbbn_vsel;
+	ab8500_regulator[AB8500_VBBN].vsel_range_len[0] =
+		ARRAY_SIZE(ab9540_vbbn_vsel);
+	ab8500_regulator[AB8500_VBBN].vsel_range[1] = ab9540_vbbn_vsel;
+	ab8500_regulator[AB8500_VBBN].vsel_range_len[1] =
+		ARRAY_SIZE(ab9540_vbbn_vsel);
+}
+
+static int status_state = AB8500_REGULATOR_STATE_CURRENT;
 
 static int _get_voltage(struct regulator_volt_range const *volt_range,
 	u8 value, int *volt)
@@ -1188,11 +1340,11 @@ static int _get_voltage(struct regulator_volt_range const *volt_range,
 		}
 	} else {
 		if ((start <= value) && (value <= end)) {
-			if ((value - start)%step != 0)
+			if ((value - start) % step != 0)
 				return -EINVAL; /* invalid setting */
 			*volt = volt_range->start.volt
 			     + volt_range->step.volt
-			     *((value - start)/step);
+			     *((value - start) / step);
 			return 1;
 		}
 	}
@@ -1218,6 +1370,119 @@ static int get_voltage(struct regulator_volt_range const *volt_range,
 	return -EINVAL;
 }
 
+static bool get_reg_and_mask(int regid, u8 mask, u8 *val)
+{
+	int ret;
+	u8 t;
+
+	if (!regid)
+		return false;
+
+	ret = abx500_get_register_interruptible(dev,
+						ab8500_register[regid].bank,
+						ab8500_register[regid].addr,
+						&t);
+	if (ret < 0)
+		return false;
+
+	(*val) = t & mask;
+
+	return true;
+}
+
+/* Convert regulator register value to index */
+static bool val2idx(u8 val, u8 *v, int len, int *idx)
+{
+	int i;
+
+	for (i = 0; i < len && v[i] != val; i++);
+
+	if (i == len)
+		return false;
+
+	(*idx) = i;
+	return true;
+}
+
+int ab8500_regulator_debug_read(enum ab8500_regulator_id id,
+				struct ab8500_debug_regulator_status *s)
+{
+	int i;
+	u8 val;
+	bool found;
+	int idx = 0;
+
+	if (id >= AB8500_NUM_REGULATORS)
+		return -EINVAL;
+
+	s->name = (char *)ab8500_regulator[id].name;
+
+	/* read mode */
+	(void) get_reg_and_mask(ab8500_regulator[id].update_regid,
+				ab8500_regulator[id].update_mask,
+				&val);
+
+	(void) val2idx(val, ab8500_regulator[id].update_val,
+		       4, &idx);
+
+	s->mode = (u8) idx;
+
+	/* read hw mode */
+	found = get_reg_and_mask(ab8500_regulator[id].hw_mode_regid,
+				 ab8500_regulator[id].hw_mode_mask,
+				 &val);
+
+	if (found)
+		found = val2idx(val, ab8500_regulator[id].hw_mode_val, 4, &idx);
+
+	if (found)
+		/* +1 since 0 = HWMODE_NONE */
+		s->hwmode = idx + 1;
+	else
+		s->hwmode = AB8500_HWMODE_NONE;
+
+	for (i = 0; i < 4 && found; i++) {
+
+		bool f = get_reg_and_mask(ab8500_regulator[id].hw_valid_regid[i],
+					  ab8500_regulator[id].hw_valid_mask[i],
+					  &val);
+		if (f)
+			s->hwmode_auto[i] = !!val;
+		else
+			s->hwmode_auto[i] = HWM_INVAL;
+	}
+
+	/* read voltage */
+	found = get_reg_and_mask(ab8500_regulator[id].vsel_sel_regid,
+				 ab8500_regulator[id].vsel_sel_mask,
+				 &val);
+	if (found)
+		found = val2idx(val, ab8500_regulator[id].vsel_sel_val,
+				3, &idx);
+
+	if (found && idx < 3)
+		s->volt_selected = idx + 1;
+	else
+		s->volt_selected = 0;
+
+	for (s->volt_len = 0; s->volt_len < 3; s->volt_len++) {
+		int volt;
+		int i = s->volt_len;
+
+		found = get_reg_and_mask(ab8500_regulator[id].vsel_regid[i],
+					 ab8500_regulator[id].vsel_mask[i],
+					 &val);
+		if (!found)
+			break;
+
+		volt = get_voltage(ab8500_regulator[id].vsel_range[i],
+				   ab8500_regulator[id].vsel_range_len[i],
+				   val);
+		s->volt[i] = volt;
+	}
+	return 0;
+}
+
 static int ab8500_regulator_status_print(struct seq_file *s, void *p)
 {
 	struct device *dev = s->private;
@@ -1241,10 +1506,16 @@ static int ab8500_regulator_status_print(struct seq_file *s, void *p)
 		dev_err(dev, "seq_printf overflow\n");
 
 	/* print state */
-	err = seq_printf(s, "%12s\n",
-		regulator_state_name[status_state]);
-	if (err < 0)
-		dev_err(dev, "seq_printf overflow\n");
+	for (i = 0; i < NUM_REGULATOR_STATE; i++) {
+		if (i == status_state)
+			err = seq_printf(s, "-> %i. %12s\n",
+				i, regulator_state_name[i]);
+		else
+			err = seq_printf(s, "   %i. %12s\n",
+				i, regulator_state_name[i]);
+		if (err < 0)
+			dev_err(dev, "seq_printf overflow\n");
+	}
 
 	/* print labels */
 	err = seq_printf(s,
@@ -1270,6 +1541,10 @@ static int ab8500_regulator_status_print(struct seq_file *s, void *p)
 
 	/* dump registers */
 	for (id = 0; id < AB8500_NUM_REGULATORS; id++) {
+		if (ab8500_register[id].unavailable ||
+			ab8500_regulator[id].unavailable)
+			continue;
+
 		/* print name */
 		err = seq_printf(s, "|%11s|",
 			ab8500_regulator[id].name);
@@ -1444,6 +1719,7 @@ struct ab8500_force_reg {
 	u8 val;
 	bool restore;
 	u8 restore_val;
+	u8 unavailable;
 };
 
 static struct ab8500_force_reg ab8500_force_reg[] = {
@@ -1461,30 +1737,6 @@ static struct ab8500_force_reg ab8500_force_reg[] = {
 		.addr = 0x0c,
 		.mask = 0x07,
 		.val  = 0x00,
-	},
-	{
-		/*
-		 * ReguSysClkReq1HPValid2
-		 * OTP: 0x03, HSI: 0x40, suspend: 0x60/0x70 (value/mask)
-		 * [  5] VextSupply2SysClkReq1HPValid = Vext2 set by SysClkReq1
-		 */
-		.name = "ReguSysClkReq1HPValid2",
-		.bank = 0x03,
-		.addr = 0x08,
-		.mask = 0x20, /* test and compare with 0x7f */
-		.val  = 0x20,
-	},
-	{
-		/*
-		 * ReguRequestCtrl3
-		 * OTP: 0x00, HSI: 0x00, suspend: 0x05/0x0f (value/mask)
-		 * [1:0] VExtSupply2RequestCtrl[1:0] = VExt2 set in HP/OFF mode
-		 */
-		.name = "ReguRequestCtrl3",
-		.bank = 0x03,
-		.addr = 0x05,
-		.mask = 0x03, /* test and compare with 0xff */
-		.val  = 0x01,
 	},
 	{
 		/*
@@ -1522,19 +1774,6 @@ static struct ab8500_force_reg ab8500_force_reg[] = {
 	},
 	{
 		/*
-		 * ExtSupplyRegu (HSI: 0x2a on v2-v40?)
-		 * OTP: 0x15, HSI: 0x28, suspend: 0x28/0x3f (value/mask)
-		 * [3:2] VExtSupply2Regu[1:0] = 10 = Vext2 in HW control
-		 * [1:0] VExtSupply1Regu[1:0] = 00 = Vext1 off
-		 */
-		.name = "ExtSupplyRegu",
-		.bank = 0x04,
-		.addr = 0x08,
-		.mask = 0x0f,
-		.val  = 0x08,
-	},
-	{
-		/*
 		 * TVoutCtrl
 		 * OTP: N/A, HSI: N/A, suspend: 0x00/0x03 (value/mask)
 		 * [  2]   PlugTvOn = plug/unplug detection disabled
@@ -1547,6 +1786,28 @@ static struct ab8500_force_reg ab8500_force_reg[] = {
 		.val  = 0x00,
 	},
 };
+
+static void ab9540_force_reg_update(void)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ab8500_force_reg); i++) {
+		if (ab8500_force_reg[i].bank == 0x02 &&
+		    ab8500_force_reg[i].addr == 0x0C) {
+			/*
+			 * SysClkCtrl
+			 * OTP: 0x00, HSI: 0x06, suspend: 0x00/0x07 (value/mask)
+			 * [  2] USBClkEna = disable SysClk path to USB block
+			 */
+			ab8500_force_reg[i].mask = 0x04;
+			ab8500_force_reg[i].val  = 0x00;
+		} else if (ab8500_force_reg[i].bank == 0x06 &&
+			   ab8500_force_reg[i].addr == 0x80) {
+			/* TVoutCtrl not supported by AB9540 */
+			ab8500_force_reg[i].unavailable = true;
+		}
+	}
+}
 
 void ab8500_regulator_debug_force(void)
 {
@@ -1567,6 +1828,9 @@ void ab8500_regulator_debug_force(void)
 	 */
 
 	for (i = 0; i < ARRAY_SIZE(ab8500_force_reg); i++) {
+		if (ab8500_force_reg[i].unavailable)
+			continue;
+
 		dev_vdbg(&pdev->dev, "Save and set %s: "
 			"0x%02x, 0x%02x, 0x%02x, 0x%02x.\n",
 			ab8500_force_reg[i].name,
@@ -1622,6 +1886,9 @@ void ab8500_regulator_debug_restore(void)
 	if (ret < 0)
 		dev_err(&pdev->dev, "Failed to record resume state.\n");
 	for (i = ARRAY_SIZE(ab8500_force_reg) - 1; i >= 0; i--) {
+		if (ab8500_force_reg[i].unavailable)
+			continue;
+
 		/* restore register value */
 		if (ab8500_force_reg[i].restore) {
 			ret = abx500_mask_and_set_register_interruptible(
@@ -1717,10 +1984,11 @@ static struct dentry *ab8500_regulator_dump_file;
 static struct dentry *ab8500_regulator_status_file;
 static struct dentry *ab8500_regulator_suspend_force_file;
 
-static int __devinit ab8500_regulator_debug_probe(struct platform_device *plf)
+int __devinit ab8500_regulator_debug_init(struct platform_device *plf)
 {
 	void __iomem *boot_info_backupram;
-	int ret, i;
+	int ret;
+	struct ab8500 *ab8500;
 
 	/* setup dev pointers */
 	dev = &plf->dev;
@@ -1731,24 +1999,13 @@ static int __devinit ab8500_regulator_debug_probe(struct platform_device *plf)
 	if (ret < 0)
 		dev_err(&plf->dev, "Failed to record init state.\n");
 
-	/* remove force of external regulators if AB8500 3.0 and DB8500 v2.2 */
-	if ((abx500_get_chip_id(&pdev->dev) >= 0x30) && cpu_is_u8500v22()) {
-		/*
-		 * find ExtSupplyRegu register (bank 0x04, addr 0x08)
-		 * and update value (Vext1 in low-power, Vext2 off).
-		 */
-		for (i = 0; i < ARRAY_SIZE(ab8500_force_reg); i++) {
-			if (ab8500_force_reg[i].bank == 0x04 &&
-			    ab8500_force_reg[i].addr == 0x08) {
-				u8 val, val_mask = 0x0f;
-
-				val = ab8500_force_reg[i].val;
-				val = (val & ~val_mask) | (0x03 & val_mask);
-				ab8500_force_reg[i].val = val;
-			}
-		}
+        ab8500 = dev_get_drvdata(plf->dev.parent);
+	/* Update data structures for AB9540 */
+	if (is_ab9540(ab8500) || is_ab8505(ab8500)) {
+		ab9540_registers_update();
+		ab9540_regulators_update();
+		ab9540_force_reg_update();
 	}
-
 	/* make suspend-force default if board profile is v5x-power */
 	boot_info_backupram = ioremap(BOOT_INFO_BACKUPRAM1, 0x4);
 
@@ -1758,7 +2015,7 @@ static int __devinit ab8500_regulator_debug_probe(struct platform_device *plf)
 			boot_info_backupram + BOARD_PROFILE_BACKUPRAM1);
 		dev_dbg(dev, "Board profile is 0x%02x\n", board_profile);
 
-		if (board_profile >= OPTION_BOARD_VERSION_V5X)
+		if (board_profile >= OPTION_BOARD_VERSION_500_V5X)
 			setting_suspend_force = true;
 
 		iounmap(boot_info_backupram);
@@ -1809,7 +2066,7 @@ exit_no_debugfs:
 	return -ENOMEM;
 }
 
-static int __devexit ab8500_regulator_debug_remove(struct platform_device *plf)
+int __devexit ab8500_regulator_debug_exit(struct platform_device *plf)
 {
 	debugfs_remove(ab8500_regulator_suspend_force_file);
 	debugfs_remove(ab8500_regulator_status_file);
@@ -1818,33 +2075,6 @@ static int __devexit ab8500_regulator_debug_remove(struct platform_device *plf)
 
 	return 0;
 }
-
-static struct platform_driver ab8500_regulator_debug_driver = {
-	.driver = {
-		.name = "ab8500-regulator-debug",
-		.owner = THIS_MODULE,
-	},
-	.probe	= ab8500_regulator_debug_probe,
-	.remove	= __devexit_p(ab8500_regulator_debug_remove),
-};
-
-static int __init ab8500_regulator_debug_init(void)
-{
-	int ret;
-
-	ret = platform_driver_register(&ab8500_regulator_debug_driver);
-	if (ret)
-		pr_err("Failed to register ab8500 regulator: %d\n", ret);
-
-	return ret;
-}
-subsys_initcall(ab8500_regulator_debug_init);
-
-static void __exit ab8500_regulator_debug_exit(void)
-{
-	platform_driver_unregister(&ab8500_regulator_debug_driver);
-}
-module_exit(ab8500_regulator_debug_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Bengt Jonsson <bengt.g.jonsson@stericsson.com");

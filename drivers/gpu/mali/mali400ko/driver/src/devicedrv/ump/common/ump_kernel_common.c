@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2011 ARM Limited. All rights reserved.
+ * Copyright (C) 2010-2012 ARM Limited. All rights reserved.
  * 
  * This program is free software and is provided to you under the terms of the GNU General Public License version 2
  * as published by the Free Software Foundation, and any use by you of this program is subject to the terms of such GNU licence.
@@ -146,6 +146,9 @@ _mali_osk_errcode_t _ump_ukk_open( void** context )
 	session_data->api_version = MAKE_VERSION_ID(1);
 
 	*context = (void*)session_data;
+
+	session_data->cache_operations_ongoing = 0 ;
+	session_data->has_pending_level1_cache_flush = 0;
 
 	DBG_MSG(2, ("New session opened\n"));
 
@@ -384,4 +387,12 @@ void _ump_ukk_unmap_mem( _ump_uk_unmap_mem_s *args )
 
 	_ump_osk_mem_mapregion_term( descriptor );
 	_mali_osk_free(descriptor);
+}
+
+u32 _ump_ukk_report_memory_usage( void )
+{
+	if(device.backend->stat)
+		return device.backend->stat(device.backend);
+	else
+		return 0;
 }

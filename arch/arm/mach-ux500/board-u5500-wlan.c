@@ -10,13 +10,16 @@
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
+#include <linux/mfd/dbx500-prcmu.h>
 #include <asm/mach-types.h>
 #include <mach/irqs.h>
-#include <plat/pincfg.h>
 #include "pins.h"
 #include <mach/cw1200_plat.h>
 
+
 static void cw1200_release(struct device *dev);
+static int cw1200_prcmu_ctrl(const struct cw1200_platform_data *pdata,
+		bool enable);
 
 static struct resource cw1200_u5500_resources[] = {
 	{
@@ -27,55 +30,40 @@ static struct resource cw1200_u5500_resources[] = {
 	},
 };
 
-static struct cw1200_platform_data cw1200_u5500_platform_data = { 0 };
+static struct cw1200_platform_data cw1200_platform_data = {
+	.prcmu_ctrl = cw1200_prcmu_ctrl,
+};
 
 static struct platform_device cw1200_device = {
 	.name = "cw1200_wlan",
 	.dev = {
-		.platform_data = &cw1200_u5500_platform_data,
+		.platform_data = &cw1200_platform_data,
 		.release = cw1200_release,
 		.init_name = "cw1200_wlan",
 	},
 };
 
-const struct cw1200_platform_data *cw1200_u5500_get_platform_data(void)
+const struct cw1200_platform_data *cw1200_get_platform_data(void)
 {
-	return &cw1200_u5500_platform_data;
+	return &cw1200_platform_data;
 }
-EXPORT_SYMBOL_GPL(cw1200_u5500_get_platform_data);
+EXPORT_SYMBOL_GPL(cw1200_get_platform_data);
 
-static int cw1200_pins_enable(bool enable)
+static int cw1200_prcmu_ctrl(const struct cw1200_platform_data *pdata,
+		bool enable)
 {
-	struct ux500_pins *pins = NULL;
-	int ret = 0;
-
-	pins = ux500_pins_get("sdi3");
-
-	if (!pins) {
-		printk(KERN_ERR "cw1200: Pins are not found. "
-				"Check platform data.\n");
-		return -ENOENT;
-	}
+	int ret;
 
 	if (enable)
-		ret = ux500_pins_enable(pins);
+		ret = prcmu_resetout(2, 1);
 	else
-		ret = ux500_pins_disable(pins);
-
-	if (ret)
-		printk(KERN_ERR "cw1200: Pins can not be %s: %d.\n",
-				enable ? "enabled" : "disabled",
-				ret);
-
-	ux500_pins_put(pins);
+		ret = prcmu_resetout(2, 0);
 
 	return ret;
 }
 
 int __init u5500_wlan_init(void)
 {
-	int ret;
-
 	if (machine_is_u5500()) {
 		cw1200_device.num_resources = ARRAY_SIZE(cw1200_u5500_resources);
 		cw1200_device.resource = cw1200_u5500_resources;
@@ -87,23 +75,15 @@ int __init u5500_wlan_init(void)
 		return -ENOTSUPP;
 	}
 
-	cw1200_u5500_platform_data.mmc_id = "mmc2";
-	cw1200_u5500_platform_data.irq = &cw1200_device.resource[0];
+	cw1200_platform_data.mmc_id = "mmc2";
+	cw1200_platform_data.irq = &cw1200_device.resource[0];
 
 	cw1200_device.dev.release = cw1200_release;
 
-	ret = cw1200_pins_enable(true);
-	if (WARN_ON(ret))
-		return ret;
-
-	ret = platform_device_register(&cw1200_device);
-	if (ret)
-		cw1200_pins_enable(false);
-
-	return ret;
+	return platform_device_register(&cw1200_device);
 }
 
 static void cw1200_release(struct device *dev)
 {
-	cw1200_pins_enable(false);
+
 }

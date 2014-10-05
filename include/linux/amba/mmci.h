@@ -5,6 +5,9 @@
 #define AMBA_MMCI_H
 
 #include <linux/mmc/host.h>
+#include <linux/mmc/card.h>
+#include <linux/mmc/sdio_func.h>
+#include <linux/pm.h>
 
 /*
  * These defines is places here due to access is needed from machine
@@ -19,6 +22,13 @@
 #define MCI_ST_DATA31DIREN	(1 << 5)
 #define MCI_ST_FBCLKEN		(1 << 7)
 #define MCI_ST_DATA74DIREN	(1 << 8)
+
+struct embedded_sdio_data {
+        struct sdio_cis cis;
+        struct sdio_cccr cccr;
+        struct sdio_embedded_func *funcs;
+        int num_funcs;
+};
 
 /* Just some dummy forwarding */
 struct dma_chan;
@@ -43,8 +53,10 @@ struct dma_chan;
  * @gpio_wp: read this GPIO pin to see if the card is write protected
  * @gpio_cd: read this GPIO pin to detect card insertion
  * @cd_invert: true if the gpio_cd pin value is active low
+ * @levelshifter: true if there is levelshifter to handle
  * @capabilities: the capabilities of the block as implemented in
  * this platform, signify anything MMC_CAP_* from mmc/host.h
+ * @capabilities2: more capabilities, anything MMC_CAP2_* from mmc/host.h
  * @sigdir: a bit field indicating for what bits in the MMC bus the host
  * should enable signal direction indication.
  * @dma_filter: function used to select an appropriate RX and TX
@@ -62,16 +74,21 @@ struct dma_chan;
 struct mmci_platform_data {
 	unsigned int f_max;
 	unsigned int ocr_mask;
-	int (*ios_handler)(struct device *, struct mmc_ios *);
+	int (*ios_handler)(struct device *, struct mmc_ios *, enum rpm_status);
 	unsigned int (*status)(struct device *);
 	int	gpio_wp;
 	int	gpio_cd;
 	bool	cd_invert;
+	bool	levelshifter;
 	unsigned long capabilities;
+	unsigned long capabilities2;
 	unsigned int sigdir;
 	bool (*dma_filter)(struct dma_chan *chan, void *filter_param);
 	void *dma_rx_param;
 	void *dma_tx_param;
+	unsigned int status_irq;
+	struct embedded_sdio_data *embedded_sdio;
+	int (*register_status_notify)(void (*callback)(int card_present, void *dev_id), void *dev_id);
 };
 
 #endif

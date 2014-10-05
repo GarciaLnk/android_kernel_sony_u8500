@@ -3,6 +3,7 @@
  *
  * Copyright (c) 1999-2002 Vojtech Pavlik
  * Copyright (c) 1999 Colin Van Dyke
+ * Copyright (c) 2012 Sony Mobile Communications AB
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -790,6 +791,12 @@ static bool joydev_match(struct input_handler *handler, struct input_dev *dev)
 
 	/* Avoid tablets, digitisers and similar devices */
 	if (test_bit(EV_KEY, dev->evbit) && test_bit(BTN_DIGI, dev->keybit))
+		return false;
+
+	/* Avoid Microsoft Wired Keyboard 600 */
+	if (dev->id.bustype == BUS_USB &&
+		dev->id.vendor == 0x045E &&
+		dev->id.product == 0x0750)
 		return false;
 
 	return true;

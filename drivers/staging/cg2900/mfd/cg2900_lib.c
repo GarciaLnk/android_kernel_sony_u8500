@@ -190,7 +190,8 @@ EXPORT_SYMBOL_GPL(cg2900_create_work_item);
  */
 int cg2900_read_and_send_file_part(struct cg2900_user_data *user,
 				   struct cg2900_user_data *logger,
-				   struct cg2900_file_info *info)
+				   struct cg2900_file_info *info,
+				   const struct firmware *fw_file)
 {
 	int bytes_to_copy;
 	struct sk_buff *skb;
@@ -202,7 +203,7 @@ int cg2900_read_and_send_file_part(struct cg2900_user_data *user,
 	 * either max bytes for HCI packet or number of bytes left in file
 	 */
 	bytes_to_copy = min((int)HCI_BT_SEND_FILE_MAX_CHUNK_SIZE,
-			    (int)(info->fw_file->size - info->file_offset));
+			    (int)(fw_file->size - info->file_offset));
 
 	if (bytes_to_copy <= 0) {
 		/* Nothing more to read in file. */
@@ -230,7 +231,7 @@ int cg2900_read_and_send_file_part(struct cg2900_user_data *user,
 
 	/* Copy the data from offset position */
 	memcpy(cmd->data,
-	       &(info->fw_file->data[info->file_offset]),
+	       &(fw_file->data[info->file_offset]),
 	       bytes_to_copy);
 
 	/* Increase offset with number of bytes copied */

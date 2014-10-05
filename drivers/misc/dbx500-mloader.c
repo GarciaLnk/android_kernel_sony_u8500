@@ -22,6 +22,7 @@
 
 #include <mach/mloader-dbx500.h>
 #include <linux/mloader.h>
+#include <mach/hardware.h>
 
 #define DEVICE_NAME "dbx500_mloader_fw"
 
@@ -30,6 +31,8 @@ struct mloader_priv {
 	struct dbx500_mloader_pdata *pdata;
 	struct miscdevice misc_dev;
 	u32 aeras_size;
+	void __iomem *uid_base;
+	u8 size;
 };
 
 static struct mloader_priv *mloader_priv;
@@ -125,6 +128,47 @@ static int mloader_fw_mmapdump(struct file *file, struct vm_area_struct *vma)
 	return 0;
 }
 
+static int mloader_fw_mmapload(struct file *file, struct vm_area_struct *vma)
+{
+	unsigned long load_addr;
+	struct dbx500_ml_fw *fw_info;
+
+	if (mloader_priv->pdata->nr_fws != 1) {
+		dev_err(&mloader_priv->pdev->dev,
+			"Only one fw area is supported!\n");
+		return -EINVAL;
+	}
+	fw_info = &mloader_priv->pdata->fws[0];
+	load_addr = fw_info->area->start + fw_info->offset;
+
+	if ((vma->vm_end - vma->vm_start) >
+		(fw_info->area->size - fw_info->offset)) {
+		dev_err(&mloader_priv->pdev->dev,
+			"Try to mmap more memory than available!\n");
+		return -EINVAL;
+	}
+	if (remap_pfn_range(vma,
+		    vma->vm_start,
+		    load_addr >> PAGE_SHIFT,
+		    vma->vm_end - vma->vm_start,
+		    vma->vm_page_prot))
+		return -EAGAIN;
+
+	return 0;
+}
+
+static int mloader_fw_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	if (vma->vm_flags & VM_READ)
+		return mloader_fw_mmapdump(file, vma);
+	else if (vma->vm_flags & VM_WRITE)
+		return mloader_fw_mmapload(file, vma);
+
+	dev_err(&mloader_priv->pdev->dev,
+			"Not supported!\n");
+	return -EINVAL;
+}
+
 static void mloader_fw_dumpinfo(struct dump_image *images)
 {
 	u32 offset = 0;
@@ -165,6 +209,20 @@ static long mloader_fw_ioctl(struct file *filp, unsigned int cmd,
 		kfree(dump_images);
 		break;
 	}
+	case ML_GET_FUSEINFO: {
+		ret = copy_to_user(argp, (void *) mloader_priv->uid_base,
+				mloader_priv->size) ? -EFAULT : 0;
+		break;
+	}
+	case ML_FORCE_PANIC: {
+		char dump_name[MAX_PATH];
+		memset(dump_name, 0, MAX_PATH);
+		ret = copy_from_user(dump_name, argp,
+				  MAX_PATH) ? -EFAULT : 0;
+		panic("Modem crash. Modem dump %s" \
+			  " will be saved on next boot.", dump_name);
+		break;
+	}
 	default:
 		ret = -EPERM;
 		break;
@@ -176,13 +234,14 @@ static long mloader_fw_ioctl(struct file *filp, unsigned int cmd,
 static const struct file_operations modem_fw_fops = {
 	.owner			= THIS_MODULE,
 	.unlocked_ioctl		= mloader_fw_ioctl,
-	.mmap			= mloader_fw_mmapdump,
+	.mmap			= mloader_fw_mmap,
 };
 
 static int __devinit mloader_fw_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 	int i;
+	struct resource *res = NULL;
 
 	mloader_priv = kzalloc(sizeof(*mloader_priv), GFP_ATOMIC);
 	if (!mloader_priv) {
@@ -196,6 +255,16 @@ static int __devinit mloader_fw_probe(struct platform_device *pdev)
 	mloader_priv->misc_dev.minor = MISC_DYNAMIC_MINOR;
 	mloader_priv->misc_dev.name = DEVICE_NAME;
 	mloader_priv->misc_dev.fops = &modem_fw_fops;
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	mloader_priv->size = resource_size(res);
+	mloader_priv->uid_base = ioremap(res->start, mloader_priv->size);
+
+	if (!mloader_priv->uid_base) {
+		   ret = -ENOMEM;
+		   goto err_free_priv;
+	}
+
 	ret = misc_register(&mloader_priv->misc_dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "can't misc_register\n");

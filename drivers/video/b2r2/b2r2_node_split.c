@@ -12,17 +12,15 @@
 #include "b2r2_debug.h"
 #include "b2r2_node_split.h"
 #include "b2r2_internal.h"
-#include "b2r2_hw.h"
+#include "b2r2_hw_convert.h"
 #include "b2r2_filters.h"
+#include "b2r2_utils.h"
 
 #include <linux/kernel.h>
 
 /*
  * Macros and constants
  */
-#define ABS(x) ((x) < 0 ? -(x) : (x))
-#define MAX(x, y) ((x) > (y) ? (x) : (y))
-#define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 #define INSTANCES_DEFAULT_SIZE 10
 #define INSTANCES_GROW_SIZE 5
@@ -36,128 +34,15 @@
  * Global variables
  */
 
-/**
- * VMX values for different color space conversions
- */
-static const u32 vmx_rgb_to_yuv[] = {
-	B2R2_VMX0_RGB_TO_YUV_601_VIDEO,
-	B2R2_VMX1_RGB_TO_YUV_601_VIDEO,
-	B2R2_VMX2_RGB_TO_YUV_601_VIDEO,
-	B2R2_VMX3_RGB_TO_YUV_601_VIDEO,
-};
-
-static const u32 vmx_rgb_to_blt_yuv888[] = {
-	B2R2_VMX0_RGB_TO_BLT_YUV888_601_VIDEO,
-	B2R2_VMX1_RGB_TO_BLT_YUV888_601_VIDEO,
-	B2R2_VMX2_RGB_TO_BLT_YUV888_601_VIDEO,
-	B2R2_VMX3_RGB_TO_BLT_YUV888_601_VIDEO,
-};
-
-static const u32 vmx_yuv_to_rgb[] = {
-	B2R2_VMX0_YUV_TO_RGB_601_VIDEO,
-	B2R2_VMX1_YUV_TO_RGB_601_VIDEO,
-	B2R2_VMX2_YUV_TO_RGB_601_VIDEO,
-	B2R2_VMX3_YUV_TO_RGB_601_VIDEO,
-};
-
-static const u32 vmx_blt_yuv888_to_rgb[] = {
-	B2R2_VMX0_BLT_YUV888_TO_RGB_601_VIDEO,
-	B2R2_VMX1_BLT_YUV888_TO_RGB_601_VIDEO,
-	B2R2_VMX2_BLT_YUV888_TO_RGB_601_VIDEO,
-	B2R2_VMX3_BLT_YUV888_TO_RGB_601_VIDEO,
-};
-
-static const u32 vmx_yuv_to_blt_yuv888[] = {
-	B2R2_VMX0_YUV_TO_BLT_YUV888,
-	B2R2_VMX1_YUV_TO_BLT_YUV888,
-	B2R2_VMX2_YUV_TO_BLT_YUV888,
-	B2R2_VMX3_YUV_TO_BLT_YUV888,
-};
-
-static const u32 vmx_blt_yuv888_to_yuv[] = {
-	B2R2_VMX0_BLT_YUV888_TO_YUV,
-	B2R2_VMX1_BLT_YUV888_TO_YUV,
-	B2R2_VMX2_BLT_YUV888_TO_YUV,
-	B2R2_VMX3_BLT_YUV888_TO_YUV,
-};
-
-static const u32 vmx_yvu_to_blt_yuv888[] = {
-	B2R2_VMX0_YVU_TO_BLT_YUV888,
-	B2R2_VMX1_YVU_TO_BLT_YUV888,
-	B2R2_VMX2_YVU_TO_BLT_YUV888,
-	B2R2_VMX3_YVU_TO_BLT_YUV888,
-};
-
-static const u32 vmx_blt_yuv888_to_yvu[] = {
-	B2R2_VMX0_BLT_YUV888_TO_YVU,
-	B2R2_VMX1_BLT_YUV888_TO_YVU,
-	B2R2_VMX2_BLT_YUV888_TO_YVU,
-	B2R2_VMX3_BLT_YUV888_TO_YVU,
-};
-
-static const u32 vmx_yvu_to_rgb[] = {
-	B2R2_VMX0_YVU_TO_RGB_601_VIDEO,
-	B2R2_VMX1_YVU_TO_RGB_601_VIDEO,
-	B2R2_VMX2_YVU_TO_RGB_601_VIDEO,
-	B2R2_VMX3_YVU_TO_RGB_601_VIDEO,
-};
-
-static const u32 vmx_rgb_to_yvu[] = {
-	B2R2_VMX0_RGB_TO_YVU_601_VIDEO,
-	B2R2_VMX1_RGB_TO_YVU_601_VIDEO,
-	B2R2_VMX2_RGB_TO_YVU_601_VIDEO,
-	B2R2_VMX3_RGB_TO_YVU_601_VIDEO,
-};
-
-static const u32 vmx_rgb_to_bgr[] = {
-	B2R2_VMX0_RGB_TO_BGR,
-	B2R2_VMX1_RGB_TO_BGR,
-	B2R2_VMX2_RGB_TO_BGR,
-	B2R2_VMX3_RGB_TO_BGR,
-};
-
-static const u32 vmx_bgr_to_yuv[] = {
-	B2R2_VMX0_BGR_TO_YUV_601_VIDEO,
-	B2R2_VMX1_BGR_TO_YUV_601_VIDEO,
-	B2R2_VMX2_BGR_TO_YUV_601_VIDEO,
-	B2R2_VMX3_BGR_TO_YUV_601_VIDEO,
-};
-
-static const u32 vmx_yuv_to_bgr[] = {
-	B2R2_VMX0_YUV_TO_BGR_601_VIDEO,
-	B2R2_VMX1_YUV_TO_BGR_601_VIDEO,
-	B2R2_VMX2_YUV_TO_BGR_601_VIDEO,
-	B2R2_VMX3_YUV_TO_BGR_601_VIDEO,
-};
-
-static const u32 vmx_bgr_to_yvu[] = {
-	B2R2_VMX0_BGR_TO_YVU_601_VIDEO,
-	B2R2_VMX1_BGR_TO_YVU_601_VIDEO,
-	B2R2_VMX2_BGR_TO_YVU_601_VIDEO,
-	B2R2_VMX3_BGR_TO_YVU_601_VIDEO,
-};
-
-static const u32 vmx_yvu_to_bgr[] = {
-	B2R2_VMX0_YVU_TO_BGR_601_VIDEO,
-	B2R2_VMX1_YVU_TO_BGR_601_VIDEO,
-	B2R2_VMX2_YVU_TO_BGR_601_VIDEO,
-	B2R2_VMX3_YVU_TO_BGR_601_VIDEO,
-};
-
-static const u32 vmx_yvu_to_yuv[] = {
-	B2R2_VMX0_YVU_TO_YUV_601_VIDEO,
-	B2R2_VMX1_YVU_TO_YUV_601_VIDEO,
-	B2R2_VMX2_YVU_TO_YUV_601_VIDEO,
-	B2R2_VMX3_YVU_TO_YUV_601_VIDEO,
-};
 
 /*
  * Forward declaration of private functions
  */
-
-static int analyze_fmt_conv(struct b2r2_node_split_buf *src,
+static int analyze_fmt_conv(struct b2r2_control *cont,
+		struct b2r2_node_split_buf *src,
 		struct b2r2_node_split_buf *dst,
-		const u32 **vmx, u32 *node_count);
+		const u32 **vmx, u32 *node_count,
+		bool fullrange);
 static int analyze_color_fill(struct b2r2_node_split_job *this,
 		const struct b2r2_blt_request *req, u32 *node_count);
 static int analyze_copy(struct b2r2_node_split_job *this,
@@ -175,78 +60,77 @@ static int analyze_transform(struct b2r2_node_split_job *this,
 static int analyze_rot_scale(struct b2r2_node_split_job *this,
 		const struct b2r2_blt_request *req, u32 *node_count,
 		u32 *buf_count);
-static int analyze_scale_factors(struct b2r2_node_split_job *this);
+static int analyze_scale_factors(struct b2r2_control *cont,
+		struct b2r2_node_split_job *this);
 
-static void configure_src(struct b2r2_node *node,
-		struct b2r2_node_split_buf *src, const u32 *ivmx);
-static int configure_dst(struct b2r2_node *node,
-		struct b2r2_node_split_buf *dst, const u32 *ivmx,
-		struct b2r2_node **next);
-static void configure_blend(struct b2r2_node *node, u32 flags, u32 global_alpha,
-		bool swap_fg_bg);
-static void configure_clip(struct b2r2_node *node,
+static void configure_src(struct b2r2_control *cont, struct b2r2_node *node,
+		struct b2r2_node_split_buf *src,
+		struct b2r2_node_split_job *this);
+static void configure_bg(struct b2r2_control *cont, struct b2r2_node *node,
+		struct b2r2_node_split_buf *bg, bool swap_fg_bg);
+static int configure_dst(struct b2r2_control *cont, struct b2r2_node *node,
+		struct b2r2_node_split_buf *dst, struct b2r2_node **next);
+static void configure_blend(struct b2r2_control *cont, struct b2r2_node *node,
+		u32 flags, u32 global_alpha);
+static void configure_clip(struct b2r2_control *cont, struct b2r2_node *node,
 		struct b2r2_blt_rect *clip_rect);
 
-static int configure_tile(struct b2r2_node_split_job *this,
-		struct b2r2_node *node, struct b2r2_node **next);
-static void configure_direct_fill(struct b2r2_node *node, u32 color,
-		struct b2r2_node_split_buf *dst, struct b2r2_node **next);
-static int configure_fill(struct b2r2_node *node, u32 color,
-		enum b2r2_blt_fmt fmt, struct b2r2_node_split_buf *dst,
-		const u32 *ivmx, struct b2r2_node **next);
-static void configure_direct_copy(struct b2r2_node *node,
-		struct b2r2_node_split_buf *src,
-		struct b2r2_node_split_buf *dst, struct b2r2_node **next);
-static int configure_copy(struct b2r2_node *node,
-		struct b2r2_node_split_buf *src,
-		struct b2r2_node_split_buf *dst, const u32 *ivmx,
+static int configure_tile(struct b2r2_control *cont,
+		struct b2r2_node *node,
 		struct b2r2_node **next,
 		struct b2r2_node_split_job *this);
-static int configure_rotate(struct b2r2_node *node,
-		struct b2r2_node_split_buf *src,
-		struct b2r2_node_split_buf *dst, const u32 *ivmx,
+static void configure_direct_fill(struct b2r2_control *cont,
+		struct b2r2_node *node, u32 color,
+		struct b2r2_node_split_buf *dst,
+		struct b2r2_node **next);
+static int configure_fill(struct b2r2_control *cont,
+		struct b2r2_node *node, u32 color,
+		enum b2r2_blt_fmt fmt,
+		struct b2r2_node_split_buf *dst,
 		struct b2r2_node **next,
 		struct b2r2_node_split_job *this);
-static int configure_scale(struct b2r2_node *node,
+static void configure_direct_copy(struct b2r2_control *cont,
+		struct b2r2_node *node,
 		struct b2r2_node_split_buf *src,
-		struct b2r2_node_split_buf *dst, u16 h_rsf, u16 v_rsf,
-		const u32 *ivmx, struct b2r2_node **next,
+		struct b2r2_node_split_buf *dst,
+		struct b2r2_node **next);
+static int configure_copy(struct b2r2_control *cont,
+		struct b2r2_node *node,	struct b2r2_node_split_buf *src,
+		struct b2r2_node_split_buf *dst,
+		struct b2r2_node **next,
 		struct b2r2_node_split_job *this);
-static int configure_rot_scale(struct b2r2_node_split_job *this,
-		struct b2r2_node *node, struct b2r2_node **next);
+static int configure_rotate(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node_split_buf *src,
+		struct b2r2_node_split_buf *dst,
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this);
+static int configure_scale(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node_split_buf *src,
+		struct b2r2_node_split_buf *dst,
+		u16 h_rsf, u16 v_rsf,
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this);
+static int configure_rot_scale(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this);
 
-static int check_rect(const struct b2r2_blt_img *img,
+static int check_rect(struct b2r2_control *cont,
+		const struct b2r2_blt_img *img,
 		const struct b2r2_blt_rect *rect,
 		const struct b2r2_blt_rect *clip);
-static void set_buf(struct b2r2_node_split_buf *buf, u32 addr,
-		const struct b2r2_blt_img *img,
+static void set_buf(struct b2r2_control *cont,
+		struct b2r2_node_split_buf *buf,
+		u32 addr, const struct b2r2_blt_img *img,
 		const struct b2r2_blt_rect *rect, bool color_fill, u32 color);
-static int setup_tmp_buf(struct b2r2_node_split_buf *this, u32 max_size,
+static int setup_tmp_buf(struct b2r2_control *cont,
+		struct b2r2_node_split_buf *this, u32 max_size,
 		enum b2r2_blt_fmt pref_fmt, u32 pref_width, u32 pref_height);
 
-static enum b2r2_ty get_alpha_range(enum b2r2_blt_fmt fmt);
-static u32 set_alpha(enum b2r2_blt_fmt fmt, u8 alpha, u32 color);
-static u8  get_alpha(enum b2r2_blt_fmt fmt, u32 pixel);
-static bool fmt_has_alpha(enum b2r2_blt_fmt fmt);
-
-static bool is_rgb_fmt(enum b2r2_blt_fmt fmt);
-static bool is_bgr_fmt(enum b2r2_blt_fmt fmt);
-static bool is_yuv_fmt(enum b2r2_blt_fmt fmt);
-static bool is_yvu_fmt(enum b2r2_blt_fmt fmt);
-static bool is_yuv420_fmt(enum b2r2_blt_fmt fmt);
-static bool is_yuv422_fmt(enum b2r2_blt_fmt fmt);
-static bool is_yuv444_fmt(enum b2r2_blt_fmt fmt);
-static bool is_yvu420_fmt(enum b2r2_blt_fmt fmt);
-static bool is_yvu422_fmt(enum b2r2_blt_fmt fmt);
-
-static int fmt_byte_pitch(enum b2r2_blt_fmt fmt, u32 width);
-static enum b2r2_native_fmt to_native_fmt(enum b2r2_blt_fmt fmt);
-static u32 to_RGB888(u32 color, const enum b2r2_blt_fmt fmt);
-static enum b2r2_fmt_type get_fmt_type(enum b2r2_blt_fmt fmt);
-
 static bool is_transform(const struct b2r2_blt_request *req);
-static int calculate_scale_factor(u32 from, u32 to, u16 *sf_out);
-static s32 rescale(s32 dim, u16 sf);
+static s32 rescale(struct b2r2_control *cont, s32 dim, u16 sf);
 static s32 inv_rescale(s32 dim, u16 sf);
 
 static void set_target(struct b2r2_node *node, u32 addr,
@@ -260,8 +144,13 @@ static void set_src_2(struct b2r2_node *node, u32 addr,
 static void set_src_3(struct b2r2_node *node, u32 addr,
 		struct b2r2_node_split_buf *buf);
 static void set_ivmx(struct b2r2_node *node, const u32 *vmx_values);
+static void set_ovmx(struct b2r2_node *node, const u32 *vmx_values);
 
 static void reset_nodes(struct b2r2_node *node);
+
+static bool bg_format_require_ivmx(enum b2r2_blt_fmt bg_fmt,
+		enum b2r2_blt_fmt dst_fmt);
+static bool is_scaling(struct b2r2_node_split_job *this);
 
 /*
  * Public functions
@@ -276,8 +165,9 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 {
 	int ret;
 	bool color_fill;
+	struct b2r2_control *cont = req->instance->control;
 
-	b2r2_log_info("%s\n", __func__);
+	b2r2_log_info(cont->dev, "%s\n", __func__);
 
 	memset(this, 0, sizeof(*this));
 
@@ -300,7 +190,7 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 	case B2R2_BLT_FMT_32_BIT_AYUV8888:
 	case B2R2_BLT_FMT_24_BIT_VUY888:
 	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-		if (is_bgr_fmt(req->user_req.dst_img.fmt)) {
+		if (b2r2_is_bgr_fmt(req->user_req.dst_img.fmt)) {
 			ret = -ENOSYS;
 			goto unsupported;
 		}
@@ -315,7 +205,7 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 	case B2R2_BLT_FMT_32_BIT_AYUV8888:
 	case B2R2_BLT_FMT_24_BIT_VUY888:
 	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-		if (is_bgr_fmt(req->user_req.src_img.fmt)) {
+		if (b2r2_is_bgr_fmt(req->user_req.src_img.fmt)) {
 			ret = -ENOSYS;
 			goto unsupported;
 		}
@@ -324,53 +214,76 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 		break;
 	}
 
+	/* Unsupported formats on bg */
+	if (this->flags & B2R2_BLT_FLAG_BG_BLEND)
+		/* TODO: fix the oVMx for this */
+		/*
+		 * There are no ivmx on source 1, so check that there is no
+		 * such requirement on the background to destination format
+		 * conversion. This check is sufficient since the node splitter
+		 * currently does not support ovmx. That fact also
+		 * removes the source format as a parameter when checking the
+		 * background format.
+		 */
+		if (bg_format_require_ivmx(req->user_req.bg_img.fmt,
+				req->user_req.dst_img.fmt)) {
+			ret = -ENOSYS;
+			goto unsupported;
+		}
+
 	if ((this->flags & B2R2_BLT_FLAG_SOURCE_COLOR_KEY) &&
-			(is_yuv_fmt(req->user_req.src_img.fmt) ||
+			(b2r2_is_yuv_fmt(req->user_req.src_img.fmt) ||
 			req->user_req.src_img.fmt == B2R2_BLT_FMT_1_BIT_A1 ||
 			req->user_req.src_img.fmt == B2R2_BLT_FMT_8_BIT_A8)) {
-		b2r2_log_warn("%s: Unsupported: source color keying with "
-			"YUV or pure alpha formats.\n",
-			__func__);
+		b2r2_log_warn(cont->dev, "%s: Unsupported: source color keying "
+			"with YUV or pure alpha formats.\n", __func__);
 		ret = -ENOSYS;
 		goto unsupported;
 	}
 
 	if (this->flags & (B2R2_BLT_FLAG_DEST_COLOR_KEY |
 			B2R2_BLT_FLAG_SOURCE_MASK)) {
-		b2r2_log_warn("%s: Unsupported: source mask, "
-			"destination color keying.\n",
-			__func__);
+		b2r2_log_warn(cont->dev, "%s: Unsupported: source mask, "
+			"destination color keying.\n", __func__);
 		ret = -ENOSYS;
 		goto unsupported;
 	}
 
 	if ((req->user_req.flags & B2R2_BLT_FLAG_CLUT_COLOR_CORRECTION) &&
 			req->user_req.clut == NULL) {
-		b2r2_log_warn("%s: Invalid request: no table specified "
-			"for CLUT color correction.\n",
+		b2r2_log_warn(cont->dev, "%s: Invalid request: no table "
+			"specified for CLUT color correction.\n",
 			__func__);
 		return -EINVAL;
 	}
 
 	/* Check for color fill */
 	color_fill = (this->flags & (B2R2_BLT_FLAG_SOURCE_FILL |
-				B2R2_BLT_FLAG_SOURCE_FILL_RAW)) != 0;
+		B2R2_BLT_FLAG_SOURCE_FILL_RAW)) != 0;
 
 	/* Configure the source and destination buffers */
-	set_buf(&this->src, req->src_resolved.physical_address,
-			&req->user_req.src_img, &req->user_req.src_rect,
-			color_fill, req->user_req.src_color);
+	set_buf(cont, &this->src, req->src_resolved.physical_address,
+		&req->user_req.src_img, &req->user_req.src_rect,
+		color_fill, req->user_req.src_color);
 
-	set_buf(&this->dst, req->dst_resolved.physical_address,
+	if (this->flags & B2R2_BLT_FLAG_BG_BLEND) {
+		set_buf(cont, &this->bg, req->bg_resolved.physical_address,
+			&req->user_req.bg_img, &req->user_req.bg_rect,
+			false, 0);
+	}
+
+	set_buf(cont, &this->dst, req->dst_resolved.physical_address,
 			&req->user_req.dst_img, &req->user_req.dst_rect, false,
 			0);
 
-	b2r2_log_info("%s:\n"
+	b2r2_log_info(cont->dev, "%s:\n"
 		"\t\tsrc.rect=(%4d, %4d, %4d, %4d)\t"
+		"bg.rect=(%4d, %4d, %4d, %4d)\t"
 		"dst.rect=(%4d, %4d, %4d, %4d)\n", __func__, this->src.rect.x,
 		this->src.rect.y, this->src.rect.width, this->src.rect.height,
-		this->dst.rect.x, this->dst.rect.y, this->dst.rect.width,
-		this->dst.rect.height);
+		this->bg.rect.x, this->bg.rect.y, this->bg.rect.width,
+		this->bg.rect.height, this->dst.rect.x, this->dst.rect.y,
+		this->dst.rect.width, this->dst.rect.height);
 
 	if (this->flags & B2R2_BLT_FLAG_DITHER)
 		this->dst.dither = B2R2_TTY_RGB_ROUND_DITHER;
@@ -383,19 +296,24 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 			(this->global_alpha != 255))
 		this->blend = true;
 	else if (this->flags & B2R2_BLT_FLAG_PER_PIXEL_ALPHA_BLEND)
-		this->blend = (color_fill && fmt_has_alpha(this->dst.fmt)) ||
-				fmt_has_alpha(this->src.fmt);
+		this->blend = (color_fill && b2r2_fmt_has_alpha(this->dst.fmt)) ||
+				b2r2_fmt_has_alpha(this->src.fmt);
+	else if (this->flags & B2R2_BLT_FLAG_BG_BLEND)
+		this->blend = true;
+
+	/* Check for full range YUV conversion */
+	if (this->flags & B2R2_BLT_FLAG_FULL_RANGE_YUV)
+		this->fullrange = true;
 
 	if (this->blend && this->src.type == B2R2_FMT_TYPE_PLANAR) {
-		b2r2_log_warn("%s: Unsupported: blend with planar source\n",
-				__func__);
+		b2r2_log_warn(cont->dev, "%s: Unsupported: blend with planar"
+			" source\n", __func__);
 		ret = -ENOSYS;
 		goto unsupported;
 	}
 
 	/* Check for clipping */
-	this->clip = (this->flags &
-				B2R2_BLT_FLAG_DESTINATION_CLIP) != 0;
+	this->clip = (this->flags & B2R2_BLT_FLAG_DESTINATION_CLIP) != 0;
 	if (this->clip) {
 		s32 l = req->user_req.dst_clip_rect.x;
 		s32 r = l + req->user_req.dst_clip_rect.width;
@@ -425,18 +343,34 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 	}
 
 	/* Validate the destination */
-	ret = check_rect(&req->user_req.dst_img, &req->user_req.dst_rect,
+	ret = check_rect(cont, &req->user_req.dst_img, &req->user_req.dst_rect,
 			&this->clip_rect);
 	if (ret < 0)
 		goto error;
 
 	/* Validate the source (if not color fill) */
 	if (!color_fill) {
-		ret = check_rect(&req->user_req.src_img,
+		ret = check_rect(cont, &req->user_req.src_img,
 					&req->user_req.src_rect, NULL);
 		if (ret < 0)
 			goto error;
 	}
+
+	/* Validate the background source */
+	if (this->flags & B2R2_BLT_FLAG_BG_BLEND) {
+		ret = check_rect(cont, &req->user_req.bg_img,
+					&req->user_req.bg_rect, NULL);
+		if (ret < 0)
+			goto error;
+	}
+
+	/*
+	 * The transform enum is defined so that all rotation transforms are
+	 * masked with the rotation flag
+	 */
+	this->rotation = (this->transform & B2R2_BLT_TRANSFORM_CCW_ROT_90) != 0;
+
+	this->scaling = is_scaling(this);
 
 	/* Do the analysis depending on the type of operation */
 	if (color_fill) {
@@ -455,9 +389,9 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 		 *       likely a bug in the hardware.
 		 */
 		upsample = this->src.type != B2R2_FMT_TYPE_RASTER &&
-			is_yuv_fmt(this->src.fmt);
+			b2r2_is_yuv_fmt(this->src.fmt);
 		downsample = this->dst.type != B2R2_FMT_TYPE_RASTER &&
-			is_yuv_fmt(this->dst.fmt);
+			b2r2_is_yuv_fmt(this->dst.fmt);
 
 		if (is_transform(req) || upsample || downsample)
 			ret = analyze_transform(this, req, &this->node_count,
@@ -467,10 +401,38 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 						&this->buf_count);
 	}
 
+	/*
+	 * Blending on YUV422R does not work when background is set on input 1.
+	 * Also, swapping the background with the foreground can not be
+	 * supported if scaling is required since input 1 can not do scaling.
+	 */
+	if (this->blend) {
+		if (this->flags & B2R2_BLT_FLAG_BG_BLEND) {
+			if (req->user_req.bg_img.fmt ==
+						B2R2_BLT_FMT_CB_Y_CR_Y &&
+					req->user_req.src_img.fmt !=
+						B2R2_BLT_FMT_CB_Y_CR_Y)
+				this->swap_fg_bg = true;
+		} else {
+			if (req->user_req.dst_img.fmt ==
+						B2R2_BLT_FMT_CB_Y_CR_Y &&
+					req->user_req.src_img.fmt !=
+						B2R2_BLT_FMT_CB_Y_CR_Y)
+				this->swap_fg_bg = true;
+		}
+
+		if (this->scaling && this->swap_fg_bg) {
+			b2r2_log_warn(cont->dev, "%s: No support for "
+				"scaling foreground when blending on "
+				"YUV422R!\n", __func__);
+			ret = -ENOSYS;
+		}
+	}
+
 	if (ret == -ENOSYS) {
 		goto unsupported;
 	} else if (ret < 0) {
-		b2r2_log_warn("%s: Analysis failed!\n", __func__);
+		b2r2_log_warn(cont->dev, "%s: Analysis failed!\n", __func__);
 		goto error;
 	}
 
@@ -496,21 +458,22 @@ int b2r2_node_split_analyze(const struct b2r2_blt_request *req,
 	if (this->buf_count > 0)
 		*bufs = &this->work_bufs[0];
 
-	b2r2_log_info("%s: dst.win=(%d, %d, %d, %d), dst.dx=%d, dst.dy=%d\n",
-			__func__, this->dst.win.x, this->dst.win.y,
-			this->dst.win.width, this->dst.win.height, this->dst.dx,
-			this->dst.dy);
+	b2r2_log_info(cont->dev, "%s: dst.win=(%d, %d, %d, %d), "
+		"dst.dx=%d, dst.dy=%d\n", __func__, this->dst.win.x,
+		this->dst.win.y, this->dst.win.width, this->dst.win.height,
+		this->dst.dx, this->dst.dy);
 	if (this->buf_count > 0)
-		b2r2_log_info("%s: buf_count=%d, buf_size=%d, node_count=%d\n",
-			__func__, *buf_count, bufs[0]->size, *node_count);
+		b2r2_log_info(cont->dev, "%s: buf_count=%d, buf_size=%d, "
+			"node_count=%d\n", __func__, *buf_count,
+			bufs[0]->size, *node_count);
 	else
-		b2r2_log_info("%s: buf_count=%d, node_count=%d\n",
+		b2r2_log_info(cont->dev, "%s: buf_count=%d, node_count=%d\n",
 			__func__, *buf_count, *node_count);
 
 	return 0;
 
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 unsupported:
 	return ret;
 }
@@ -518,8 +481,8 @@ unsupported:
 /**
  * b2r2_node_split_configure() - configures the node list
  */
-int b2r2_node_split_configure(struct b2r2_node_split_job *this,
-		struct b2r2_node *first)
+int b2r2_node_split_configure(struct b2r2_control *cont,
+		struct b2r2_node_split_job *this, struct b2r2_node *first)
 {
 	int ret;
 
@@ -545,13 +508,14 @@ int b2r2_node_split_configure(struct b2r2_node_split_job *this,
 			if (dst_w > dst->rect.width - x_pixels)
 				dst->win.width = dst->rect.width - x_pixels;
 
-			ret = configure_tile(this, node, &node);
+			ret = configure_tile(cont, node, &node, this);
 			if (ret < 0)
 				goto error;
 
 			dst->win.x += dst->dx;
 			x_pixels += max(dst->dx, -dst->dx);
-			b2r2_log_info("%s: x_pixels=%d\n", __func__, x_pixels);
+			b2r2_log_info(cont->dev, "%s: x_pixels=%d\n",
+				__func__, x_pixels);
 		}
 
 		dst->win.y += dst->dy;
@@ -561,22 +525,23 @@ int b2r2_node_split_configure(struct b2r2_node_split_job *this,
 		dst->win.width = dst_w;
 		x_pixels = 0;
 
-		b2r2_log_info("%s: y_pixels=%d\n", __func__, y_pixels);
+		b2r2_log_info(cont->dev, "%s: y_pixels=%d\n",
+			__func__, y_pixels);
 	}
 
 	return 0;
 
 error:
-	b2r2_log_warn("%s: error!\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: error!\n", __func__);
 	return ret;
 }
 
 /**
  * b2r2_node_split_assign_buffers() - assigns temporary buffers to the node list
  */
-int b2r2_node_split_assign_buffers(struct b2r2_node_split_job *this,
-		struct b2r2_node *first, struct b2r2_work_buf *bufs,
-		u32 buf_count)
+int b2r2_node_split_assign_buffers(struct b2r2_control *cont,
+		struct b2r2_node_split_job *this, struct b2r2_node *first,
+		struct b2r2_work_buf *bufs, u32 buf_count)
 {
 	struct b2r2_node *node = first;
 
@@ -585,8 +550,8 @@ int b2r2_node_split_assign_buffers(struct b2r2_node_split_job *this,
 		if (node->dst_tmp_index) {
 			BUG_ON(node->dst_tmp_index > buf_count);
 
-			b2r2_log_info("%s: assigning buf %d as dst\n",
-					__func__, node->dst_tmp_index);
+			b2r2_log_info(cont->dev, "%s: assigning buf %d as "
+				"dst\n", __func__, node->dst_tmp_index);
 
 			node->node.GROUP1.B2R2_TBA =
 				bufs[node->dst_tmp_index - 1].phys_addr;
@@ -594,23 +559,23 @@ int b2r2_node_split_assign_buffers(struct b2r2_node_split_job *this,
 		if (node->src_tmp_index) {
 			u32 addr = bufs[node->src_tmp_index - 1].phys_addr;
 
-			b2r2_log_info("%s: "
-				"assigning buf %d as src %d ", __func__,
-					node->src_tmp_index, node->src_index);
+			b2r2_log_info(cont->dev, "%s: assigning buf %d as src "
+				"%d ", __func__, node->src_tmp_index,
+				node->src_index);
 
 			BUG_ON(node->src_tmp_index > buf_count);
 
 			switch (node->src_index) {
 			case 1:
-				b2r2_log_info("1\n");
+				b2r2_log_info(cont->dev, "1\n");
 				node->node.GROUP3.B2R2_SBA = addr;
 				break;
 			case 2:
-				b2r2_log_info("2\n");
+				b2r2_log_info(cont->dev, "2\n");
 				node->node.GROUP4.B2R2_SBA = addr;
 				break;
 			case 3:
-				b2r2_log_info("3\n");
+				b2r2_log_info(cont->dev, "3\n");
 				node->node.GROUP5.B2R2_SBA = addr;
 				break;
 			default:
@@ -619,7 +584,7 @@ int b2r2_node_split_assign_buffers(struct b2r2_node_split_job *this,
 			}
 		}
 
-		b2r2_log_info("%s: tba=%p\tsba=%p\n", __func__,
+		b2r2_log_info(cont->dev, "%s: tba=%p\tsba=%p\n", __func__,
 			(void *)node->node.GROUP1.B2R2_TBA,
 			(void *)node->node.GROUP4.B2R2_SBA);
 
@@ -632,8 +597,8 @@ int b2r2_node_split_assign_buffers(struct b2r2_node_split_job *this,
 /**
  * b2r2_node_split_unassign_buffers() - releases temporary buffers
  */
-void b2r2_node_split_unassign_buffers(struct b2r2_node_split_job *this,
-		struct b2r2_node *first)
+void b2r2_node_split_unassign_buffers(struct b2r2_control *cont,
+		struct b2r2_node_split_job *this, struct b2r2_node *first)
 {
 	return;
 }
@@ -641,18 +606,37 @@ void b2r2_node_split_unassign_buffers(struct b2r2_node_split_job *this,
 /**
  * b2r2_node_split_cancel() - cancels and releases a job instance
  */
-void b2r2_node_split_cancel(struct b2r2_node_split_job *this)
+void b2r2_node_split_cancel(struct b2r2_control *cont,
+		struct b2r2_node_split_job *this)
 {
 	memset(this, 0, sizeof(*this));
 
 	return;
 }
 
-/*
- * Private functions
- */
+static bool is_scaling(struct b2r2_node_split_job *this)
+{
+	bool scaling;
 
-static int check_rect(const struct b2r2_blt_img *img,
+	if (this->rotation)
+		scaling = (this->src.rect.width != this->dst.rect.height) ||
+			(this->src.rect.height != this->dst.rect.width);
+	else
+		scaling = (this->src.rect.width != this->dst.rect.width) ||
+			(this->src.rect.height != this->dst.rect.height);
+
+	/* Plane separated formats must be treated as scaling */
+	scaling = scaling ||
+			(this->src.type == B2R2_FMT_TYPE_SEMI_PLANAR) ||
+			(this->src.type == B2R2_FMT_TYPE_PLANAR) ||
+			(this->dst.type == B2R2_FMT_TYPE_SEMI_PLANAR) ||
+			(this->dst.type == B2R2_FMT_TYPE_PLANAR);
+
+	return scaling;
+}
+
+static int check_rect(struct b2r2_control *cont,
+		const struct b2r2_blt_img *img,
 		const struct b2r2_blt_rect *rect,
 		const struct b2r2_blt_rect *clip)
 {
@@ -662,20 +646,22 @@ static int check_rect(const struct b2r2_blt_img *img,
 
 	/* Check rectangle dimensions*/
 	if ((rect->width <= 0) || (rect->height <= 0)) {
-		b2r2_log_warn("%s: "
-			"Illegal rect (%d, %d, %d, %d)\n",
-			__func__, rect->x, rect->y, rect->width, rect->height);
+		b2r2_log_warn(cont->dev, "%s: Illegal rect (%d, %d, %d, %d)\n",
+				__func__, rect->x, rect->y, rect->width,
+				rect->height);
 		ret = -EINVAL;
 		goto error;
 	}
 
-	/* If we are using clip we should only look at the intersection of the
-	   rects */
+	/*
+	 * If we are using clip we should only look at the intersection of the
+	 * rects.
+	 */
 	if (clip) {
-		l = MAX(rect->x, clip->x);
-		t = MAX(rect->y, clip->y);
-		r = MIN(rect->x + rect->width, clip->x + clip->width);
-		b = MIN(rect->y + rect->height, clip->y + clip->height);
+		l = max(rect->x, clip->x);
+		t = max(rect->y, clip->y);
+		r = min(rect->x + rect->width, clip->x + clip->width);
+		b = min(rect->y + rect->height, clip->y + clip->height);
 	} else {
 		l = rect->x;
 		t = rect->y;
@@ -685,23 +671,23 @@ static int check_rect(const struct b2r2_blt_img *img,
 
 	/* Check so that the rect isn't outside the buffer */
 	if ((l < 0) || (t < 0) || (l >= img->width) || (t >= img->height)) {
-		b2r2_log_warn("%s: "
-			"rect origin outside buffer\n", __func__);
+		b2r2_log_warn(cont->dev, "%s: rect origin outside buffer\n",
+			__func__);
 		ret = -EINVAL;
 		goto error;
 	}
 
 	if ((r > img->width) || (b > img->height)) {
-		b2r2_log_warn("%s: "
-			"rect ends outside buffer\n", __func__);
+		b2r2_log_warn(cont->dev, "%s: rect ends outside buffer\n",
+			__func__);
 		ret = -EINVAL;
 		goto error;
 	}
 
 	/* Check so the intersected rectangle isn't empty */
 	if ((l == r) || (t == b)) {
-		b2r2_log_warn("%s: "
-			"rect is empty (width or height zero)\n",
+		b2r2_log_warn(cont->dev,
+			"%s: rect is empty (width or height zero)\n",
 			__func__);
 		ret = -EINVAL;
 		goto error;
@@ -709,107 +695,120 @@ static int check_rect(const struct b2r2_blt_img *img,
 
 	return 0;
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
+}
+
+/**
+ * bg_format_require_ivmx()
+ *
+ * Check if there are any color space conversion needed for the
+ * background to the destination format.
+ */
+static bool bg_format_require_ivmx(enum b2r2_blt_fmt bg_fmt,
+				enum b2r2_blt_fmt dst_fmt)
+{
+	if (b2r2_is_rgb_fmt(bg_fmt)) {
+		if (b2r2_is_yvu_fmt(dst_fmt))
+			return true;
+		else if (dst_fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
+				dst_fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
+				dst_fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
+				dst_fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
+			return true;
+		else if (b2r2_is_yuv_fmt(dst_fmt))
+			return true;
+		else if (b2r2_is_bgr_fmt(dst_fmt))
+			return true;
+	} else if (b2r2_is_yvu_fmt(bg_fmt)) {
+		if (b2r2_is_rgb_fmt(dst_fmt))
+			return true;
+		else if (b2r2_is_bgr_fmt(dst_fmt))
+			return true;
+		else if (dst_fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
+				dst_fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
+				dst_fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
+				dst_fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
+			return true;
+		else if (b2r2_is_yuv_fmt(dst_fmt) &&
+				!b2r2_is_yvu_fmt(dst_fmt))
+			return true;
+	} else if (bg_fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
+			bg_fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
+			bg_fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
+			bg_fmt == B2R2_BLT_FMT_32_BIT_VUYA8888) {
+		if (b2r2_is_rgb_fmt(dst_fmt)) {
+			return true;
+		} else if (b2r2_is_yvu_fmt(dst_fmt)) {
+			return true;
+		} else if (b2r2_is_yuv_fmt(dst_fmt)) {
+			switch (dst_fmt) {
+			case B2R2_BLT_FMT_24_BIT_YUV888:
+			case B2R2_BLT_FMT_32_BIT_AYUV8888:
+			case B2R2_BLT_FMT_24_BIT_VUY888:
+			case B2R2_BLT_FMT_32_BIT_VUYA8888:
+				break;
+			default:
+				return true;
+			}
+		}
+	} else if (b2r2_is_yuv_fmt(bg_fmt)) {
+		if (b2r2_is_rgb_fmt(dst_fmt))
+			return true;
+		else if (b2r2_is_bgr_fmt(dst_fmt))
+			return true;
+		else if (dst_fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
+				dst_fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
+				dst_fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
+				dst_fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
+			return true;
+		else if (b2r2_is_yvu_fmt(dst_fmt))
+			return true;
+	} else if (b2r2_is_bgr_fmt(bg_fmt)) {
+		if (b2r2_is_rgb_fmt(dst_fmt))
+			return true;
+		else if (b2r2_is_yvu_fmt(dst_fmt))
+			return true;
+		else if (dst_fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
+				dst_fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
+				dst_fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
+				dst_fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
+			return true;
+		else if (b2r2_is_yuv_fmt(dst_fmt))
+			return true;
+	}
+
+	return false;
 }
 
 /**
  * analyze_fmt_conv() - analyze the format conversions needed for a job
  */
-static int analyze_fmt_conv(struct b2r2_node_split_buf *src,
+static int analyze_fmt_conv(struct b2r2_control *cont,
+		struct b2r2_node_split_buf *src,
 		struct b2r2_node_split_buf *dst,
-		const u32 **vmx, u32 *node_count)
+		const u32 **vmx, u32 *node_count,
+		bool fullrange)
 {
-	if (is_rgb_fmt(src->fmt)) {
-		if (is_yvu_fmt(dst->fmt))
-			*vmx = &vmx_rgb_to_yvu[0];
-		else if (dst->fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
-				dst->fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
-				dst->fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
-				dst->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
-			/*
-			 * (A)YUV/VUY(A) formats differ only in component
-			 * order. This is handled by the endianness bit
-			 * in B2R2_STY/TTY registers when src/target are set.
-			 */
-			*vmx = &vmx_rgb_to_blt_yuv888[0];
-		else if (is_yuv_fmt(dst->fmt))
-			*vmx = &vmx_rgb_to_yuv[0];
-		else if (is_bgr_fmt(dst->fmt))
-			*vmx = &vmx_rgb_to_bgr[0];
-	} else if (is_yvu_fmt(src->fmt)) {
-		if (is_rgb_fmt(dst->fmt))
-			*vmx = &vmx_yvu_to_rgb[0];
-		else if (is_bgr_fmt(dst->fmt))
-			*vmx = &vmx_yvu_to_bgr[0];
-		else if (dst->fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
-				dst->fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
-				dst->fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
-				dst->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
-			*vmx = &vmx_yvu_to_blt_yuv888[0];
-		else if (is_yuv_fmt(dst->fmt) &&
-				!is_yvu_fmt(dst->fmt))
-			*vmx = &vmx_yvu_to_yuv[0];
-	} else if (src->fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
-			src->fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
-			src->fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
-			src->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888) {
-		/*
-		 * (A)YUV/VUY(A) formats differ only in component
-		 * order. This is handled by the endianness bit
-		 * in B2R2_STY/TTY registers when src/target are set.
-		 */
-		if (is_rgb_fmt(dst->fmt)) {
-			*vmx = &vmx_blt_yuv888_to_rgb[0];
-		} else if (is_yvu_fmt(dst->fmt)) {
-			*vmx = &vmx_blt_yuv888_to_yvu[0];
-		} else if (is_yuv_fmt(dst->fmt)) {
-			switch (dst->fmt) {
-			case B2R2_BLT_FMT_24_BIT_YUV888:
-			case B2R2_BLT_FMT_32_BIT_AYUV8888:
-			case B2R2_BLT_FMT_24_BIT_VUY888:
-			case B2R2_BLT_FMT_32_BIT_VUYA8888: /* do nothing */
-				break;
-			default:
-				*vmx = &vmx_blt_yuv888_to_yuv[0];
-				break;
-			}
-		}
-	} else if (is_yuv_fmt(src->fmt)) {
-		if (is_rgb_fmt(dst->fmt))
-			*vmx = &vmx_yuv_to_rgb[0];
-		else if (is_bgr_fmt(dst->fmt))
-			*vmx = &vmx_yuv_to_bgr[0];
-		else if (dst->fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
-				dst->fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
-				dst->fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
-				dst->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
-			*vmx = &vmx_yuv_to_blt_yuv888[0];
-		else if (is_yvu_fmt(dst->fmt))
-			*vmx = &vmx_yvu_to_yuv[0];
-	} else if (is_bgr_fmt(src->fmt)) {
-		if (is_rgb_fmt(dst->fmt))
-			*vmx = &vmx_rgb_to_bgr[0];
-		else if (is_yvu_fmt(dst->fmt))
-			*vmx = &vmx_bgr_to_yvu[0];
-		else if (dst->fmt == B2R2_BLT_FMT_24_BIT_YUV888 ||
-				dst->fmt == B2R2_BLT_FMT_32_BIT_AYUV8888 ||
-				dst->fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
-				dst->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
-			BUG_ON(1);
-		else if (is_yuv_fmt(dst->fmt))
-			*vmx = &vmx_bgr_to_yuv[0];
-	}
+	enum b2r2_color_conversion cc =
+		b2r2_get_color_conversion(src->fmt, dst->fmt, fullrange);
 
-	if (dst->type == B2R2_FMT_TYPE_RASTER) {
-		*node_count = 1;
-	} else if (dst->type == B2R2_FMT_TYPE_SEMI_PLANAR) {
-		*node_count = 2;
-	} else if (dst->type == B2R2_FMT_TYPE_PLANAR) {
-		*node_count = 3;
-	} else {
-		/* That's strange... */
-		BUG_ON(1);
+	b2r2_log_info(cont->dev,
+			"%s: Color conversion: %d\n",
+			__func__, cc);
+
+	b2r2_get_vmx(cc, vmx);
+
+	if (node_count) {
+		if (dst->type == B2R2_FMT_TYPE_RASTER)
+			*node_count = 1;
+		else if (dst->type == B2R2_FMT_TYPE_SEMI_PLANAR)
+			*node_count = 2;
+		else if (dst->type == B2R2_FMT_TYPE_PLANAR)
+			*node_count = 3;
+		else
+			/* That's strange... */
+			BUG_ON(1);
 	}
 
 	return 0;
@@ -822,10 +821,12 @@ static int analyze_color_fill(struct b2r2_node_split_job *this,
 		const struct b2r2_blt_request *req, u32 *node_count)
 {
 	int ret;
+	struct b2r2_control *cont = req->instance->control;
 
 	/* Destination must be raster for raw fill to work */
 	if (this->dst.type != B2R2_FMT_TYPE_RASTER) {
-		b2r2_log_warn("%s: fill requires raster destination\n",
+		b2r2_log_warn(cont->dev,
+			"%s: fill requires raster destination\n",
 			__func__);
 		ret = -EINVAL;
 		goto error;
@@ -858,17 +859,17 @@ static int analyze_color_fill(struct b2r2_node_split_job *this,
 			this->src.fmt = this->dst.fmt;
 		} else {
 			/* If the dst fmt is YUV the fill fmt will be as well */
-			if (is_yuv_fmt(this->dst.fmt)) {
+			if (b2r2_is_yuv_fmt(this->dst.fmt)) {
 				this->src.fmt =	B2R2_BLT_FMT_32_BIT_AYUV8888;
-			} else if (is_rgb_fmt(this->dst.fmt)) {
+			} else if (b2r2_is_rgb_fmt(this->dst.fmt)) {
 				this->src.fmt =	B2R2_BLT_FMT_32_BIT_ARGB8888;
-			} else if (is_bgr_fmt(this->dst.fmt)) {
+			} else if (b2r2_is_bgr_fmt(this->dst.fmt)) {
 				/* Color will still be ARGB, we will translate
 				   using IVMX (configured later) */
 				this->src.fmt =	B2R2_BLT_FMT_32_BIT_ARGB8888;
 			} else {
 				/* Wait, what? */
-				b2r2_log_warn("%s: "
+				b2r2_log_warn(cont->dev, "%s: "
 					"Illegal destination format for fill",
 					__func__);
 				ret = -EINVAL;
@@ -880,21 +881,24 @@ static int analyze_color_fill(struct b2r2_node_split_job *this,
 		if (((this->flags & B2R2_BLT_FLAG_PER_PIXEL_ALPHA_BLEND)
 					!= 0) &&
 				((this->flags & B2R2_BLT_FLAG_SOURCE_FILL_RAW)
-					== 0) && fmt_has_alpha(this->src.fmt)) {
-			u8 pixel_alpha = get_alpha(this->src.fmt,
+					== 0) && b2r2_fmt_has_alpha(this->src.fmt)) {
+			u8 pixel_alpha = b2r2_get_alpha(this->src.fmt,
 							this->src.color);
 			u32 new_global = pixel_alpha * this->global_alpha / 255;
 
 			this->global_alpha = (u8)new_global;
 
-			/* Set the pixel alpha to full opaque so we don't get
-			   any nasty suprises */
-			this->src.color = set_alpha(this->src.fmt, 0xFF,
+			/*
+			 * Set the pixel alpha to full opaque so we don't get
+			 * any nasty surprises.
+			 */
+			this->src.color = b2r2_set_alpha(this->src.fmt, 0xFF,
 						this->src.color);
 		}
 
-		ret = analyze_fmt_conv(&this->src, &this->dst, &this->ivmx,
-				node_count);
+		ret = analyze_fmt_conv(
+			cont, &this->src, &this->dst, &this->ivmx,
+			node_count, this->fullrange);
 		if (ret < 0)
 			goto error;
 	}
@@ -902,7 +906,7 @@ static int analyze_color_fill(struct b2r2_node_split_job *this,
 	return 0;
 
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 
 }
@@ -915,24 +919,19 @@ static int analyze_transform(struct b2r2_node_split_job *this,
 		u32 *buf_count)
 {
 	int ret;
+#ifdef CONFIG_B2R2_DEBUG
+	struct b2r2_control *cont = req->instance->control;
+#endif
 
-	bool is_scaling;
-
-	b2r2_log_info("%s\n", __func__);
-
-	/*
-	 * The transform enum is defined so that all rotation transforms are
-	 * masked with the rotation flag
-	 */
-	this->rotation = (this->transform & B2R2_BLT_TRANSFORM_CCW_ROT_90) != 0;
+	b2r2_log_info(cont->dev, "%s\n", __func__);
 
 	/* B2R2 cannot do rotations if the destination is not raster, or 422R */
 	if (this->rotation && (this->dst.type != B2R2_FMT_TYPE_RASTER ||
-				this->dst.fmt == B2R2_BLT_FMT_Y_CB_Y_CR ||
 				this->dst.fmt == B2R2_BLT_FMT_CB_Y_CR_Y)) {
-		b2r2_log_warn("%s: Unsupported operation "
-				"(rot && (!dst_raster || dst==422R))",
-				__func__);
+		b2r2_log_warn(cont->dev,
+			"%s: Unsupported operation "
+			"(rot && (!dst_raster || dst==422R))",
+			__func__);
 		ret = -ENOSYS;
 		goto unsupported;
 	}
@@ -943,36 +942,20 @@ static int analyze_transform(struct b2r2_node_split_job *this,
 	if (this->transform & B2R2_BLT_TRANSFORM_FLIP_V)
 		this->dst.vso = B2R2_TY_VSO_BOTTOM_TO_TOP;
 
-	/* Check for scaling */
-	if (this->rotation) {
-		is_scaling = (this->src.rect.width != this->dst.rect.height) ||
-			(this->src.rect.height != this->dst.rect.width);
-	} else {
-		is_scaling = (this->src.rect.width != this->dst.rect.width) ||
-			(this->src.rect.height != this->dst.rect.height);
-	}
-
-	/* Plane separated formats must be treated as scaling */
-	is_scaling = is_scaling ||
-			(this->src.type == B2R2_FMT_TYPE_SEMI_PLANAR) ||
-			(this->src.type == B2R2_FMT_TYPE_PLANAR) ||
-			(this->dst.type == B2R2_FMT_TYPE_SEMI_PLANAR) ||
-			(this->dst.type == B2R2_FMT_TYPE_PLANAR);
-
-	if (is_scaling && this->rotation && this->blend) {
+	if (this->scaling && this->rotation && this->blend) {
 		/* TODO: This is unsupported. Fix it! */
-		b2r2_log_info("%s: Unsupported operation (rot+rescale+blend)\n",
-			__func__);
+		b2r2_log_info(cont->dev, "%s: Unsupported operation "
+			"(rot+rescale+blend)\n", __func__);
 		ret = -ENOSYS;
 		goto unsupported;
 	}
 
 	/* Check which type of transform */
-	if (is_scaling && this->rotation) {
+	if (this->scaling && this->rotation) {
 		ret = analyze_rot_scale(this, req, node_count, buf_count);
 		if (ret < 0)
 			goto error;
-	} else if (is_scaling) {
+	} else if (this->scaling) {
 		ret = analyze_scaling(this, req, node_count, buf_count);
 		if (ret < 0)
 			goto error;
@@ -991,7 +974,7 @@ static int analyze_transform(struct b2r2_node_split_job *this,
 	return 0;
 
 error:
-	b2r2_log_warn("%s: error!\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: error!\n", __func__);
 unsupported:
 	return ret;
 }
@@ -1004,6 +987,7 @@ static int analyze_copy(struct b2r2_node_split_job *this,
 		u32 *buf_count)
 {
 	int ret;
+	struct b2r2_control *cont = req->instance->control;
 
 	memcpy(&this->dst.win, &this->dst.rect, sizeof(this->dst.win));
 
@@ -1024,8 +1008,8 @@ static int analyze_copy(struct b2r2_node_split_job *this,
 
 		this->type = B2R2_COPY;
 
-		ret = analyze_fmt_conv(&this->src, &this->dst, &this->ivmx,
-				&copy_count);
+		ret = analyze_fmt_conv(cont, &this->src, &this->dst,
+			&this->ivmx, &copy_count, this->fullrange);
 		if (ret < 0)
 			goto error;
 
@@ -1035,7 +1019,7 @@ static int analyze_copy(struct b2r2_node_split_job *this,
 	return 0;
 
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 }
 
@@ -1058,34 +1042,30 @@ static int analyze_rot_scale_downscale(struct b2r2_node_split_job *this,
 		u32 *buf_count)
 {
 	int ret;
-
+	struct b2r2_control *cont = req->instance->control;
 	struct b2r2_node_split_buf *src = &this->src;
 	struct b2r2_node_split_buf *dst = &this->dst;
 	struct b2r2_node_split_buf *tmp = &this->tmp_bufs[0];
 
 	u32 num_rows;
 	u32 num_cols;
-
 	u32 rot_count;
 	u32 rescale_count;
-
 	u32 nodes_per_rot;
 	u32 nodes_per_rescale;
-
 	u32 right_width;
 	u32 bottom_height;
-
 	const u32 *dummy_vmx;
 
-	b2r2_log_info("%s\n", __func__);
+	b2r2_log_info(cont->dev, "%s\n", __func__);
 
 	/* Calculate the desired tmp buffer size */
-	tmp->win.width = rescale(B2R2_RESCALE_MAX_WIDTH - 1, this->h_rsf);
+	tmp->win.width = rescale(cont, B2R2_RESCALE_MAX_WIDTH - 1, this->h_rsf);
 	tmp->win.width >>= 10;
 	tmp->win.width = min(tmp->win.width, dst->rect.height);
 	tmp->win.height = dst->rect.width;
 
-	setup_tmp_buf(tmp, this->max_buf_size, dst->fmt, tmp->win.width,
+	setup_tmp_buf(cont, tmp, this->max_buf_size, dst->fmt, tmp->win.width,
 			tmp->win.height);
 	tmp->tmp_buf_index = 1;
 	this->work_bufs[0].size = tmp->pitch * tmp->height;
@@ -1110,12 +1090,14 @@ static int analyze_rot_scale_downscale(struct b2r2_node_split_job *this,
 	 * Calculate how many nodes are required to copy to and from the tmp
 	 * buffer
 	 */
-	ret = analyze_fmt_conv(src, tmp, &this->ivmx, &nodes_per_rescale);
+	ret = analyze_fmt_conv(cont, src, tmp, &this->ivmx, &nodes_per_rescale,
+			this->fullrange);
 	if (ret < 0)
 		goto error;
 
 	/* We will not do any format conversion in the rotation stage */
-	ret = analyze_fmt_conv(tmp, dst, &dummy_vmx, &nodes_per_rot);
+	ret = analyze_fmt_conv(cont, tmp, dst, &dummy_vmx, &nodes_per_rot,
+			this->fullrange);
 	if (ret < 0)
 		goto error;
 
@@ -1136,8 +1118,8 @@ static int analyze_rot_scale_downscale(struct b2r2_node_split_job *this,
 
 		rot_count += count * num_rows;
 		rescale_count += num_rows;
-		b2r2_log_info("%s: rightmost: %d nodes\n", __func__,
-				count*num_rows);
+		b2r2_log_info(cont->dev, "%s: rightmost: %d nodes\n", __func__,
+			count*num_rows);
 	}
 
 	/* Calculate node count for the bottom tiles */
@@ -1146,8 +1128,8 @@ static int analyze_rot_scale_downscale(struct b2r2_node_split_job *this,
 
 		rot_count += count * num_cols;
 		rescale_count += num_cols;
-		b2r2_log_info("%s: bottom: %d nodes\n", __func__,
-				count * num_cols);
+		b2r2_log_info(cont->dev, "%s: bottom: %d nodes\n", __func__,
+			count * num_cols);
 
 	}
 
@@ -1157,7 +1139,8 @@ static int analyze_rot_scale_downscale(struct b2r2_node_split_job *this,
 
 		rot_count += count;
 		rescale_count++;
-		b2r2_log_info("%s: bottom right: %d nodes\n", __func__, count);
+		b2r2_log_info(cont->dev, "%s: bottom right: %d nodes\n",
+			__func__, count);
 
 	}
 
@@ -1168,7 +1151,7 @@ static int analyze_rot_scale_downscale(struct b2r2_node_split_job *this,
 	return 0;
 
 error:
-	b2r2_log_warn("%s: error!\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: error!\n", __func__);
 	return ret;
 }
 
@@ -1188,10 +1171,10 @@ static int analyze_rot_scale(struct b2r2_node_split_job *this,
 		u32 *buf_count)
 {
 	int ret;
-
 	bool upscale;
+	struct b2r2_control *cont = req->instance->control;
 
-	ret = analyze_scale_factors(this);
+	ret = analyze_scale_factors(cont, this);
 	if (ret < 0)
 		goto error;
 
@@ -1223,21 +1206,20 @@ static int analyze_scaling(struct b2r2_node_split_job *this,
 		u32 *buf_count)
 {
 	int ret;
-
 	u32 copy_count;
 	u32 nbr_cols;
-
 	s32 dst_w;
+	struct b2r2_control *cont = req->instance->control;
 
-	b2r2_log_info("%s\n", __func__);
+	b2r2_log_info(cont->dev, "%s\n", __func__);
 
-	ret = analyze_scale_factors(this);
+	ret = analyze_scale_factors(cont, this);
 	if (ret < 0)
 		goto error;
 
 	/* Find out how many nodes a simple copy would require */
-	ret = analyze_fmt_conv(&this->src, &this->dst, &this->ivmx,
-			&copy_count);
+	ret = analyze_fmt_conv(cont, &this->src, &this->dst, &this->ivmx,
+			&copy_count, this->fullrange);
 	if (ret < 0)
 		goto error;
 
@@ -1254,18 +1236,19 @@ static int analyze_scaling(struct b2r2_node_split_job *this,
 	 *
 	 *   The stripe will touch pixels 127.8 through 255.6, i.e. 129 pixels.
 	 */
-	dst_w = rescale(B2R2_RESCALE_MAX_WIDTH - 1, this->h_rsf);
+	dst_w = rescale(cont, B2R2_RESCALE_MAX_WIDTH - 1, this->h_rsf);
 	if (dst_w < (1 << 10))
 		dst_w = 1;
 	else
 		dst_w >>= 10;
 
-	b2r2_log_info("%s: dst_w=%d dst.rect.width=%d\n", __func__, dst_w,
-			this->dst.rect.width);
+	b2r2_log_info(cont->dev, "%s: dst_w=%d dst.rect.width=%d\n",
+		__func__, dst_w, this->dst.rect.width);
 
 	this->dst.win.width = min(dst_w, this->dst.rect.width);
 
-	b2r2_log_info("%s: dst.win.width=%d\n", __func__, this->dst.win.width);
+	b2r2_log_info(cont->dev, "%s: dst.win.width=%d\n",
+		__func__, this->dst.win.width);
 
 	nbr_cols = this->dst.rect.width / this->dst.win.width;
 	if (this->dst.rect.width % this->dst.win.width)
@@ -1275,12 +1258,12 @@ static int analyze_scaling(struct b2r2_node_split_job *this,
 
 	this->type = B2R2_SCALE;
 
-	b2r2_log_info("%s exit\n", __func__);
+	b2r2_log_info(cont->dev, "%s exit\n", __func__);
 
 	return 0;
 
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 
 }
@@ -1293,12 +1276,12 @@ static int analyze_rotate(struct b2r2_node_split_job *this,
 		u32 *buf_count)
 {
 	int ret;
-
 	u32 nodes_per_tile;
+	struct b2r2_control *cont = req->instance->control;
 
 	/* Find out how many nodes a simple copy would require */
-	ret = analyze_fmt_conv(&this->src, &this->dst, &this->ivmx,
-			&nodes_per_tile);
+	ret = analyze_fmt_conv(cont, &this->src, &this->dst, &this->ivmx,
+			&nodes_per_tile, this->fullrange);
 	if (ret < 0)
 		goto error;
 
@@ -1326,14 +1309,14 @@ static int analyze_rotate(struct b2r2_node_split_job *this,
 		struct b2r2_node_split_buf *tmp = &this->tmp_bufs[0];
 		enum b2r2_blt_fmt tmp_fmt;
 
-		if (is_yuv_fmt(this->dst.fmt))
+		if (b2r2_is_yuv_fmt(this->dst.fmt))
 			tmp_fmt = B2R2_BLT_FMT_32_BIT_AYUV8888;
-		else if (is_bgr_fmt(this->dst.fmt))
+		else if (b2r2_is_bgr_fmt(this->dst.fmt))
 			tmp_fmt = B2R2_BLT_FMT_32_BIT_ABGR8888;
 		else
 			tmp_fmt = B2R2_BLT_FMT_32_BIT_ARGB8888;
 
-		setup_tmp_buf(tmp, this->max_buf_size, tmp_fmt,
+		setup_tmp_buf(cont, tmp, this->max_buf_size, tmp_fmt,
 				this->dst.win.width, this->dst.win.height);
 
 		tmp->tmp_buf_index = 1;
@@ -1362,14 +1345,15 @@ static int analyze_rotate(struct b2r2_node_split_job *this,
 	return 0;
 
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 }
 
 /**
  * analyze_scale_factors() - determines the scale factors for the op
  */
-static int analyze_scale_factors(struct b2r2_node_split_job *this)
+static int analyze_scale_factors(struct b2r2_control *cont,
+		struct b2r2_node_split_job *this)
 {
 	int ret;
 
@@ -1377,22 +1361,22 @@ static int analyze_scale_factors(struct b2r2_node_split_job *this)
 	u16 vsf;
 
 	if (this->rotation) {
-		ret = calculate_scale_factor(this->src.rect.width,
+		ret = calculate_scale_factor(cont->dev, this->src.rect.width,
 					this->dst.rect.height, &hsf);
 		if (ret < 0)
 			goto error;
 
-		ret = calculate_scale_factor(this->src.rect.height,
+		ret = calculate_scale_factor(cont->dev, this->src.rect.height,
 					this->dst.rect.width, &vsf);
 		if (ret < 0)
 			goto error;
 	} else {
-		ret = calculate_scale_factor(this->src.rect.width,
+		ret = calculate_scale_factor(cont->dev, this->src.rect.width,
 					this->dst.rect.width, &hsf);
 		if (ret < 0)
 			goto error;
 
-		ret = calculate_scale_factor(this->src.rect.height,
+		ret = calculate_scale_factor(cont->dev, this->src.rect.height,
 					this->dst.rect.height, &vsf);
 		if (ret < 0)
 			goto error;
@@ -1404,29 +1388,33 @@ static int analyze_scale_factors(struct b2r2_node_split_job *this)
 	this->h_rsf = hsf;
 	this->v_rsf = vsf;
 
-	b2r2_log_info("%s: h_rsf=%.4x\n", __func__, this->h_rsf);
-	b2r2_log_info("%s: v_rsf=%.4x\n", __func__, this->v_rsf);
+	b2r2_log_info(cont->dev, "%s: h_rsf=%.4x\n", __func__, this->h_rsf);
+	b2r2_log_info(cont->dev, "%s: v_rsf=%.4x\n", __func__, this->v_rsf);
 
 	return 0;
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 }
 
 /**
  * configure_tile() - configures one tile of a blit operation
  */
-static int configure_tile(struct b2r2_node_split_job *this,
-		struct b2r2_node *node, struct b2r2_node **next)
+static int configure_tile(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this)
 {
 	int ret = 0;
 
 	struct b2r2_node *last;
 	struct b2r2_node_split_buf *src = &this->src;
 	struct b2r2_node_split_buf *dst = &this->dst;
+	struct b2r2_node_split_buf *bg = &this->bg;
 
 	struct b2r2_blt_rect dst_norm;
 	struct b2r2_blt_rect src_norm;
+	struct b2r2_blt_rect bg_norm;
 
 	/* Normalize the dest coords to the dest rect coordinate space  */
 	dst_norm.x = dst->win.x - dst->rect.x;
@@ -1462,24 +1450,39 @@ static int configure_tile(struct b2r2_node_split_job *this,
 	src->win.width = src_norm.width;
 	src->win.height = src_norm.height;
 
+	/* Set bg norm */
+	bg_norm.x = dst->win.x - dst->rect.x;
+	bg_norm.y = dst->win.y - dst->rect.y;
+	bg_norm.width = dst->win.width;
+	bg_norm.height = dst->win.height;
+
+	/* Convert to bg coordinate space */
+	bg->win.x = bg_norm.x + bg->rect.x;
+	bg->win.y = bg_norm.y + bg->rect.y;
+	bg->win.width = bg_norm.width;
+	bg->win.height = bg_norm.height;
+	bg->vso = dst->vso;
+	bg->hso = dst->hso;
+
 	/* Do the configuration depending on operation type */
 	switch (this->type) {
 	case B2R2_DIRECT_FILL:
-		configure_direct_fill(node, this->src.color, dst, &last);
+		configure_direct_fill(cont, node, this->src.color, dst, &last);
 		break;
 
 	case B2R2_DIRECT_COPY:
-		configure_direct_copy(node, src, dst, &last);
+		configure_direct_copy(cont, node, src, dst, &last);
 		break;
 
 	case B2R2_FILL:
-		ret = configure_fill(node, src->color, src->fmt,
-				dst, this->ivmx, &last);
+		ret = configure_fill(cont, node, src->color, src->fmt,
+				dst, &last, this);
 		break;
 
 	case B2R2_FLIP: /* FLIP is just a copy with different VSO/HSO */
 	case B2R2_COPY:
-		ret = configure_copy(node, src, dst, this->ivmx, &last, this);
+		ret = configure_copy(
+			cont, node, src, dst, &last, this);
 		break;
 
 	case B2R2_ROTATE:
@@ -1487,8 +1490,8 @@ static int configure_tile(struct b2r2_node_split_job *this,
 			struct b2r2_node_split_buf *tmp = &this->tmp_bufs[0];
 
 			if (this->blend) {
-				b2r2_log_info("%s: rotation + blend\n",
-						__func__);
+				b2r2_log_info(cont->dev, "%s: rotation + "
+						"blend\n", __func__);
 
 				tmp->win.x = 0;
 				tmp->win.y = tmp->win.height - 1;
@@ -1496,33 +1499,33 @@ static int configure_tile(struct b2r2_node_split_job *this,
 				tmp->win.height = dst->win.height;
 
 				/* Rotate to the temp buf */
-				ret = configure_rotate(node, src, tmp,
-						this->ivmx, &node, NULL);
+				ret = configure_rotate(cont, node, src, tmp,
+						&node, NULL);
 				if (ret < 0)
 					goto error;
 
 				/* Then do a copy to the destination */
-				ret = configure_copy(node, tmp, dst, NULL,
+				ret = configure_copy(cont, node, tmp, dst,
 						&last, this);
 			} else {
 				/* Just do a rotation */
-				ret = configure_rotate(node, src, dst,
-						this->ivmx, &last, this);
+				ret = configure_rotate(cont, node, src, dst,
+						&last, this);
 			}
 		}
 		break;
 
 	case B2R2_SCALE:
-		ret = configure_scale(node, src, dst, this->h_rsf, this->v_rsf,
-				this->ivmx, &last, this);
+		ret = configure_scale(cont, node, src, dst, this->h_rsf,
+				this->v_rsf, &last, this);
 		break;
 
 	case B2R2_SCALE_AND_ROTATE:
-		ret = configure_rot_scale(this, node, &last);
+		ret = configure_rot_scale(cont, node, &last, this);
 		break;
 
 	default:
-		b2r2_log_warn("%s: Unsupported request\n", __func__);
+		b2r2_log_warn(cont->dev, "%s: Unsupported request\n", __func__);
 		ret = -ENOSYS;
 		goto error;
 		break;
@@ -1538,19 +1541,25 @@ static int configure_tile(struct b2r2_node_split_job *this,
 		/* Configure blending and clipping */
 		do {
 			if (node == NULL) {
-				b2r2_log_warn("%s: "
+				b2r2_log_warn(cont->dev, "%s: "
 					"Internal error! Out of nodes!\n",
 					__func__);
 				ret = -ENOMEM;
 				goto error;
 			}
 
-			if (this->blend)
-				configure_blend(node, this->flags,
-						this->global_alpha,
-						this->swap_fg_bg);
+			if (this->blend) {
+				if (this->flags & B2R2_BLT_FLAG_BG_BLEND)
+					configure_bg(cont, node, bg,
+							this->swap_fg_bg);
+				else
+					configure_bg(cont, node, dst,
+							this->swap_fg_bg);
+				configure_blend(cont, node, this->flags,
+						this->global_alpha);
+			}
 			if (this->clip)
-				configure_clip(node, &this->clip_rect);
+				configure_clip(cont, node, &this->clip_rect);
 
 			node = node->next;
 
@@ -1563,7 +1572,7 @@ static int configure_tile(struct b2r2_node_split_job *this,
 	return 0;
 
 error:
-	b2r2_log_warn("%s: Error!\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Error!\n", __func__);
 	return ret;
 }
 
@@ -1573,11 +1582,12 @@ error:
  * This functions configures a set of nodes for rotation using the destination
  * window instead of the rectangle for calculating tiles.
  */
-static int configure_sub_rot(struct b2r2_node *node,
+static int configure_sub_rot(struct b2r2_control *cont,
+		struct b2r2_node *node,
 		struct b2r2_node_split_buf *src,
 		struct b2r2_node_split_buf *dst,
-		const u32 *ivmx, struct b2r2_node **next,
-		struct b2r2_node_split_job *job)
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this)
 {
 	int ret;
 
@@ -1590,7 +1600,7 @@ static int configure_sub_rot(struct b2r2_node *node,
 	memcpy(&src_win, &src->win, sizeof(src_win));
 	memcpy(&dst_win, &dst->win, sizeof(dst_win));
 
-	b2r2_log_info("%s: src_win=(%d, %d, %d, %d) "
+	b2r2_log_info(cont->dev, "%s: src_win=(%d, %d, %d, %d) "
 			"dst_win=(%d, %d, %d, %d)\n", __func__,
 			src_win.x, src_win.y, src_win.width, src_win.height,
 			dst_win.x, dst_win.y, dst_win.width, dst_win.height);
@@ -1605,21 +1615,23 @@ static int configure_sub_rot(struct b2r2_node *node,
 		u32 dst_y = dst->win.y;
 		u32 dst_h = dst->win.height;
 
-		dst->win.width = min(dst->win.width,
-				dst_win.width - (int)x_pixels);
+		dst->win.width = min(dst->win.width, dst_win.width -
+			(int)x_pixels);
 		src->win.height = dst->win.width;
 
-		b2r2_log_info("%s: x_pixels=%d\n", __func__, x_pixels);
+		b2r2_log_info(cont->dev, "%s: x_pixels=%d\n",
+			__func__, x_pixels);
 
 		while (y_pixels < dst_win.height) {
 			dst->win.height = min(dst->win.height,
 					dst_win.height - (int)y_pixels);
 			src->win.width = dst->win.height;
 
-			b2r2_log_info("%s: y_pixels=%d\n", __func__, y_pixels);
+			b2r2_log_info(cont->dev, "%s: y_pixels=%d\n",
+				__func__, y_pixels);
 
-			ret = configure_rotate(node, src, dst, ivmx, &node,
-					job);
+			ret = configure_rotate(cont, node, src, dst, &node,
+					this);
 			if (ret < 0)
 				goto error;
 
@@ -1654,7 +1666,7 @@ static int configure_sub_rot(struct b2r2_node *node,
 	return 0;
 
 error:
-	b2r2_log_warn("%s: error!\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: error!\n", __func__);
 	return ret;
 }
 
@@ -1663,8 +1675,10 @@ error:
  *
  * When doing a downscale it is better to do the rotation last.
  */
-static int configure_rot_downscale(struct b2r2_node_split_job *this,
-		struct b2r2_node *node, struct b2r2_node **next)
+static int configure_rot_downscale(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this)
 {
 	int ret;
 
@@ -1677,12 +1691,12 @@ static int configure_rot_downscale(struct b2r2_node_split_job *this,
 	tmp->win.width = dst->win.height;
 	tmp->win.height = dst->win.width;
 
-	ret = configure_scale(node, src, tmp, this->h_rsf, this->v_rsf,
-			this->ivmx, &node, this);
+	ret = configure_scale(cont, node, src, tmp, this->h_rsf, this->v_rsf,
+			&node, this);
 	if (ret < 0)
 		goto error;
 
-	ret = configure_sub_rot(node, tmp, dst, NULL, &node, this);
+	ret = configure_sub_rot(cont, node, tmp, dst, &node, NULL);
 	if (ret < 0)
 		goto error;
 
@@ -1691,7 +1705,7 @@ static int configure_rot_downscale(struct b2r2_node_split_job *this,
 	return 0;
 
 error:
-	b2r2_log_info("%s: error!\n", __func__);
+	b2r2_log_info(cont->dev, "%s: error!\n", __func__);
 	return ret;
 }
 
@@ -1700,27 +1714,31 @@ error:
  *
  * When doing an upscale it is better to do the rotation first.
  */
-static int configure_rot_upscale(struct b2r2_node_split_job *this,
-		struct b2r2_node *node, struct b2r2_node **next)
+static int configure_rot_upscale(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this)
 {
 	/* TODO: Implement a optimal upscale (rotation first) */
-	return configure_rot_downscale(this, node, next);
+	return configure_rot_downscale(cont, node, next, this);
 }
 
 /**
  * configure_rot_scale() - configures a combined rotation and scaling op
  */
-static int configure_rot_scale(struct b2r2_node_split_job *this,
-		struct b2r2_node *node, struct b2r2_node **next)
+static int configure_rot_scale(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this)
 {
 	int ret;
 
 	bool upscale = (u32)this->h_rsf * (u32)this->v_rsf < (1 << 10);
 
 	if (upscale)
-		ret = configure_rot_upscale(this, node, next);
+		ret = configure_rot_upscale(cont, node, next, this);
 	else
-		ret = configure_rot_downscale(this, node, next);
+		ret = configure_rot_downscale(cont, node, next, this);
 
 	if (ret < 0)
 		goto error;
@@ -1728,13 +1746,14 @@ static int configure_rot_scale(struct b2r2_node_split_job *this,
 	return 0;
 
 error:
-	b2r2_log_warn("%s: error!\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: error!\n", __func__);
 	return ret;
 }
 
 /**
  * configure_direct_fill() - configures the given node for direct fill
  *
+ * @cont  - the b2r2 core control
  * @node  - the node to configure
  * @color - the fill color
  * @dst   - the destination buffer
@@ -1742,8 +1761,12 @@ error:
  *
  * This operation will always consume one node only.
  */
-static void configure_direct_fill(struct b2r2_node *node, u32 color,
-		struct b2r2_node_split_buf *dst, struct b2r2_node **next)
+static void configure_direct_fill(
+		struct b2r2_control *cont,
+		struct b2r2_node *node,
+		u32 color,
+		struct b2r2_node_split_buf *dst,
+		struct b2r2_node **next)
 {
 	node->node.GROUP0.B2R2_CIC |= B2R2_CIC_COLOR_FILL | B2R2_CIC_SOURCE_1;
 	node->node.GROUP0.B2R2_INS |= B2R2_INS_SOURCE_1_DIRECT_FILL;
@@ -1754,7 +1777,7 @@ static void configure_direct_fill(struct b2r2_node *node, u32 color,
 	/* Source setup */
 
 	/* It seems B2R2 checks so that source and dest has the same format */
-	node->node.GROUP3.B2R2_STY = to_native_fmt(dst->fmt);
+	node->node.GROUP3.B2R2_STY = b2r2_to_native_fmt(dst->fmt);
 	node->node.GROUP2.B2R2_S1CF = color;
 	node->node.GROUP2.B2R2_S2CF = 0;
 
@@ -1765,6 +1788,7 @@ static void configure_direct_fill(struct b2r2_node *node, u32 color,
 /**
  * configure_direct_copy() - configures the node for direct copy
  *
+ * @cont - the b2r2 core control
  * @node - the node to configure
  * @src  - the source buffer
  * @dst  - the destination buffer
@@ -1772,9 +1796,12 @@ static void configure_direct_fill(struct b2r2_node *node, u32 color,
  *
  * This operation will always consume one node only.
  */
-static void configure_direct_copy(struct b2r2_node *node,
+static void configure_direct_copy(
+		struct b2r2_control *cont,
+		struct b2r2_node *node,
 		struct b2r2_node_split_buf *src,
-		struct b2r2_node_split_buf *dst, struct b2r2_node **next)
+		struct b2r2_node_split_buf *dst,
+		struct b2r2_node **next)
 {
 	node->node.GROUP0.B2R2_CIC |= B2R2_CIC_SOURCE_1;
 	node->node.GROUP0.B2R2_INS |= B2R2_INS_SOURCE_1_DIRECT_COPY;
@@ -1792,11 +1819,13 @@ static void configure_direct_copy(struct b2r2_node *node,
 /**
  * configure_fill() - configures the given node for color fill
  *
+ * @cont  - the b2r2 core control
  * @node  - the node to configure
  * @color - the fill color
  * @fmt   - the source color format
  * @dst   - the destination buffer
  * @next  - the next empty node in the node list
+ * @this  - the current b2r2 node split job
  *
  * A normal fill operation can be combined with any other per pixel operations
  * such as blend.
@@ -1804,21 +1833,26 @@ static void configure_direct_copy(struct b2r2_node *node,
  * This operation will consume as many nodes as are required to write to the
  * destination format.
  */
-static int configure_fill(struct b2r2_node *node, u32 color,
-		enum b2r2_blt_fmt fmt, struct b2r2_node_split_buf *dst,
-		const u32 *ivmx, struct b2r2_node **next)
+static int configure_fill(
+		struct b2r2_control *cont,
+		struct b2r2_node *node,
+		u32 color,
+		enum b2r2_blt_fmt fmt,
+		struct b2r2_node_split_buf *dst,
+		struct b2r2_node **next,
+		struct b2r2_node_split_job *this)
 {
 	int ret;
 	struct b2r2_node *last;
 
 	/* Configure the destination */
-	ret = configure_dst(node, dst, ivmx, &last);
+	ret = configure_dst(cont, node, dst, &last);
 	if (ret < 0)
 		goto error;
 
 	do {
 		if (node == NULL) {
-			b2r2_log_warn("%s: "
+			b2r2_log_warn(cont->dev, "%s: "
 			"Internal error! Out of nodes!\n", __func__);
 			ret = -ENOMEM;
 			goto error;
@@ -1830,18 +1864,20 @@ static int configure_fill(struct b2r2_node *node, u32 color,
 				B2R2_INS_SOURCE_2_COLOR_FILL_REGISTER;
 		node->node.GROUP0.B2R2_ACK |= B2R2_ACK_MODE_BYPASS_S2_S3;
 
-		/* B2R2 has a bug that disables color fill from S2. As a
-		   workaround we use S1 for the color. */
+		/*
+		 * B2R2 has a bug that disables color fill from S2. As a
+		 * workaround we use S1 for the color.
+		 */
 		node->node.GROUP2.B2R2_S1CF = 0;
 		node->node.GROUP2.B2R2_S2CF = color;
 
 		/* TO BE REMOVED: */
 		set_src_2(node, dst->addr, dst);
-		node->node.GROUP4.B2R2_STY = to_native_fmt(fmt);
+		node->node.GROUP4.B2R2_STY = b2r2_to_native_fmt(fmt);
 
-		/* Setup the iVMX for color conversion */
-		if (ivmx != NULL)
-			set_ivmx(node, ivmx);
+		/* Setup the VMX for color conversion */
+		if (this != NULL && this->ivmx != NULL)
+			set_ivmx(node, this->ivmx);
 
 		if  ((dst->type == B2R2_FMT_TYPE_PLANAR) ||
 				(dst->type == B2R2_FMT_TYPE_SEMI_PLANAR)) {
@@ -1877,25 +1913,28 @@ static int configure_fill(struct b2r2_node *node, u32 color,
 
 	return 0;
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 }
 
 /**
  * configure_copy() - configures the given node for a copy operation
  *
+ * @cont - the b2r2 core control
  * @node - the node to configure
  * @src  - the source buffer
  * @dst  - the destination buffer
- * @ivmx - the iVMX to use for color conversion
  * @next - the next empty node in the node list
+ * @this - the current node job
  *
  * This operation will consume as many nodes as are required to write to the
  * destination format.
  */
-static int configure_copy(struct b2r2_node *node,
+static int configure_copy(
+		struct b2r2_control *cont,
+		struct b2r2_node *node,
 		struct b2r2_node_split_buf *src,
-		struct b2r2_node_split_buf *dst, const u32 *ivmx,
+		struct b2r2_node_split_buf *dst,
 		struct b2r2_node **next,
 		struct b2r2_node_split_job *this)
 {
@@ -1903,15 +1942,31 @@ static int configure_copy(struct b2r2_node *node,
 
 	struct b2r2_node *last;
 
-	ret = configure_dst(node, dst, ivmx, &last);
+	/* If the sources are swapped, change the iVMx/oVMx accordingly */
+	if (this != NULL && this->swap_fg_bg) {
+		/* Setup iVMx for this scenario */
+		ret = analyze_fmt_conv(cont, dst, src,
+				&this->ivmx, NULL, this->fullrange);
+		if (ret < 0)
+			goto error;
+
+		/* Setup oVMx for this scenario */
+		ret = analyze_fmt_conv(cont, src, dst,
+				&this->ovmx, NULL, this->fullrange);
+		if (ret < 0)
+			goto error;
+	}
+
+	ret = configure_dst(cont, node, dst, &last);
 	if (ret < 0)
 		goto error;
 
 	/* Configure the source for each node */
 	do {
 		if (node == NULL) {
-			b2r2_log_warn("%s: "
-			" Internal error! Out of nodes!\n", __func__);
+			b2r2_log_warn(cont->dev, "%s: "
+				" Internal error! Out of nodes!\n",
+				__func__);
 			ret = -ENOMEM;
 			goto error;
 		}
@@ -1930,7 +1985,7 @@ static int configure_copy(struct b2r2_node *node,
 			node->node.GROUP0.B2R2_INS |= B2R2_INS_CKEY_ENABLED;
 			node->node.GROUP0.B2R2_CIC |= B2R2_CIC_COLOR_KEY;
 
-			key_color = to_RGB888(this->flag_param, src->fmt);
+			key_color = b2r2_to_RGB888(this->flag_param, src->fmt);
 			node->node.GROUP12.B2R2_KEY1 = key_color;
 			node->node.GROUP12.B2R2_KEY2 = key_color;
 		}
@@ -1949,7 +2004,7 @@ static int configure_copy(struct b2r2_node *node,
 			node->node.GROUP7.B2R2_CML = request->clut_phys_addr;
 		}
 		/* Configure the source(s) */
-		configure_src(node, src, ivmx);
+		configure_src(cont, node, src, this);
 
 		node = node->next;
 	} while (node != last);
@@ -1959,25 +2014,28 @@ static int configure_copy(struct b2r2_node *node,
 
 	return 0;
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 }
 
 /**
  * configure_rotate() - configures the given node for rotation
  *
+ * @cont - the b2r2 core control
  * @node - the node to configure
  * @src  - the source buffer
  * @dst  - the destination buffer
- * @ivmx - the iVMX to use for color conversion
  * @next - the next empty node in the node list
+ * @this - the current b2r2 node split job
  *
  * This operation will consume as many nodes are are required by the combination
  * of rotating and writing the destination format.
  */
-static int configure_rotate(struct b2r2_node *node,
+static int configure_rotate(
+		struct b2r2_control *cont,
+		struct b2r2_node *node,
 		struct b2r2_node_split_buf *src,
-		struct b2r2_node_split_buf *dst, const u32 *ivmx,
+		struct b2r2_node_split_buf *dst,
 		struct b2r2_node **next,
 		struct b2r2_node_split_job *this)
 {
@@ -1985,21 +2043,22 @@ static int configure_rotate(struct b2r2_node *node,
 
 	struct b2r2_node *last;
 
-	ret = configure_copy(node, src, dst, ivmx, &last, this);
+	ret = configure_copy(cont, node, src, dst, &last, this);
 	if (ret < 0)
 		goto error;
 
 	do {
 		if (node == NULL) {
-			b2r2_log_warn("%s: "
-				"Internal error! Out of nodes!\n", __func__);
+			b2r2_log_warn(cont->dev, "%s: "
+				"Internal error! Out of nodes!\n",
+				__func__);
 			ret = -ENOMEM;
 			goto error;
 		}
 
 		node->node.GROUP0.B2R2_INS |= B2R2_INS_ROTATION_ENABLED;
 
-		b2r2_log_debug("%s:\n"
+		b2r2_log_debug(cont->dev, "%s:\n"
 				"\tB2R2_TXY:  %.8x\tB2R2_TSZ:  %.8x\n"
 				"\tB2R2_S1XY: %.8x\tB2R2_S1SZ: %.8x\n"
 				"\tB2R2_S2XY: %.8x\tB2R2_S2SZ: %.8x\n"
@@ -2023,26 +2082,29 @@ static int configure_rotate(struct b2r2_node *node,
 
 	return 0;
 error:
-	b2r2_log_warn("%s: error!\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: error!\n", __func__);
 	return ret;
 }
 
 /**
  * configure_scale() - configures the given node for scaling
  *
+ * @cont  - the b2r2 core control
  * @node  - the node to configure
  * @src   - the source buffer
  * @dst   - the destination buffer
  * @h_rsf - the horizontal rescale factor
  * @v_rsf - the vertical rescale factor
- * @ivmx  - the iVMX to use for color conversion
  * @next  - the next empty node in the node list
+ * @this  - the current b2r2 node split job
  */
-static int configure_scale(struct b2r2_node *node,
+static int configure_scale(
+		struct b2r2_control *cont,
+		struct b2r2_node *node,
 		struct b2r2_node_split_buf *src,
 		struct b2r2_node_split_buf *dst,
 		u16 h_rsf, u16 v_rsf,
-		const u32 *ivmx, struct b2r2_node **next,
+		struct b2r2_node **next,
 		struct b2r2_node_split_job *this)
 {
 	int ret;
@@ -2083,6 +2145,8 @@ static int configure_scale(struct b2r2_node *node,
 	bool downsample;
 
 	struct b2r2_blt_rect tmp_win = src->win;
+	bool src_raster = src->type == B2R2_FMT_TYPE_RASTER;
+	bool dst_raster = dst->type == B2R2_FMT_TYPE_RASTER;
 
 	/* Rescale the normalized source window */
 	src_x = inv_rescale(src->win.x - src->rect.x, luma_h_rsf);
@@ -2110,22 +2174,22 @@ static int configure_scale(struct b2r2_node *node,
 	luma_vsrc_init = src_y & 0x3ff;
 
 	/* Check for upsampling of chroma */
-	upsample = src->type != B2R2_FMT_TYPE_RASTER &&
-		!is_yuv444_fmt(src->fmt);
+	upsample = !src_raster && !b2r2_is_yuv444_fmt(src->fmt);
 	if (upsample) {
 		h_rsf /= 2;
 
-		if (is_yuv420_fmt(src->fmt))
+		if (b2r2_is_yuv420_fmt(src->fmt) ||
+				b2r2_is_yvu420_fmt(src->fmt))
 			v_rsf /= 2;
 	}
 
 	/* Check for downsampling of chroma */
-	downsample = dst->type != B2R2_FMT_TYPE_RASTER &&
-		!is_yuv444_fmt(dst->fmt);
+	downsample = !dst_raster && !b2r2_is_yuv444_fmt(dst->fmt);
 	if (downsample) {
 		h_rsf *= 2;
 
-		if (is_yuv420_fmt(dst->fmt))
+		if (b2r2_is_yuv420_fmt(dst->fmt) ||
+				b2r2_is_yvu420_fmt(dst->fmt))
 			v_rsf *= 2;
 	}
 
@@ -2136,9 +2200,9 @@ static int configure_scale(struct b2r2_node *node,
 
 	/* Configure resize and filters */
 	fctl = B2R2_FCTL_HF2D_MODE_ENABLE_RESIZER |
-		B2R2_FCTL_VF2D_MODE_ENABLE_RESIZER;
+			B2R2_FCTL_VF2D_MODE_ENABLE_RESIZER;
 	luma_fctl = B2R2_FCTL_LUMA_HF2D_MODE_ENABLE_RESIZER |
-		B2R2_FCTL_LUMA_VF2D_MODE_ENABLE_RESIZER;
+			B2R2_FCTL_LUMA_VF2D_MODE_ENABLE_RESIZER;
 
 	rsf =  (h_rsf << B2R2_RSF_HSRC_INC_SHIFT) |
 			(v_rsf << B2R2_RSF_VSRC_INC_SHIFT);
@@ -2146,13 +2210,13 @@ static int configure_scale(struct b2r2_node *node,
 			(luma_v_rsf << B2R2_RSF_VSRC_INC_SHIFT);
 
 	rzi = B2R2_RZI_DEFAULT_HNB_REPEAT |
-		(2 << B2R2_RZI_VNB_REPEAT_SHIFT) |
-		(hsrc_init << B2R2_RZI_HSRC_INIT_SHIFT) |
-		(vsrc_init << B2R2_RZI_VSRC_INIT_SHIFT);
+			(2 << B2R2_RZI_VNB_REPEAT_SHIFT) |
+			(hsrc_init << B2R2_RZI_HSRC_INIT_SHIFT) |
+			(vsrc_init << B2R2_RZI_VSRC_INIT_SHIFT);
 	luma_rzi = B2R2_RZI_DEFAULT_HNB_REPEAT |
-		(2 << B2R2_RZI_VNB_REPEAT_SHIFT) |
-		(luma_hsrc_init << B2R2_RZI_HSRC_INIT_SHIFT) |
-		(luma_vsrc_init << B2R2_RZI_VSRC_INIT_SHIFT);
+			(2 << B2R2_RZI_VNB_REPEAT_SHIFT) |
+			(luma_hsrc_init << B2R2_RZI_HSRC_INIT_SHIFT) |
+			(luma_vsrc_init << B2R2_RZI_VSRC_INIT_SHIFT);
 
 	/*
 	 * We should only filter if there is an actual rescale (i.e. not when
@@ -2187,27 +2251,26 @@ static int configure_scale(struct b2r2_node *node,
 		luma_vfp = luma_vf->v_coeffs_phys_addr;
 	}
 
-	ret = configure_copy(node, src, dst, ivmx, &last, this);
+	ret = configure_copy(cont, node, src, dst, &last, this);
 	if (ret < 0)
 		goto error;
 
 	do {
 		bool chroma_rescale =
-			(h_rsf != (1 << 10)) || (v_rsf != (1 << 10));
+				(h_rsf != (1 << 10)) || (v_rsf != (1 << 10));
 		bool luma_rescale =
-			(luma_h_rsf != (1 << 10)) || (luma_v_rsf != (1 << 10));
-		bool src_raster = src->type == B2R2_FMT_TYPE_RASTER;
-		bool dst_raster = dst->type == B2R2_FMT_TYPE_RASTER;
-		bool dst_chroma =
-			node->node.GROUP1.B2R2_TTY & B2R2_TTY_CHROMA_NOT_LUMA;
+				(luma_h_rsf != (1 << 10)) ||
+				(luma_v_rsf != (1 << 10));
+		bool dst_chroma = node->node.GROUP1.B2R2_TTY &
+				B2R2_TTY_CHROMA_NOT_LUMA;
+		bool dst_luma = !dst_chroma;
 
 		if (node == NULL) {
-			b2r2_log_warn("%s: "
-				"Internal error! Out of nodes!\n", __func__);
+			b2r2_log_warn(cont->dev, "%s: Internal error! Out "
+					"of nodes!\n", __func__);
 			ret = -ENOMEM;
 			goto error;
 		}
-
 
 		node->node.GROUP0.B2R2_CIC |= B2R2_CIC_FILTER_CONTROL;
 
@@ -2224,10 +2287,10 @@ static int configure_scale(struct b2r2_node *node,
 		 */
 
 		if (!src_raster || (chroma_rescale &&
-					(dst_raster || dst_chroma))) {
+				(dst_raster || dst_chroma))) {
 			/* Enable chroma resize */
 			node->node.GROUP0.B2R2_INS |=
-				B2R2_INS_RESCALE2D_ENABLED;
+					B2R2_INS_RESCALE2D_ENABLED;
 			node->node.GROUP0.B2R2_CIC |= B2R2_CIC_RESIZE_CHROMA;
 			node->node.GROUP8.B2R2_FCTL |= fctl;
 
@@ -2238,10 +2301,10 @@ static int configure_scale(struct b2r2_node *node,
 		}
 
 		if (!src_raster || (luma_rescale &&
-					(dst_raster || !dst_chroma))) {
+				(dst_raster || dst_luma))) {
 			/* Enable luma resize */
 			node->node.GROUP0.B2R2_INS |=
-				B2R2_INS_RESCALE2D_ENABLED;
+					B2R2_INS_RESCALE2D_ENABLED;
 			node->node.GROUP0.B2R2_CIC |= B2R2_CIC_RESIZE_LUMA;
 			node->node.GROUP8.B2R2_FCTL |= luma_fctl;
 
@@ -2249,9 +2312,33 @@ static int configure_scale(struct b2r2_node *node,
 			node->node.GROUP10.B2R2_RZI = luma_rzi;
 			node->node.GROUP10.B2R2_HFP = luma_hfp;
 			node->node.GROUP10.B2R2_VFP = luma_vfp;
+			/*
+			 * Scaling operation from raster to a multi-buffer
+			 * format, requires the raster input to be scaled
+			 * before luminance information can be extracted.
+			 * Raster input is scaled by the chroma resizer.
+			 * Luma resizer only handles luminance data which
+			 * exists in a separate buffer in source image,
+			 * as is the case with YUV planar/semi-planar formats.
+			 */
+			if (src_raster) {
+				/* Activate chroma scaling */
+				node->node.GROUP0.B2R2_CIC |=
+					B2R2_CIC_RESIZE_CHROMA;
+				node->node.GROUP8.B2R2_FCTL |= fctl;
+				/*
+				 * Color data must be scaled
+				 * to the same size as luma.
+				 * Use luma scaling parameters.
+				 */
+				node->node.GROUP9.B2R2_RSF = luma_rsf;
+				node->node.GROUP9.B2R2_RZI = luma_rzi;
+				node->node.GROUP9.B2R2_HFP = luma_hfp;
+				node->node.GROUP9.B2R2_VFP = luma_vfp;
+			}
 		}
 
-		b2r2_log_info("%s:\n"
+		b2r2_log_info(cont->dev, "%s:\n"
 				"\tB2R2_TXY:  %.8x\tB2R2_TSZ:  %.8x\n"
 				"\tB2R2_S1XY: %.8x\tB2R2_S1SZ: %.8x\n"
 				"\tB2R2_S2XY: %.8x\tB2R2_S2SZ: %.8x\n"
@@ -2277,32 +2364,39 @@ static int configure_scale(struct b2r2_node *node,
 
 	return 0;
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 }
 
 /**
  * configure_src() - configures the source registers and the iVMX
  *
+ * @cont - the b2r2 core control
  * @node - the node to configure
  * @src  - the source buffer
- * @ivmx - the iVMX to use for color conversion
+ * @this - the current node split job
  *
  * This operation will not consume any nodes
  */
-static void configure_src(struct b2r2_node *node,
-		struct b2r2_node_split_buf *src, const u32 *ivmx)
+static void configure_src(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node_split_buf *src,
+		struct b2r2_node_split_job *this)
 {
 	struct b2r2_node_split_buf tmp_buf;
 
-	b2r2_log_info("%s: src.win=(%d, %d, %d, %d)\n", __func__,
+	b2r2_log_info(cont->dev,
+			"%s: src.win=(%d, %d, %d, %d)\n", __func__,
 			src->win.x, src->win.y, src->win.width,
 			src->win.height);
 
 	/* Configure S1 - S3 */
 	switch (src->type) {
 	case B2R2_FMT_TYPE_RASTER:
-		set_src_2(node, src->addr, src);
+		if (this != NULL && this->swap_fg_bg)
+			set_src_1(node, src->addr, src);
+		else
+			set_src_2(node, src->addr, src);
 		break;
 	case B2R2_FMT_TYPE_SEMI_PLANAR:
 		memcpy(&tmp_buf, src, sizeof(tmp_buf));
@@ -2311,13 +2405,14 @@ static void configure_src(struct b2r2_node *node,
 		 * For 420 and 422 the chroma has lower resolution than the
 		 * luma
 		 */
-		if (!is_yuv444_fmt(src->fmt)) {
+		if (!b2r2_is_yuv444_fmt(src->fmt)) {
 			tmp_buf.win.x >>= 1;
 			tmp_buf.win.width = (tmp_buf.win.width + 1) / 2;
 
-			if (is_yuv420_fmt(src->fmt)) {
+			if (b2r2_is_yuv420_fmt(src->fmt) ||
+					b2r2_is_yvu420_fmt(src->fmt)) {
 				tmp_buf.win.height =
-					(tmp_buf.win.height + 1) / 2;
+						(tmp_buf.win.height + 1) / 2;
 				tmp_buf.win.y >>= 1;
 			}
 		}
@@ -2328,12 +2423,13 @@ static void configure_src(struct b2r2_node *node,
 	case B2R2_FMT_TYPE_PLANAR:
 		memcpy(&tmp_buf, src, sizeof(tmp_buf));
 
-		if (!is_yuv444_fmt(src->fmt)) {
+		if (!b2r2_is_yuv444_fmt(src->fmt)) {
 			/*
 			 * Each chroma buffer will have half as many values
 			 * per line as the luma buffer
 			 */
-			tmp_buf.pitch = (tmp_buf.pitch + 1) / 2;
+			tmp_buf.pitch = b2r2_get_chroma_pitch(src->pitch,
+				src->fmt);
 
 			/* Horizontal resolution is half */
 			tmp_buf.win.x >>= 1;
@@ -2343,16 +2439,22 @@ static void configure_src(struct b2r2_node *node,
 			 * If the buffer is in YUV420 format, the vertical
 			 * resolution is half as well
 			 */
-			if (is_yuv420_fmt(src->fmt)) {
+			if (b2r2_is_yuv420_fmt(src->fmt) ||
+					b2r2_is_yvu420_fmt(src->fmt)) {
 				tmp_buf.win.height =
-					(tmp_buf.win.height + 1) / 2;
+						(tmp_buf.win.height + 1) / 2;
 				tmp_buf.win.y >>= 1;
 			}
 		}
 
-		set_src_3(node, src->addr, src);                   /* Y */
-		set_src_2(node, tmp_buf.chroma_addr, &tmp_buf);    /* U */
-		set_src_1(node, tmp_buf.chroma_cr_addr, &tmp_buf); /* V */
+		set_src_3(node, src->addr, src);
+		if (b2r2_is_yvu_fmt(src->fmt)) {
+			set_src_1(node, tmp_buf.chroma_addr, &tmp_buf);
+			set_src_2(node, tmp_buf.chroma_cr_addr, &tmp_buf);
+		} else {
+			set_src_2(node, tmp_buf.chroma_addr, &tmp_buf);
+			set_src_1(node, tmp_buf.chroma_cr_addr, &tmp_buf);
+		}
 
 		break;
 	default:
@@ -2361,24 +2463,77 @@ static void configure_src(struct b2r2_node *node,
 		break;
 	}
 
-	/* Configure the iVMX for color space conversions */
-	if (ivmx != NULL)
-		set_ivmx(node, ivmx);
+	/* Configure the iVMx and oVMx for color space conversions */
+	if (this != NULL && this->ivmx != NULL)
+		set_ivmx(node, this->ivmx);
+
+	if (this != NULL && this->ovmx != NULL)
+		set_ovmx(node, this->ovmx);
+}
+
+/**
+ * configure_bg() - configures a background for the given node
+ *
+ * @cont         - the b2r2 core control
+ * @node         - the node to configure
+ * @bg           - the background buffer
+ * @swap_fg_bg   - if true, fg will be on s1 instead of s2
+ *
+ * This operation will not consume any nodes.
+ *
+ * NOTE: This method should be called _AFTER_ the destination has been
+ *       configured.
+ *
+ * WARNING: Take care when using this with semi-planar or planar sources since
+ *          either S1 or S2 will be overwritten!
+ */
+static void configure_bg(struct b2r2_control *cont,
+		struct b2r2_node *node,
+		struct b2r2_node_split_buf *bg, bool swap_fg_bg)
+{
+	b2r2_log_info(cont->dev,
+			"%s: bg.win=(%d, %d, %d, %d)\n", __func__,
+			bg->win.x, bg->win.y, bg->win.width,
+			bg->win.height);
+
+	/* Configure S1 */
+	switch (bg->type) {
+	case B2R2_FMT_TYPE_RASTER:
+		if (swap_fg_bg) {
+			node->node.GROUP0.B2R2_CIC |= B2R2_CIC_SOURCE_2;
+			node->node.GROUP0.B2R2_INS |=
+				B2R2_INS_SOURCE_2_FETCH_FROM_MEM;
+			node->node.GROUP0.B2R2_ACK |= B2R2_ACK_SWAP_FG_BG;
+
+			set_src(&node->node.GROUP4, bg->addr, bg);
+		} else {
+			node->node.GROUP0.B2R2_CIC |= B2R2_CIC_SOURCE_1;
+			node->node.GROUP0.B2R2_INS |=
+				B2R2_INS_SOURCE_1_FETCH_FROM_MEM;
+
+			set_src(&node->node.GROUP3, bg->addr, bg);
+		}
+		break;
+	default:
+		/* Should never, ever happen */
+		BUG_ON(1);
+		break;
+	}
 }
 
 /**
  * configure_dst() - configures the destination registers of the given node
  *
+ * @cont - the b2r2 core control
  * @node - the node to configure
- * @ivmx - the iVMX to use for color conversion
  * @dst  - the destination buffer
+ * @next - the next b2r2 node
  *
  * This operation will consume as many nodes as are required to write the
  * destination format.
  */
-static int configure_dst(struct b2r2_node *node,
-		struct b2r2_node_split_buf *dst, const u32 *ivmx,
-		struct b2r2_node **next)
+static int configure_dst(struct b2r2_control *cont, struct b2r2_node *node,
+		struct b2r2_node_split_buf *dst, struct b2r2_node **next)
 {
 	int ret;
 	int nbr_planes = 1;
@@ -2386,9 +2541,10 @@ static int configure_dst(struct b2r2_node *node,
 
 	struct b2r2_node_split_buf dst_planes[3];
 
-	b2r2_log_info("%s: dst.win=(%d, %d, %d, %d)\n", __func__,
-			dst->win.x, dst->win.y, dst->win.width,
-			dst->win.height);
+	b2r2_log_info(cont->dev,
+		"%s: dst.win=(%d, %d, %d, %d)\n", __func__,
+		dst->win.x, dst->win.y, dst->win.width,
+		dst->win.height);
 
 	memcpy(&dst_planes[0], dst, sizeof(dst_planes[0]));
 
@@ -2401,7 +2557,7 @@ static int configure_dst(struct b2r2_node *node,
 		dst_planes[1].addr = dst->chroma_addr;
 		dst_planes[1].plane_selection = B2R2_TTY_CHROMA_NOT_LUMA;
 
-		if (!is_yuv444_fmt(dst->fmt)) {
+		if (!b2r2_is_yuv444_fmt(dst->fmt)) {
 			/* Horizontal resolution is half */
 			dst_planes[1].win.x /= 2;
 			/*
@@ -2418,7 +2574,8 @@ static int configure_dst(struct b2r2_node *node,
 			 * resolution is half as well. Height must be rounded in
 			 * the same way as is done for width.
 			 */
-			if (is_yuv420_fmt(dst->fmt)) {
+			if (b2r2_is_yuv420_fmt(dst->fmt) ||
+					b2r2_is_yvu420_fmt(dst->fmt)) {
 				dst_planes[1].win.y /= 2;
 				dst_planes[1].win.height =
 					(dst_planes[1].win.height + 1) / 2;
@@ -2429,13 +2586,12 @@ static int configure_dst(struct b2r2_node *node,
 			/* There will be a third plane as well */
 			nbr_planes = 3;
 
-			if (!is_yuv444_fmt(dst->fmt)) {
-				/* The chroma planes have half the luma pitch */
-				dst_planes[1].pitch /= 2;
-			}
+			dst_planes[1].pitch = b2r2_get_chroma_pitch(
+				dst->pitch, dst->fmt);
 
 			memcpy(&dst_planes[2], &dst_planes[1],
 				sizeof(dst_planes[2]));
+
 			dst_planes[2].addr = dst->chroma_cr_addr;
 
 			/*
@@ -2445,6 +2601,12 @@ static int configure_dst(struct b2r2_node *node,
 			 * B2R2_TTY_CR_NOT_CB.
 			 */
 			dst_planes[2].chroma_selection = B2R2_TTY_CB_NOT_CR;
+
+			/* switch the U and V planes for YVU formats */
+			if (b2r2_is_yvu420_fmt(dst->fmt)) {
+				dst_planes[2].addr = dst->chroma_addr;
+				dst_planes[1].addr = dst->chroma_cr_addr;
+			}
 		}
 
 	}
@@ -2453,7 +2615,7 @@ static int configure_dst(struct b2r2_node *node,
 	for (i = 0; i < nbr_planes; i++) {
 
 		if (node == NULL) {
-			b2r2_log_warn("%s: "
+			b2r2_log_warn(cont->dev, "%s: "
 				"Internal error! Out of nodes!\n", __func__);
 			ret = -ENOMEM;
 			goto error;
@@ -2491,7 +2653,6 @@ static int configure_dst(struct b2r2_node *node,
 			}
 		}
 
-
 		set_target(node, dst_planes[i].addr, &dst_planes[i]);
 
 		node = node->next;
@@ -2502,7 +2663,7 @@ static int configure_dst(struct b2r2_node *node,
 
 	return 0;
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 
 }
@@ -2510,10 +2671,10 @@ error:
 /**
  * configure_blend() - configures the given node for alpha blending
  *
+ * @cont         - the b2r2 core control
  * @node         - the node to configure
  * @flags        - the flags passed in the blt_request
  * @global_alpha - the global alpha to use (if enabled in flags)
- * @swap_fg_bg   - if true, fg will be on s1 instead of s2
  *
  * This operation will not consume any nodes.
  *
@@ -2523,8 +2684,8 @@ error:
  * WARNING: Take care when using this with semi-planar or planar sources since
  *          either S1 or S2 will be overwritten!
  */
-static void configure_blend(struct b2r2_node *node, u32 flags, u32 global_alpha,
-		bool swap_fg_bg)
+static void configure_blend(struct b2r2_control *cont,
+		struct b2r2_node *node, u32 flags, u32 global_alpha)
 {
 	node->node.GROUP0.B2R2_ACK &= ~(B2R2_ACK_MODE_BYPASS_S2_S3);
 
@@ -2534,9 +2695,8 @@ static void configure_blend(struct b2r2_node *node, u32 flags, u32 global_alpha,
 	else
 		node->node.GROUP0.B2R2_ACK |= B2R2_ACK_MODE_BLEND_PREMULT;
 
-
 	/* Check if global alpha blend should be enabled */
-	if ((flags & B2R2_BLT_FLAG_GLOBAL_ALPHA_BLEND) != 0) {
+	if (flags & B2R2_BLT_FLAG_GLOBAL_ALPHA_BLEND) {
 
 		/* B2R2 expects the global alpha to be in 0...128 range */
 		global_alpha = (global_alpha*128)/255;
@@ -2547,45 +2707,18 @@ static void configure_blend(struct b2r2_node *node, u32 flags, u32 global_alpha,
 		node->node.GROUP0.B2R2_ACK |=
 			(128 << B2R2_ACK_GALPHA_ROPID_SHIFT);
 	}
-
-	/* Copy the destination config to the appropriate source and clear any
-	   clashing flags */
-	if (swap_fg_bg) {
-		/* S1 will be foreground, S2 background */
-		node->node.GROUP0.B2R2_CIC |= B2R2_CIC_SOURCE_2;
-		node->node.GROUP0.B2R2_INS |= B2R2_INS_SOURCE_2_FETCH_FROM_MEM;
-		node->node.GROUP0.B2R2_ACK |= B2R2_ACK_SWAP_FG_BG;
-
-		node->node.GROUP4.B2R2_SBA = node->node.GROUP1.B2R2_TBA;
-		node->node.GROUP4.B2R2_STY = node->node.GROUP1.B2R2_TTY;
-		node->node.GROUP4.B2R2_SXY = node->node.GROUP1.B2R2_TXY;
-		node->node.GROUP4.B2R2_SSZ = node->node.GROUP1.B2R2_TSZ;
-
-		node->node.GROUP4.B2R2_STY &= ~(B2R2_S2TY_A1_SUBST_KEY_MODE |
-				B2R2_S2TY_CHROMA_LEFT_EXT_AVERAGE);
-	} else {
-		/* S1 will be background, S2 foreground */
-		node->node.GROUP0.B2R2_CIC |= B2R2_CIC_SOURCE_1;
-		node->node.GROUP0.B2R2_INS |= B2R2_INS_SOURCE_1_FETCH_FROM_MEM;
-
-		node->node.GROUP3.B2R2_SBA = node->node.GROUP1.B2R2_TBA;
-		node->node.GROUP3.B2R2_STY |= node->node.GROUP1.B2R2_TTY;
-		node->node.GROUP3.B2R2_SXY = node->node.GROUP1.B2R2_TXY;
-
-		node->node.GROUP3.B2R2_STY &= ~(B2R2_S1TY_A1_SUBST_KEY_MODE);
-
-	}
 }
 
 /**
  * configure_clip() - configures destination clipping for the given node
  *
- *   @node      - the node to configure
- *   @clip_rect - the clip rectangle
+ * @cont      - the b2r2 core control
+ * @node      - the node to configure
+ * @clip_rect - the clip rectangle
  *
  *  This operation does not consume any nodes.
  */
-static void configure_clip(struct b2r2_node *node,
+static void configure_clip(struct b2r2_control *cont, struct b2r2_node *node,
 		struct b2r2_blt_rect *clip_rect)
 {
 	s32 l = clip_rect->x;
@@ -2608,20 +2741,26 @@ static void configure_clip(struct b2r2_node *node,
 /**
  * set_buf() - configures the given buffer with the provided values
  *
+ * @cont       - the b2r2 core control
+ * @buf        - the buffer to configure
  * @addr       - the physical base address
  * @img        - the blt image to base the buffer on
  * @rect       - the rectangle to use
  * @color_fill - determines whether the buffer should be used for color fill
  * @color      - the color to use in case of color fill
  */
-static void set_buf(struct b2r2_node_split_buf *buf, u32 addr,
+static void set_buf(struct b2r2_control *cont,
+		struct b2r2_node_split_buf *buf,
+		u32 addr,
 		const struct b2r2_blt_img *img,
-		const struct b2r2_blt_rect *rect, bool color_fill, u32 color)
+		const struct b2r2_blt_rect *rect,
+		bool color_fill,
+		u32 color)
 {
 	memset(buf, 0, sizeof(*buf));
 
 	buf->fmt = img->fmt;
-	buf->type = get_fmt_type(img->fmt);
+	buf->type = b2r2_get_fmt_type(img->fmt);
 
 	if (color_fill) {
 		buf->type = B2R2_FMT_TYPE_RASTER;
@@ -2629,10 +2768,10 @@ static void set_buf(struct b2r2_node_split_buf *buf, u32 addr,
 	} else {
 		buf->addr = addr;
 
-		buf->alpha_range = get_alpha_range(img->fmt);
+		buf->alpha_range = b2r2_get_alpha_range(img->fmt);
 
 		if (img->pitch == 0)
-			buf->pitch = fmt_byte_pitch(img->fmt, img->width);
+			buf->pitch = b2r2_fmt_byte_pitch(img->fmt, img->width);
 		else
 			buf->pitch = img->pitch;
 
@@ -2641,41 +2780,14 @@ static void set_buf(struct b2r2_node_split_buf *buf, u32 addr,
 
 		switch (buf->type) {
 		case B2R2_FMT_TYPE_SEMI_PLANAR:
-			buf->chroma_addr = (u32)(((u8 *)addr) +
-					buf->pitch * buf->height);
+			b2r2_get_cb_cr_addr(buf->addr, buf->pitch, buf->height,
+				buf->fmt, &buf->chroma_addr,
+				&buf->chroma_addr);
 			break;
 		case B2R2_FMT_TYPE_PLANAR:
-			if (is_yuv422_fmt(buf->fmt) ||
-					is_yuv420_fmt(buf->fmt)) {
-				buf->chroma_addr = (u32)(((u8 *)addr) +
-					buf->pitch * buf->height);
-			} else {
-				buf->chroma_cr_addr = (u32)(((u8 *)addr) +
-					buf->pitch * buf->height);
-			}
-			if (is_yuv420_fmt(buf->fmt)) {
-				/*
-				 * Use ceil(height/2) in case
-				 * buffer height is not divisible by 2.
-				 */
-				buf->chroma_cr_addr =
-					(u32)(((u8 *)buf->chroma_addr) +
-					(buf->pitch >> 1) *
-					((buf->height + 1) >> 1));
-			} else if (is_yuv422_fmt(buf->fmt)) {
-				buf->chroma_cr_addr =
-					(u32)(((u8 *)buf->chroma_addr) +
-					(buf->pitch >> 1) * buf->height);
-			} else if (is_yvu420_fmt(buf->fmt)) {
-				buf->chroma_addr =
-					(u32)(((u8 *)buf->chroma_cr_addr) +
-					(buf->pitch >> 1) *
-					((buf->height + 1) >> 1));
-			} else if (is_yvu422_fmt(buf->fmt)) {
-				buf->chroma_addr =
-					(u32)(((u8 *)buf->chroma_cr_addr) +
-					(buf->pitch >> 1) * buf->height);
-			}
+			b2r2_get_cb_cr_addr(buf->addr, buf->pitch, buf->height,
+				buf->fmt, &buf->chroma_addr,
+				&buf->chroma_cr_addr);
 			break;
 		default:
 			break;
@@ -2688,8 +2800,12 @@ static void set_buf(struct b2r2_node_split_buf *buf, u32 addr,
 /**
  * setup_tmp_buf() - configure a temporary buffer
  */
-static int setup_tmp_buf(struct b2r2_node_split_buf *tmp, u32 max_size,
-		enum b2r2_blt_fmt pref_fmt, u32 pref_width, u32 pref_height)
+static int setup_tmp_buf(struct b2r2_control *cont,
+		struct b2r2_node_split_buf *tmp,
+		u32 max_size,
+		enum b2r2_blt_fmt pref_fmt,
+		u32 pref_width,
+		u32 pref_height)
 {
 	int ret;
 
@@ -2701,19 +2817,17 @@ static int setup_tmp_buf(struct b2r2_node_split_buf *tmp, u32 max_size,
 	u32 size;
 
 	/* Determine what format we should use for the tmp buf */
-	if (is_rgb_fmt(pref_fmt)) {
+	if (b2r2_is_rgb_fmt(pref_fmt)) {
 		fmt = B2R2_BLT_FMT_32_BIT_ARGB8888;
-	} else if (is_bgr_fmt(pref_fmt)) {
+	} else if (b2r2_is_bgr_fmt(pref_fmt)) {
 		fmt = B2R2_BLT_FMT_32_BIT_ABGR8888;
-	} else if (is_yvu_fmt(pref_fmt)) {
-		fmt = B2R2_BLT_FMT_CB_Y_CR_Y;
-	} else if (is_yuv_fmt(pref_fmt)) {
+	} else if (b2r2_is_yuv_fmt(pref_fmt)) {
 		fmt = B2R2_BLT_FMT_32_BIT_AYUV8888;
 	} else {
 		/* Wait, what? */
-		b2r2_log_warn("%s: "
-			"Cannot create tmp buf from this fmt (%d)\n", __func__,
-			pref_fmt);
+		b2r2_log_warn(cont->dev, "%s: "
+			"Cannot create tmp buf from this fmt (%d)\n",
+			__func__, pref_fmt);
 		ret = -EINVAL;
 		goto error;
 	}
@@ -2721,20 +2835,20 @@ static int setup_tmp_buf(struct b2r2_node_split_buf *tmp, u32 max_size,
 	/* See if we can fit the entire preferred rectangle */
 	width = pref_width;
 	height = pref_height;
-	pitch = fmt_byte_pitch(fmt, width);
+	pitch = b2r2_fmt_byte_pitch(fmt, width);
 	size = pitch * height;
 
 	if (size > max_size) {
 		/* We need to limit the size, so we choose a different width */
-		width = MIN(width, B2R2_RESCALE_MAX_WIDTH);
-		pitch = fmt_byte_pitch(fmt, width);
-		height = MIN(height, max_size / pitch);
+		width = min(width, (u32) B2R2_RESCALE_MAX_WIDTH);
+		pitch = b2r2_fmt_byte_pitch(fmt, width);
+		height = min(height, max_size / pitch);
 		size = pitch * height;
 	}
 
 	/* We should at least have enough room for one scanline */
 	if (height == 0) {
-		b2r2_log_warn("%s: Not enough tmp mem!\n",
+		b2r2_log_warn(cont->dev, "%s: Not enough tmp mem!\n",
 			__func__);
 		ret = -ENOMEM;
 		goto error;
@@ -2754,475 +2868,9 @@ static int setup_tmp_buf(struct b2r2_node_split_buf *tmp, u32 max_size,
 
 	return 0;
 error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
+	b2r2_log_warn(cont->dev, "%s: Exit...\n", __func__);
 	return ret;
 
-}
-
-/**
- * get_alpha_range() - returns the alpha range of the given format
- */
-static enum b2r2_ty get_alpha_range(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_24_BIT_ARGB8565:
-	case B2R2_BLT_FMT_32_BIT_ARGB8888:
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-	case B2R2_BLT_FMT_8_BIT_A8:
-	case B2R2_BLT_FMT_32_BIT_ABGR8888:
-		return B2R2_TY_ALPHA_RANGE_255; /* 0 - 255 */
-	default:
-		return B2R2_TY_ALPHA_RANGE_128; /* 0 - 128 */
-	}
-}
-
-/**
- * get_alpha() - returns the pixel alpha in 0...255 range
- */
-static u8 get_alpha(enum b2r2_blt_fmt fmt, u32 pixel)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_32_BIT_ARGB8888:
-	case B2R2_BLT_FMT_32_BIT_ABGR8888:
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-		return (pixel >> 24) & 0xff;
-	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-		return pixel & 0xff;
-	case B2R2_BLT_FMT_24_BIT_ARGB8565:
-		return (pixel & 0xfff) >> 16;
-	case B2R2_BLT_FMT_16_BIT_ARGB4444:
-		return (((pixel >> 12) & 0xf) * 255) / 15;
-	case B2R2_BLT_FMT_16_BIT_ARGB1555:
-		return (pixel >> 15) * 255;
-	case B2R2_BLT_FMT_1_BIT_A1:
-		return pixel * 255;
-	case B2R2_BLT_FMT_8_BIT_A8:
-		return pixel;
-	default:
-		return 255;
-	}
-}
-
-/**
- * set_alpha() - returns a color value with the alpha component set
- */
-static u32 set_alpha(enum b2r2_blt_fmt fmt, u8 alpha, u32 color)
-{
-	u32 alpha_mask;
-
-	switch (fmt) {
-	case B2R2_BLT_FMT_32_BIT_ARGB8888:
-	case B2R2_BLT_FMT_32_BIT_ABGR8888:
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-		color &= 0x00ffffff;
-		alpha_mask = alpha << 24;
-		break;
-	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-		color &= 0xffffff00;
-		alpha_mask = alpha;
-		break;
-	case B2R2_BLT_FMT_24_BIT_ARGB8565:
-		color &= 0x00ffff;
-		alpha_mask = alpha << 16;
-		break;
-	case B2R2_BLT_FMT_16_BIT_ARGB4444:
-		color &= 0x0fff;
-		alpha_mask = (alpha << 8) & 0xF000;
-		break;
-	case B2R2_BLT_FMT_16_BIT_ARGB1555:
-		color &= 0x7fff;
-		alpha_mask = (alpha / 255) << 15 ;
-		break;
-	case B2R2_BLT_FMT_1_BIT_A1:
-		color = 0;
-		alpha_mask = (alpha / 255);
-		break;
-	case B2R2_BLT_FMT_8_BIT_A8:
-		color = 0;
-		alpha_mask = alpha;
-		break;
-	default:
-		alpha_mask = 0;
-	}
-
-	return color | alpha_mask;
-}
-
-/**
- * fmt_has_alpha() - returns whether the given format carries an alpha value
- */
-static bool fmt_has_alpha(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_16_BIT_ARGB4444:
-	case B2R2_BLT_FMT_16_BIT_ARGB1555:
-	case B2R2_BLT_FMT_32_BIT_ARGB8888:
-	case B2R2_BLT_FMT_32_BIT_ABGR8888:
-	case B2R2_BLT_FMT_24_BIT_ARGB8565:
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-	case B2R2_BLT_FMT_1_BIT_A1:
-	case B2R2_BLT_FMT_8_BIT_A8:
-		return true;
-	default:
-		return false;
-	}
-}
-
-/**
- * is_rgb_fmt() - returns whether the given format is a rgb format
- */
-static bool is_rgb_fmt(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_16_BIT_ARGB4444:
-	case B2R2_BLT_FMT_16_BIT_ARGB1555:
-	case B2R2_BLT_FMT_16_BIT_RGB565:
-	case B2R2_BLT_FMT_24_BIT_RGB888:
-	case B2R2_BLT_FMT_32_BIT_ARGB8888:
-	case B2R2_BLT_FMT_24_BIT_ARGB8565:
-	case B2R2_BLT_FMT_1_BIT_A1:
-	case B2R2_BLT_FMT_8_BIT_A8:
-		return true;
-	default:
-		return false;
-	}
-}
-
-/**
- * is_bgr_fmt() - returns whether the given format is a bgr format
- */
-static bool is_bgr_fmt(enum b2r2_blt_fmt fmt)
-{
-	return (fmt == B2R2_BLT_FMT_32_BIT_ABGR8888);
-}
-
-/**
- * is_yuv_fmt() - returns whether the given format is a yuv format
- */
-static bool is_yuv_fmt(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_24_BIT_YUV888:
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-	case B2R2_BLT_FMT_24_BIT_VUY888:
-	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-	case B2R2_BLT_FMT_Y_CB_Y_CR:
-	case B2R2_BLT_FMT_CB_Y_CR_Y:
-	case B2R2_BLT_FMT_YUV420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YUV422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMIPLANAR_MB_STE:
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMIPLANAR_MB_STE:
-	case B2R2_BLT_FMT_YUV444_PACKED_PLANAR:
-		return true;
-	default:
-		return false;
-	}
-}
-
-/**
- * is_yvu_fmt() - returns whether the given format is a yvu format
- */
-static bool is_yvu_fmt(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_Y_CB_Y_CR:
-	case B2R2_BLT_FMT_YVU420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR:
-		return true;
-	default:
-		return false;
-	}
-}
-
-/**
- * is_yuv420_fmt() - returns whether the given format is a yuv420 format
- */
-static bool is_yuv420_fmt(enum b2r2_blt_fmt fmt)
-{
-
-	switch (fmt) {
-	case B2R2_BLT_FMT_YUV420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMIPLANAR_MB_STE:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool is_yuv422_fmt(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_Y_CB_Y_CR:
-	case B2R2_BLT_FMT_CB_Y_CR_Y:
-	case B2R2_BLT_FMT_YUV422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMIPLANAR_MB_STE:
-		return true;
-	default:
-		return false;
-	}
-}
-
-/**
- * is_yvu420_fmt() - returns whether the given format is a yvu420 format
- */
-static bool is_yvu420_fmt(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_YVU420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool is_yvu422_fmt(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_CB_Y_CR_Y:
-	case B2R2_BLT_FMT_YVU422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR:
-		return true;
-	default:
-		return false;
-	}
-}
-
-
-/**
- * is_yuv444_fmt() - returns whether the given format is a yuv444 format
- */
-static bool is_yuv444_fmt(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_24_BIT_YUV888:
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-	case B2R2_BLT_FMT_24_BIT_VUY888:
-	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-	case B2R2_BLT_FMT_YUV444_PACKED_PLANAR:
-		return true;
-	default:
-		return false;
-	}
-}
-
-/**
- * get_fmt_byte_pitch() - returns the pitch of a pixmap with the given width
- */
-static int fmt_byte_pitch(enum b2r2_blt_fmt fmt, u32 width)
-{
-	int pitch;
-
-	switch (fmt) {
-
-	case B2R2_BLT_FMT_1_BIT_A1:
-		pitch = width >> 3; /* Shift is faster than division */
-		if ((width & 0x3) != 0) /* Check for remainder */
-			pitch++;
-		return pitch;
-
-	case B2R2_BLT_FMT_8_BIT_A8:                        /* Fall through */
-	case B2R2_BLT_FMT_YUV420_PACKED_PLANAR:            /* Fall through */
-	case B2R2_BLT_FMT_YVU420_PACKED_PLANAR:            /* Fall through */
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMIPLANAR_MB_STE: /* Fall through */
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR:       /* Fall through */
-	case B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR:       /* Fall through */
-	case B2R2_BLT_FMT_YUV422_PACKED_PLANAR:            /* Fall through */
-	case B2R2_BLT_FMT_YVU422_PACKED_PLANAR:            /* Fall through */
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMIPLANAR_MB_STE: /* Fall through */
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR:       /* Fall through */
-	case B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR:       /* Fall through */
-	case B2R2_BLT_FMT_YUV444_PACKED_PLANAR:
-		return width;
-
-	case B2R2_BLT_FMT_16_BIT_ARGB4444: /* Fall through */
-	case B2R2_BLT_FMT_16_BIT_ARGB1555: /* Fall through */
-	case B2R2_BLT_FMT_16_BIT_RGB565:   /* Fall through */
-	case B2R2_BLT_FMT_Y_CB_Y_CR:       /* Fall through */
-	case B2R2_BLT_FMT_CB_Y_CR_Y:
-		return width << 1;
-
-	case B2R2_BLT_FMT_24_BIT_RGB888:   /* Fall through */
-	case B2R2_BLT_FMT_24_BIT_ARGB8565: /* Fall through */
-	case B2R2_BLT_FMT_24_BIT_YUV888:
-	case B2R2_BLT_FMT_24_BIT_VUY888:
-		return width * 3;
-
-	case B2R2_BLT_FMT_32_BIT_ARGB8888: /* Fall through */
-	case B2R2_BLT_FMT_32_BIT_ABGR8888: /* Fall through */
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-		return width << 2;
-
-	default:
-		/* Should never, ever happen */
-		BUG_ON(1);
-		return 0;
-	}
-}
-
-/**
- * to_native_fmt() - returns the native B2R2 format
- */
-static enum b2r2_native_fmt to_native_fmt(enum b2r2_blt_fmt fmt)
-{
-
-	switch (fmt) {
-	case B2R2_BLT_FMT_UNUSED:
-		return B2R2_NATIVE_RGB565;
-	case B2R2_BLT_FMT_1_BIT_A1:
-		return B2R2_NATIVE_A1;
-	case B2R2_BLT_FMT_8_BIT_A8:
-		return B2R2_NATIVE_A8;
-	case B2R2_BLT_FMT_16_BIT_RGB565:
-		return B2R2_NATIVE_RGB565;
-	case B2R2_BLT_FMT_16_BIT_ARGB4444:
-		return B2R2_NATIVE_ARGB4444;
-	case B2R2_BLT_FMT_16_BIT_ARGB1555:
-		return B2R2_NATIVE_ARGB1555;
-	case B2R2_BLT_FMT_24_BIT_ARGB8565:
-		return B2R2_NATIVE_ARGB8565;
-	case B2R2_BLT_FMT_24_BIT_RGB888:
-		return B2R2_NATIVE_RGB888;
-	case B2R2_BLT_FMT_24_BIT_YUV888:
-	case B2R2_BLT_FMT_24_BIT_VUY888: /* Not actually supported by HW */
-		return B2R2_NATIVE_YCBCR888;
-	case B2R2_BLT_FMT_32_BIT_ABGR8888: /* Not actually supported by HW */
-	case B2R2_BLT_FMT_32_BIT_ARGB8888:
-		return B2R2_NATIVE_ARGB8888;
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-	case B2R2_BLT_FMT_32_BIT_VUYA8888: /* Not actually supported by HW */
-		return B2R2_NATIVE_AYCBCR8888;
-	case B2R2_BLT_FMT_CB_Y_CR_Y:
-		return B2R2_NATIVE_YCBCR422R;
-	case B2R2_BLT_FMT_Y_CB_Y_CR:
-		return B2R2_NATIVE_YCBCR422R;
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR:
-		return B2R2_NATIVE_YCBCR42X_R2B;
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMIPLANAR_MB_STE:
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMIPLANAR_MB_STE:
-		return B2R2_NATIVE_YCBCR42X_MBN;
-	case B2R2_BLT_FMT_YUV420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YUV422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YUV444_PACKED_PLANAR:
-		return B2R2_NATIVE_YUV;
-	default:
-		/* Should never ever happen */
-		return B2R2_NATIVE_BYTE;
-	}
-}
-
-/**
- * Bit-expand the color from fmt to RGB888 with blue at LSB.
- * Copy MSBs into missing LSBs.
- */
-static u32 to_RGB888(u32 color, const enum b2r2_blt_fmt fmt)
-{
-	u32 out_color = 0;
-	u32 r = 0;
-	u32 g = 0;
-	u32 b = 0;
-	switch (fmt) {
-	case B2R2_BLT_FMT_16_BIT_ARGB4444:
-		r = ((color & 0xf00) << 12) | ((color & 0xf00) << 8);
-		g = ((color & 0xf0) << 8) | ((color & 0xf0) << 4);
-		b = ((color & 0xf) << 4) | (color & 0xf);
-		out_color = r | g | b;
-		break;
-	case B2R2_BLT_FMT_16_BIT_ARGB1555:
-		r = ((color & 0x7c00) << 9) | ((color & 0x7000) << 4);
-		g = ((color & 0x3e0) << 6) | ((color & 0x380) << 1);
-		b = ((color & 0x1f) << 3) | ((color & 0x1c) >> 2);
-		out_color = r | g | b;
-		break;
-	case B2R2_BLT_FMT_16_BIT_RGB565:
-		r = ((color & 0xf800) << 8) | ((color & 0xe000) << 3);
-		g = ((color & 0x7e0) << 5) | ((color & 0x600) >> 1);
-		b = ((color & 0x1f) << 3) | ((color & 0x1c) >> 2);
-		out_color = r | g | b;
-		break;
-	case B2R2_BLT_FMT_24_BIT_RGB888:
-	case B2R2_BLT_FMT_32_BIT_ARGB8888:
-		out_color = color & 0xffffff;
-		break;
-	case B2R2_BLT_FMT_32_BIT_ABGR8888:
-		r = (color & 0xff) << 16;
-		g = color & 0xff00;
-		b = (color & 0xff0000) >> 16;
-		out_color = r | g | b;
-		break;
-	case B2R2_BLT_FMT_24_BIT_ARGB8565:
-		r = ((color & 0xf800) << 8) | ((color & 0xe000) << 3);
-		g = ((color & 0x7e0) << 5) | ((color & 0x600) >> 1);
-		b = ((color & 0x1f) << 3) | ((color & 0x1c) >> 2);
-		out_color = r | g | b;
-		break;
-	default:
-		break;
-	}
-
-	return out_color;
-}
-
-/**
- * get_fmt_type() - returns the type of the given format (raster, planar, etc.)
- */
-static enum b2r2_fmt_type get_fmt_type(enum b2r2_blt_fmt fmt)
-{
-	switch (fmt) {
-	case B2R2_BLT_FMT_16_BIT_ARGB4444:
-	case B2R2_BLT_FMT_16_BIT_ARGB1555:
-	case B2R2_BLT_FMT_16_BIT_RGB565:
-	case B2R2_BLT_FMT_24_BIT_RGB888:
-	case B2R2_BLT_FMT_32_BIT_ARGB8888:
-	case B2R2_BLT_FMT_Y_CB_Y_CR:
-	case B2R2_BLT_FMT_CB_Y_CR_Y:
-	case B2R2_BLT_FMT_32_BIT_ABGR8888:
-	case B2R2_BLT_FMT_24_BIT_ARGB8565:
-	case B2R2_BLT_FMT_24_BIT_YUV888:
-	case B2R2_BLT_FMT_32_BIT_AYUV8888:
-	case B2R2_BLT_FMT_24_BIT_VUY888:
-	case B2R2_BLT_FMT_32_BIT_VUYA8888:
-	case B2R2_BLT_FMT_1_BIT_A1:
-	case B2R2_BLT_FMT_8_BIT_A8:
-		return B2R2_FMT_TYPE_RASTER;
-	case B2R2_BLT_FMT_YUV420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YUV422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_PLANAR:
-	case B2R2_BLT_FMT_YUV444_PACKED_PLANAR:
-		return B2R2_FMT_TYPE_PLANAR;
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR:
-	case B2R2_BLT_FMT_YUV420_PACKED_SEMIPLANAR_MB_STE:
-	case B2R2_BLT_FMT_YUV422_PACKED_SEMIPLANAR_MB_STE:
-		return B2R2_FMT_TYPE_SEMI_PLANAR;
-	default:
-		return B2R2_FMT_TYPE_RASTER;
-	}
 }
 
 /**
@@ -3238,61 +2886,16 @@ static bool is_transform(const struct b2r2_blt_request *req)
 }
 
 /**
- * calculate_scale_factor() - calculates the scale factor between the given
- *                            values
- */
-static int calculate_scale_factor(u32 from, u32 to, u16 *sf_out)
-{
-	int ret;
-	u32 sf;
-
-	b2r2_log_info("%s\n", __func__);
-
-	if (to == from) {
-		*sf_out = 1 << 10;
-		return 0;
-	} else if (to == 0) {
-		b2r2_log_err("%s: To is 0!\n", __func__);
-		BUG_ON(1);
-	}
-
-	sf = (from << 10) / to;
-
-	if ((sf & 0xffff0000) != 0) {
-		/* Overflow error */
-		b2r2_log_warn("%s: "
-			"Scale factor too large\n", __func__);
-		ret = -EINVAL;
-		goto error;
-	} else if (sf == 0) {
-		b2r2_log_warn("%s: "
-			"Scale factor too small\n", __func__);
-		ret = -EINVAL;
-		goto error;
-	}
-
-	*sf_out = (u16)sf;
-
-	b2r2_log_info("%s exit\n", __func__);
-
-	return 0;
-
-error:
-	b2r2_log_warn("%s: Exit...\n", __func__);
-	return ret;
-}
-
-/**
  * rescale() - rescales the given dimension
  *
  * Returns the rescaled dimension in 22.10 fixed point format.
  */
-static s32 rescale(s32 dim, u16 sf)
+static s32 rescale(struct b2r2_control *cont, s32 dim, u16 sf)
 {
-	b2r2_log_info("%s\n", __func__);
+	b2r2_log_info(cont->dev, "%s\n", __func__);
 
 	if (sf == 0) {
-		b2r2_log_err("%s: Scale factor is 0!\n", __func__);
+		b2r2_log_err(cont->dev, "%s: Scale factor is 0!\n", __func__);
 		BUG_ON(1);
 	}
 
@@ -3332,12 +2935,16 @@ static void set_target(struct b2r2_node *node, u32 addr,
 		node->dst_tmp_index = buf->tmp_buf_index;
 
 	node->node.GROUP1.B2R2_TBA = addr;
-	node->node.GROUP1.B2R2_TTY = buf->pitch | to_native_fmt(buf->fmt) |
+	node->node.GROUP1.B2R2_TTY = buf->pitch | b2r2_to_native_fmt(buf->fmt) |
 			buf->alpha_range | buf->chroma_selection | buf->hso |
 			buf->vso | buf->dither | buf->plane_selection;
 
 	if (buf->fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
-			buf->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
+			buf->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888 ||
+			buf->fmt == B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR)
 		node->node.GROUP1.B2R2_TTY |= B2R2_TY_ENDIAN_BIG_NOT_LITTLE;
 
 	node->node.GROUP1.B2R2_TSZ =
@@ -3364,10 +2971,10 @@ static void set_target(struct b2r2_node *node, u32 addr,
 	/* Clip to the destination buffer to prevent memory overwrites */
 	if ((l < 0) || (r > buf->width) || (t < 0) || (b > buf->height)) {
 		/* The clip rectangle is including the borders */
-		l = MAX(l, 0);
-		r = MIN(r, buf->width) - 1;
-		t = MAX(t, 0);
-		b = MIN(b, buf->height) - 1;
+		l = max(l, 0);
+		r = min(r, (s32) buf->width) - 1;
+		t = max(t, 0);
+		b = min(b, (s32) buf->height) - 1;
 
 		node->node.GROUP0.B2R2_CIC |= B2R2_CIC_CLIP_WINDOW;
 		node->node.GROUP0.B2R2_INS |= B2R2_INS_RECT_CLIP_ENABLED;
@@ -3388,11 +2995,15 @@ static void set_src(struct b2r2_src_config *src, u32 addr,
 		struct b2r2_node_split_buf *buf)
 {
 	src->B2R2_SBA = addr;
-	src->B2R2_STY = buf->pitch | to_native_fmt(buf->fmt) |
+	src->B2R2_STY = buf->pitch | b2r2_to_native_fmt(buf->fmt) |
 			buf->alpha_range | buf->hso | buf->vso;
 
 	if (buf->fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
-			buf->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
+			buf->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888 ||
+			buf->fmt == B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR)
 		src->B2R2_STY |= B2R2_TY_ENDIAN_BIG_NOT_LITTLE;
 
 	src->B2R2_SSZ = ((buf->win.width & 0xfff) << B2R2_SZ_WIDTH_SHIFT) |
@@ -3417,18 +3028,22 @@ static void set_src_1(struct b2r2_node *node, u32 addr,
 	node->node.GROUP0.B2R2_INS |= B2R2_INS_SOURCE_1_FETCH_FROM_MEM;
 
 	node->node.GROUP3.B2R2_SBA = addr;
-	node->node.GROUP3.B2R2_STY = buf->pitch | to_native_fmt(buf->fmt) |
+	node->node.GROUP3.B2R2_STY = buf->pitch | b2r2_to_native_fmt(buf->fmt) |
 			buf->alpha_range | buf->hso | buf->vso;
 
 	if (buf->fmt == B2R2_BLT_FMT_24_BIT_VUY888 ||
-			buf->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888)
+			buf->fmt == B2R2_BLT_FMT_32_BIT_VUYA8888 ||
+			buf->fmt == B2R2_BLT_FMT_YUV420_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YUV422_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YVU420_PACKED_SEMI_PLANAR ||
+			buf->fmt == B2R2_BLT_FMT_YVU422_PACKED_SEMI_PLANAR)
 		node->node.GROUP3.B2R2_STY |= B2R2_TY_ENDIAN_BIG_NOT_LITTLE;
 
 	node->node.GROUP3.B2R2_SXY =
 			((buf->win.x & 0xffff) << B2R2_XY_X_SHIFT) |
 			((buf->win.y & 0xffff) << B2R2_XY_Y_SHIFT);
 
-	/* Source 1 has no size register */
+	/* NOTE: Source 1 has no size register */
 }
 
 /**
@@ -3466,7 +3081,7 @@ static void set_src_3(struct b2r2_node *node, u32 addr,
 }
 
 /**
- * set_ivmx() - configures the iVMX registers with the given values
+ * set_ivmx() - configures the iVMx registers with the given values
  */
 static void set_ivmx(struct b2r2_node *node, const u32 *vmx_values)
 {
@@ -3477,6 +3092,20 @@ static void set_ivmx(struct b2r2_node *node, const u32 *vmx_values)
 	node->node.GROUP15.B2R2_VMX1 = vmx_values[1];
 	node->node.GROUP15.B2R2_VMX2 = vmx_values[2];
 	node->node.GROUP15.B2R2_VMX3 = vmx_values[3];
+}
+
+/**
+ * set_ovmx() - configures the oVMx registers with the given values
+ */
+static void set_ovmx(struct b2r2_node *node, const u32 *vmx_values)
+{
+	node->node.GROUP0.B2R2_CIC |= B2R2_CIC_OVMX;
+	node->node.GROUP0.B2R2_INS |= B2R2_INS_OVMX_ENABLED;
+
+	node->node.GROUP16.B2R2_VMX0 = vmx_values[0];
+	node->node.GROUP16.B2R2_VMX1 = vmx_values[1];
+	node->node.GROUP16.B2R2_VMX2 = vmx_values[2];
+	node->node.GROUP16.B2R2_VMX3 = vmx_values[3];
 }
 
 /**
@@ -3500,14 +3129,12 @@ static void reset_nodes(struct b2r2_node *node)
 	}
 }
 
-int b2r2_node_split_init(void)
+int b2r2_node_split_init(struct b2r2_control *cont)
 {
-	b2r2_filters_init();
-
 	return 0;
 }
 
-void b2r2_node_split_exit(void)
+void b2r2_node_split_exit(struct b2r2_control *cont)
 {
-	b2r2_filters_exit();
+
 }

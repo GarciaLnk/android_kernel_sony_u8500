@@ -19,15 +19,17 @@
 #include <linux/jiffies.h>
 #include <linux/slab.h>
 #include <linux/input.h>
-#include <sound/soc.h>
-#include <sound/jack.h>
+#include <linux/interrupt.h>
+#include <linux/input/abx500-accdet.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/gpio.h>
 #include <linux/mfd/abx500.h>
-#include <linux/interrupt.h>
+
 #include <sound/jack.h>
-#include <mach/abx500-accdet.h>
+#include <sound/soc.h>
+#include <sound/jack.h>
+
 #ifdef CONFIG_SND_SOC_UX500_AB8500
 #include <sound/ux500_ab8500.h>
 #else
@@ -49,13 +51,15 @@
 #define ACCESSORY_DET_VOL_DONTCARE	-1
 #define ACCESSORY_HEADPHONE_DET_VOL_MIN	0
 #define ACCESSORY_HEADPHONE_DET_VOL_MAX	40
-#define ACCESSORY_CVIDEO_DET_VOL_MIN	41
-#define ACCESSORY_CVIDEO_DET_VOL_MAX	105
+#define ACCESSORY_U_HEADSET_DET_VOL_MIN	47
+#define ACCESSORY_U_HEADSET_DET_VOL_MAX	732
+#define ACCESSORY_U_HEADSET_ALT_DET_VOL_MIN	25
+#define ACCESSORY_U_HEADSET_ALT_DET_VOL_MAX	50
 #define ACCESSORY_CARKIT_DET_VOL_MIN	1100
 #define ACCESSORY_CARKIT_DET_VOL_MAX	1300
-#define ACCESSORY_HEADSET_DET_VOL_MIN	0
-#define ACCESSORY_HEADSET_DET_VOL_MAX	200
-#define ACCESSORY_OPENCABLE_DET_VOL_MIN	1730
+#define ACCESSORY_HEADSET_DET_VOL_MIN	1301
+#define ACCESSORY_HEADSET_DET_VOL_MAX	2000
+#define ACCESSORY_OPENCABLE_DET_VOL_MIN	2001
 #define ACCESSORY_OPENCABLE_DET_VOL_MAX	2150
 
 
@@ -87,7 +91,9 @@ static struct accessory_detect_task detect_ops[] = {
 		.meas_mv = 1,
 		.req_det_count = 1,
 		.minvol = ACCESSORY_DET_VOL_DONTCARE,
-		.maxvol = ACCESSORY_DET_VOL_DONTCARE
+		.maxvol = ACCESSORY_DET_VOL_DONTCARE,
+		.alt_minvol = ACCESSORY_DET_VOL_DONTCARE,
+		.alt_maxvol = ACCESSORY_DET_VOL_DONTCARE
 	},
 	{
 		.type = JACK_TYPE_HEADPHONE,
@@ -95,15 +101,19 @@ static struct accessory_detect_task detect_ops[] = {
 		.meas_mv = 1,
 		.req_det_count = 1,
 		.minvol = ACCESSORY_HEADPHONE_DET_VOL_MIN,
-		.maxvol = ACCESSORY_HEADPHONE_DET_VOL_MAX
+		.maxvol = ACCESSORY_HEADPHONE_DET_VOL_MAX,
+		.alt_minvol = ACCESSORY_DET_VOL_DONTCARE,
+		.alt_maxvol = ACCESSORY_DET_VOL_DONTCARE
 	},
 	{
-		.type = JACK_TYPE_CVIDEO,
-		.typename = "CVIDEO",
-		.meas_mv = 0,
-		.req_det_count = 4,
-		.minvol = ACCESSORY_CVIDEO_DET_VOL_MIN,
-		.maxvol = ACCESSORY_CVIDEO_DET_VOL_MAX
+		.type = JACK_TYPE_UNSUPPORTED_HEADSET,
+		.typename = "UNSUPPORTED HEADSET",
+		.meas_mv = 1,
+		.req_det_count = 2,
+		.minvol = ACCESSORY_U_HEADSET_DET_VOL_MIN,
+		.maxvol = ACCESSORY_U_HEADSET_DET_VOL_MAX,
+		.alt_minvol = ACCESSORY_U_HEADSET_ALT_DET_VOL_MIN,
+		.alt_maxvol = ACCESSORY_U_HEADSET_ALT_DET_VOL_MAX
 	},
 	{
 		.type = JACK_TYPE_OPENCABLE,
@@ -111,7 +121,9 @@ static struct accessory_detect_task detect_ops[] = {
 		.meas_mv = 0,
 		.req_det_count = 4,
 		.minvol = ACCESSORY_OPENCABLE_DET_VOL_MIN,
-		.maxvol = ACCESSORY_OPENCABLE_DET_VOL_MAX
+		.maxvol = ACCESSORY_OPENCABLE_DET_VOL_MAX,
+		.alt_minvol = ACCESSORY_DET_VOL_DONTCARE,
+		.alt_maxvol = ACCESSORY_DET_VOL_DONTCARE
 	},
 	{
 		.type = JACK_TYPE_CARKIT,
@@ -119,7 +131,9 @@ static struct accessory_detect_task detect_ops[] = {
 		.meas_mv = 1,
 		.req_det_count = 1,
 		.minvol = ACCESSORY_CARKIT_DET_VOL_MIN,
-		.maxvol = ACCESSORY_CARKIT_DET_VOL_MAX
+		.maxvol = ACCESSORY_CARKIT_DET_VOL_MAX,
+		.alt_minvol = ACCESSORY_DET_VOL_DONTCARE,
+		.alt_maxvol = ACCESSORY_DET_VOL_DONTCARE
 	},
 	{
 		.type = JACK_TYPE_HEADSET,
@@ -127,7 +141,9 @@ static struct accessory_detect_task detect_ops[] = {
 		.meas_mv = 0,
 		.req_det_count = 2,
 		.minvol = ACCESSORY_HEADSET_DET_VOL_MIN,
-		.maxvol = ACCESSORY_HEADSET_DET_VOL_MAX
+		.maxvol = ACCESSORY_HEADSET_DET_VOL_MAX,
+		.alt_minvol = ACCESSORY_DET_VOL_DONTCARE,
+		.alt_maxvol = ACCESSORY_DET_VOL_DONTCARE
 	},
 	{
 		.type = JACK_TYPE_CONNECTED,
@@ -135,7 +151,9 @@ static struct accessory_detect_task detect_ops[] = {
 		.meas_mv = 0,
 		.req_det_count = 4,
 		.minvol = ACCESSORY_DET_VOL_DONTCARE,
-		.maxvol = ACCESSORY_DET_VOL_DONTCARE
+		.maxvol = ACCESSORY_DET_VOL_DONTCARE,
+		.alt_minvol = ACCESSORY_DET_VOL_DONTCARE,
+		.alt_maxvol = ACCESSORY_DET_VOL_DONTCARE
 	}
 };
 
@@ -285,8 +303,12 @@ void report_jack_status(struct abx500_ad *dd)
 		goto out;
 	dd->reported_jack_type = dd->jack_type;
 
-	dev_info(&dd->pdev->dev, "Accessory: %s\n",
+	dev_dbg(&dd->pdev->dev, "Accessory: %s\n",
 		accessory_str(dd->jack_type));
+
+	/* Never report unsupported headset */
+	if (dd->jack_type == JACK_TYPE_UNSUPPORTED_HEADSET)
+		goto out;
 
 	if (dd->jack_type != JACK_TYPE_DISCONNECTED &&
 		dd->jack_type != JACK_TYPE_UNSPECIFIED)
@@ -295,11 +317,11 @@ void report_jack_status(struct abx500_ad *dd)
 		value |= SND_JACK_MICROPHONE;
 	if (jack_supports_spkr(dd->jack_type))
 		value |= (SND_JACK_HEADPHONE | SND_JACK_LINEOUT);
-	if (dd->jack_type == JACK_TYPE_CVIDEO) {
-		value |= SND_JACK_VIDEOOUT;
-		if (dd->set_av_switch)
-			dd->set_av_switch(dd, VIDEO_OUT);
-	}
+	if (dd->jack_type == JACK_TYPE_DISCONNECTED)
+		set_android_switch_state(0);
+	else
+		set_android_switch_state(1);
+
 	ux500_ab8500_jack_report(value);
 
 out: return;
@@ -488,14 +510,28 @@ irqreturn_t button_release_irq_handler(int irq, void *_userdata)
  * voltage might be re-measured or previously measured voltage is reused.
  */
 static int mic_vol_in_range(struct abx500_ad *dd,
-			int lo, int hi, int force_read)
+			int lo, int hi, int alt_lo, int alt_hi, int force_read)
 {
 	static int mv = MIN_MIC_POWER;
+	static int alt_mv = MIN_MIC_POWER;
 
-	if (mv == -100 || force_read)
+	if (mv == MIN_MIC_POWER || force_read)
 		mv = dd->meas_voltage_stable(dd);
 
-	return (mv >= lo && mv <= hi) ? 1 : 0;
+	if (mv < lo || mv > hi)
+		return 0;
+
+	if (ACCESSORY_DET_VOL_DONTCARE == alt_lo &&
+		ACCESSORY_DET_VOL_DONTCARE == alt_hi)
+		return 1;
+
+	if (alt_mv == MIN_MIC_POWER || force_read)
+		alt_mv = dd->meas_alt_voltage_stable(dd);
+
+	if (alt_mv < alt_lo || alt_mv > alt_hi)
+		return 0;
+
+	return 1;
 }
 
 /*
@@ -516,15 +552,15 @@ static int detect_hw(struct abx500_ad *dd,
 		status = dd->detect_plugged_in(dd);
 		break;
 	case JACK_TYPE_CARKIT:
-		dd->config_hw_test_basic_carkit(dd, 1);
-		/* flow through.. */
 	case JACK_TYPE_HEADPHONE:
-	case JACK_TYPE_CVIDEO:
 	case JACK_TYPE_HEADSET:
+	case JACK_TYPE_UNSUPPORTED_HEADSET:
 	case JACK_TYPE_OPENCABLE:
 		status = mic_vol_in_range(dd,
 					task->minvol,
 					task->maxvol,
+					task->alt_minvol,
+					task->alt_maxvol,
 					task->meas_mv);
 		break;
 	default:
@@ -544,6 +580,8 @@ static enum accessory_jack_type detect(struct abx500_ad *dd,
 	int i;
 
 	accessory_regulator_enable(dd, REGULATOR_VAUDIO | REGULATOR_AVSWITCH);
+	/* enable the VAMIC1 regulator */
+	dd->config_hw_test_basic_carkit(dd, 0);
 
 	for (i = 0; i < ARRAY_SIZE(detect_ops); ++i) {
 		if (detect_hw(dd, &detect_ops[i])) {
@@ -553,7 +591,6 @@ static enum accessory_jack_type detect(struct abx500_ad *dd,
 		}
 	}
 
-	dd->config_hw_test_basic_carkit(dd, 0);
 	dd->config_hw_test_plug_connected(dd, 0);
 
 	if (jack_supports_buttons(type))
@@ -666,7 +703,6 @@ static void config_accdetect(struct abx500_ad *dd)
 	if (dd->set_av_switch)
 		dd->set_av_switch(dd, NOT_SET);
 	case JACK_TYPE_HEADPHONE:
-	case JACK_TYPE_CVIDEO:
 		dd->config_accdetect1_hw(dd, 1);
 		dd->config_accdetect2_hw(dd, 0);
 
@@ -674,6 +710,18 @@ static void config_accdetect(struct abx500_ad *dd)
 		claim_irq(dd, UNPLUG_IRQ);
 		release_irq(dd, BUTTON_PRESS_IRQ);
 		release_irq(dd, BUTTON_RELEASE_IRQ);
+		break;
+
+	case JACK_TYPE_UNSUPPORTED_HEADSET:
+		dd->config_accdetect1_hw(dd, 1);
+		dd->config_accdetect2_hw(dd, 1);
+
+		release_irq(dd, PLUG_IRQ);
+		claim_irq(dd, UNPLUG_IRQ);
+		release_irq(dd, BUTTON_PRESS_IRQ);
+		release_irq(dd, BUTTON_RELEASE_IRQ);
+		if (dd->set_av_switch)
+			dd->set_av_switch(dd, NOT_SET);
 		break;
 
 	case JACK_TYPE_CONNECTED:
@@ -745,7 +793,25 @@ static int abx500_accessory_init(struct platform_device *pdev)
 		}
 	}
 
-	(ret = create_btn_input_dev(dd));
+	if (dd->pdata->mic_ctrl) {
+		ret = gpio_is_valid(dd->pdata->mic_ctrl);
+		if (!ret) {
+			dev_err(&pdev->dev,
+				"%s: Mic ctrl GPIO invalid (%d).\n", __func__,
+						dd->pdata->mic_ctrl);
+
+			goto mic_ctrl_fail;
+		}
+		ret = gpio_request(dd->pdata->mic_ctrl,
+				"Mic Control");
+	       if (ret)	{
+			dev_err(&pdev->dev, "%s: Get mic ctrl GPIO"
+					"failed.\n", __func__);
+			goto mic_ctrl_fail;
+		}
+	}
+
+	ret = create_btn_input_dev(dd);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "%s: create_button_input_dev failed.\n",
 			__func__);
@@ -780,12 +846,17 @@ static int abx500_accessory_init(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dd);
 
+
 	return 0;
+
 fail_no_mem_for_wq:
 	free_regulators(dd);
 fail_no_regulators:
 	input_unregister_device(dd->btn_input_dev);
 fail_no_btn_input_dev:
+	if (dd->pdata->mic_ctrl)
+		gpio_free(dd->pdata->mic_ctrl);
+mic_ctrl_fail:
 	if (dd->pdata->video_ctrl_gpio)
 		gpio_free(dd->pdata->video_ctrl_gpio);
 	return ret;
@@ -801,7 +872,12 @@ static void abx500_accessory_cleanup(struct abx500_ad *dd)
 	dd->jack_type = JACK_TYPE_UNSPECIFIED;
 	config_accdetect(dd);
 
-	gpio_free(dd->pdata->video_ctrl_gpio);
+	if (dd->pdata->mic_ctrl)
+		gpio_free(dd->pdata->mic_ctrl);
+
+	if (dd->pdata->video_ctrl_gpio)
+		gpio_free(dd->pdata->video_ctrl_gpio);
+
 	input_unregister_device(dd->btn_input_dev);
 	free_regulators(dd);
 
@@ -811,7 +887,6 @@ static void abx500_accessory_cleanup(struct abx500_ad *dd)
 	flush_workqueue(dd->irq_work_queue);
 	destroy_workqueue(dd->irq_work_queue);
 
-	kfree(dd);
 }
 
 static int __devinit abx500_acc_detect_probe(struct platform_device *pdev)

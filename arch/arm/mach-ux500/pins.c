@@ -12,6 +12,7 @@
 #include <linux/spinlock.h>
 #include <linux/err.h>
 #include <plat/pincfg.h>
+#include <linux/gpio.h>
 
 #include "pins.h"
 
@@ -87,23 +88,61 @@ void ux500_pins_put(struct ux500_pins *pins)
 	WARN_ON(!pins);
 }
 
+void __init ux500_offchip_gpio_init(struct ux500_pins *pins)
+{
+	int err;
+	int i;
+	int gpio;
+	int output;
+	int value;
+	pin_cfg_t cfg;
+
+	for (i = 0; i < pins->num; i++) {
+		cfg = pins->cfg[i];
+		gpio = PIN_NUM(cfg);
+		output = PIN_DIR(cfg);
+		value = PIN_VAL(cfg);
+
+		err = gpio_request(gpio, "offchip_gpio_init");
+		if (err < 0) {
+			pr_err("pins: gpio_request for gpio=%d failed with"
+				"err: %d\n", gpio, err);
+			/* Pin already requested. Try to configure rest. */
+			continue;
+		}
+
+		if (!output) {
+			err = gpio_direction_input(gpio);
+			if (err < 0)
+				pr_err("pins: gpio_direction_input for gpio=%d"
+					"failed with err: %d\n", gpio, err);
+		} else {
+			err = gpio_direction_output(gpio, value);
+			if (err < 0)
+				pr_err("pins: gpio_direction_output for gpio="
+					"%d failed with err: %d\n", gpio, err);
+		}
+		gpio_free(gpio);
+	}
+}
+
 #ifdef CONFIG_DEBUG_FS
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
-#include <linux/gpio/nomadik.h>
+#include <plat/gpio-nomadik.h>
 
 #include <mach/gpio.h>
 
 static void show_pin(struct seq_file *s, pin_cfg_t pin)
 {
-	static const char *afnames[] = {
+	static char *afnames[] = {
 		[NMK_GPIO_ALT_GPIO]	= "GPIO",
 		[NMK_GPIO_ALT_A]	= "A",
 		[NMK_GPIO_ALT_B]	= "B",
 		[NMK_GPIO_ALT_C]	= "C"
 	};
-	static const char *pullnames[] = {
+	static char *pullnames[] = {
 		[NMK_GPIO_PULL_NONE]	= "none",
 		[NMK_GPIO_PULL_UP]	= "up",
 		[NMK_GPIO_PULL_DOWN]	= "down",
@@ -119,22 +158,19 @@ static void show_pin(struct seq_file *s, pin_cfg_t pin)
 	int slpm_pull = PIN_SLPM_PULL(pin);
 	int slpm_dir = PIN_SLPM_DIR(pin);
 	int slpm_val = PIN_SLPM_VAL(pin);
-	int slpm_pdis = PIN_SLPM_PDIS(pin);
 
 	seq_printf(s,
-		   "  pin %d [%#lx]: af %s, pull %s (%s%s) - slpm: %s%s%s%s%s\n",
+		   "  pin %d [%#lx]: af %s, pull %s (%s%s) - slpm: %s%s%s%s\n",
 		   pin_num, pin, afnames[af],
 		   pullnames[pull],
 		   output ? "output " : "input",
 		   output ? (val ? "high" : "low") : "",
 		   slpm ? "no-change/no-wakeup " : "input/wakeup ",
-		   slpm_dir ? (slpm_dir == 1 ? "input " : "output " ) : "",
-		   slpm_dir == 1 ? (slpm_pull == 0 ? "pull: none ":
+		   slpm_dir ? (slpm_dir == 1 ? "input " : "output ") : "",
+		   slpm_dir == 1 ? (slpm_pull == 0 ? "pull: none " :
 				    (slpm_pull == NMK_GPIO_PULL_UP ?
 				     "pull: up " : "pull: down ") ): "",
-		   slpm_dir == 2 ? (slpm_val == 1 ? "low " : "high " ) : "",
-		   slpm_pdis ? (slpm_pdis == 1 ? "pdis: dis" : "pdis: en") :
-		   "pdis: no change");
+		   slpm_dir == 2 ? (slpm_val == 1 ? "low " : "high ") : "");
 }
 
 static int pins_dbg_show(struct seq_file *s, void *iter)
@@ -183,6 +219,8 @@ static int pins_dbg_show(struct seq_file *s, void *iter)
 		seq_printf(s, "-%d", prev);
 
 	seq_printf(s, "\n");
+
+	kfree(pins);
 
 	return 0;
 }

@@ -232,6 +232,9 @@ struct cg2900_device {
 /* Global Structure to store the maintain FM Driver device info */
 static struct cg2900_device cg2900_device;
 
+/* V4L2 Video Device Structure pointer */
+static struct video_device *cg2900_video_device;
+
 /* V4l2 File Operation Structure */
 static const struct v4l2_file_operations cg2900_fops = {
 	.owner = THIS_MODULE,
@@ -261,14 +264,6 @@ static const struct v4l2_ioctl_ops cg2900_ioctl_ops = {
 	.vidioc_s_audio = vidioc_set_audio,
 	.vidioc_g_input = vidioc_get_input,
 	.vidioc_s_input = vidioc_set_input,
-};
-
-/* V4L2 Video Device Structure */
-static struct video_device cg2900_video_device = {
-	.name = "STE CG2900 FM Rx/Tx Radio",
-	.fops = &cg2900_fops,
-	.ioctl_ops = &cg2900_ioctl_ops,
-	.release = video_device_release_empty,
 };
 
 static u16 no_of_scan_freq;
@@ -2898,6 +2893,18 @@ static int __devinit radio_cg2900_probe(
 		return err;
 	}
 
+	cg2900_video_device = video_device_alloc();
+	if (cg2900_video_device == NULL) {
+		FM_ERR_REPORT("Could not create video_device structure");
+		return -ENOMEM;
+	}
+
+	strlcpy(cg2900_video_device->name, "STE CG2900 FM Rx/Tx Radio",
+		sizeof(cg2900_video_device->name));
+	cg2900_video_device->fops = &cg2900_fops;
+	cg2900_video_device->ioctl_ops = &cg2900_ioctl_ops;
+	cg2900_video_device->release = video_device_release;
+
 	radio_nr = 0;
 	grid = CG2900_FM_GRID_100;
 	band = CG2900_FM_BAND_US_EU;
@@ -2905,10 +2912,11 @@ static int __devinit radio_cg2900_probe(
 
 	/* Initialize the parameters */
 	if (video_register_device(
-				&cg2900_video_device,
+				cg2900_video_device,
 				VFL_TYPE_RADIO,
 				radio_nr) == -1) {
 		FM_ERR_REPORT("radio_cg2900_probe: video_register_device err");
+		video_device_release(cg2900_video_device);
 		return -EINVAL;
 	}
 	mutex_init(&fm_mutex);
@@ -2945,7 +2953,7 @@ static int __devexit radio_cg2900_remove(
 	cg2900_fm_deinit();
 	skb_queue_purge(&fm_interrupt_queue);
 	mutex_destroy(&fm_mutex);
-	video_unregister_device(&cg2900_video_device);
+	video_unregister_device(cg2900_video_device);
 	fmd_set_dev(NULL);
 	return 0;
 }

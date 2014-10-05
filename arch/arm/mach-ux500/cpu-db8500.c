@@ -14,41 +14,41 @@
 #include <linux/amba/bus.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
-#include <linux/gpio/nomadik.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/sys_soc.h>
+#include <linux/delay.h>
 
-#include <asm/mach/map.h>
+#include <plat/gpio-nomadik.h>
+
 #include <asm/pmu.h>
+#include <asm/mach/map.h>
 #include <mach/hardware.h>
 #include <mach/setup.h>
 #include <mach/devices.h>
 #include <linux/mfd/dbx500-prcmu.h>
 #include <mach/reboot_reasons.h>
+#include <mach/dbx500-reset-reasons.h>
 #include <mach/usb.h>
 #include <mach/ste-dma40-db8500.h>
 
 #include "devices-db8500.h"
+#include "prcc.h"
 
 /* minimum static i/o mapping required to boot U8500 platforms */
 static struct map_desc u8500_uart_io_desc[] __initdata = {
 	__IO_DEV_DESC(U8500_UART0_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_UART2_BASE, SZ_4K),
 };
-
-static struct map_desc u8500_io_desc[] __initdata = {
-	__IO_DEV_DESC(U8500_GIC_CPU_BASE, SZ_4K),
+/*  U8500 and U9540 common io_desc */
+static struct map_desc u8500_common_io_desc[] __initdata = {
 	__IO_DEV_DESC(U8500_GIC_DIST_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_L2CC_BASE, SZ_4K),
-	__IO_DEV_DESC(U8500_TWD_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_MTU0_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_MTU1_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_RTC_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_SCU_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_BACKUPRAM0_BASE, SZ_8K),
-	__MEM_DEV_DESC(U8500_BOOT_ROM_BASE, SZ_1M),
-
 	__IO_DEV_DESC(U8500_CLKRST1_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_CLKRST2_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_CLKRST3_BASE, SZ_4K),
@@ -60,8 +60,36 @@ static struct map_desc u8500_io_desc[] __initdata = {
 	__IO_DEV_DESC(U8500_GPIO1_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_GPIO2_BASE, SZ_4K),
 	__IO_DEV_DESC(U8500_GPIO3_BASE, SZ_4K),
-	__IO_DEV_DESC(U8500_PRCMU_TCDM_BASE, SZ_4K),
 };
+
+/* U8500 IO map specific description */
+static struct map_desc u8500_io_desc[] __initdata = {
+	__IO_DEV_DESC(U8500_PRCMU_BASE, SZ_4K),
+	__MEM_DEV_DESC(U8500_BOOT_ROM_BASE, SZ_1M),
+	__IO_DEV_DESC(U8500_PRCMU_TCDM_BASE, SZ_4K),
+
+};
+
+/* U9540 IO map specific description */
+static struct map_desc u9540_io_desc[] __initdata = {
+	__IO_DEV_DESC(U8500_PRCMU_BASE, SZ_4K + SZ_8K),
+	__MEM_DEV_DESC_DB9540_ROM(U9540_BOOT_ROM_BASE, SZ_1M),
+	__IO_DEV_DESC(U8500_PRCMU_TCDM_BASE, SZ_4K + SZ_8K),
+};
+
+struct reboot_reason reboot_reasons_hw[] = {
+	{"modem", HW_RESET_MODEM},
+	{"ape-restart", HW_RESET_APE_RESTART},
+	{"a9-restart", HW_RESET_A9_RESTART},
+	{"por", HW_RESET_POR},
+	{"secure-wd", HW_RESET_SECURE_WD},
+	{"ape", HW_RESET_APE},
+	{"ape-sw", HW_RESET_APE_SOFTWARE},
+	{"a9-cpu1-wd", HW_RESET_A9_CPU1_WD},
+	{"a9-cpu0-wd", HW_RESET_A9_CPU0_WD},
+};
+
+unsigned int reboot_reasons_hw_size = ARRAY_SIZE(reboot_reasons_hw);
 
 void __init u8500_map_io(void)
 {
@@ -72,9 +100,40 @@ void __init u8500_map_io(void)
 
 	ux500_map_io();
 
-	iotable_init(u8500_io_desc, ARRAY_SIZE(u8500_io_desc));
+	iotable_init(u8500_common_io_desc, ARRAY_SIZE(u8500_common_io_desc));
+
+	if (cpu_is_u9540())
+		iotable_init(u9540_io_desc, ARRAY_SIZE(u9540_io_desc));
+	else
+		iotable_init(u8500_io_desc, ARRAY_SIZE(u8500_io_desc));
 
 	_PRCMU_BASE = __io_address(U8500_PRCMU_BASE);
+
+#ifdef CONFIG_CACHE_L2X0
+	/* L2 cache may already be enabled and must be initialized for
+	 * ramdumping to work. This is the earliest possible place.
+	 */
+	ux500_l2x0_init();
+#endif
+}
+
+/*
+ * 8500 revisions
+ */
+
+bool cpu_is_u8500v20(void)
+{
+	return cpu_is_u8500() && (dbx500_revision() == 0xB0);
+}
+
+bool cpu_is_u8500v21(void)
+{
+	return cpu_is_u8500() && (dbx500_revision() == 0xB1);
+}
+
+bool cpu_is_u8500v22(void)
+{
+	return cpu_is_u8500() && (dbx500_revision() == 0xB2);
 }
 
 static struct resource db8500_pmu_resources[] = {
@@ -121,6 +180,75 @@ static struct platform_device db8500_prcmu_device = {
 	.name			= "db8500-prcmu",
 };
 
+static unsigned int per_clkrst_base[7] = {
+	0,
+	U8500_CLKRST1_BASE,
+	U8500_CLKRST2_BASE,
+	U8500_CLKRST3_BASE,
+	0,
+	0,
+	U8500_CLKRST6_BASE,
+};
+
+void u8500_reset_ip(unsigned char per, unsigned int ip_mask)
+{
+	void __iomem *prcc_rst_set, *prcc_rst_clr;
+
+	if (per == 0 || per == 4 || per == 5 || per > 6)
+		return;
+
+	prcc_rst_set = __io_address(per_clkrst_base[per] + PRCC_K_SOFTRST_SET);
+	prcc_rst_clr = __io_address(per_clkrst_base[per] + PRCC_K_SOFTRST_CLR);
+
+	/* Activate soft reset PRCC_K_SOFTRST_CLR */
+	writel(ip_mask, prcc_rst_clr);
+	udelay(1);
+
+	/* Release soft reset PRCC_K_SOFTRST_SET */
+	writel(ip_mask, prcc_rst_set);
+	udelay(1);
+}
+
+/* ICN Config registers */
+#define NODE_HIBW1_ESRAM_IN_2_PRIORITY		0x08
+#define NODE_HIBW1_DDR_IN_2_PRIORITY		0x408
+#define NODE_HIBW1_DDR_IN_2_LIMIT		0x42C
+
+/* LIMIT REG Shift */
+#define NODE_HIBW1_LIMIT_SHIFT			12
+#define NODE_HIBW1_FSIZE_SHIFT			4
+#define NODE_HIBW1_NEWPRIO_SHIFT		0
+
+static void __init db8500_icn_init(void)
+{
+	void __iomem *icnbase;
+	u32 ddr_prio, ddr_limit;
+	u32 esram_prio;
+
+	icnbase = ioremap(U8500_ICN_BASE, SZ_8K);
+	if (WARN_ON(!icnbase))
+		return;
+
+	/*
+	 * Increase the DMA_M1 priority vs B2R2 & SVA_ESRAM/DDR on the
+	 * Inter Connect Network: HiBW1_ESRAM & HiBW1_DDR nodes.
+	 * SVA > B2R2 > DMA (def.) ===> DMA > SVA > B2R2
+	 * Also enable the bandwidth limiter for DMA to DDR.
+	 */
+	esram_prio = 0x7;	/* priority = 0x7 (def: 0x6) */
+	ddr_prio = 0x7;		/* priority = 0x7 (def: 0x6) */
+	ddr_limit =
+		0x1 << NODE_HIBW1_NEWPRIO_SHIFT | /* newprio = 0x1 (def: 0x3) */
+		0xb << NODE_HIBW1_FSIZE_SHIFT |  /* frame size = 88 cycles   */
+		0x4 << NODE_HIBW1_LIMIT_SHIFT;	 /* limit size = 80 bytes    */
+
+	writel_relaxed(esram_prio, icnbase + NODE_HIBW1_ESRAM_IN_2_PRIORITY);
+	writel_relaxed(ddr_prio, icnbase + NODE_HIBW1_DDR_IN_2_PRIORITY);
+	writel_relaxed(ddr_limit, icnbase + NODE_HIBW1_DDR_IN_2_LIMIT);
+
+	iounmap(icnbase);
+}
+
 static struct platform_device *platform_devs[] __initdata = {
 	&u8500_gpio_devs[0],
 	&u8500_gpio_devs[1],
@@ -133,7 +261,6 @@ static struct platform_device *platform_devs[] __initdata = {
 	&u8500_gpio_devs[8],
 	&db8500_pmu_device,
 	&db8500_prcmu_device,
-	&u8500_wdt_device,
 };
 
 static int usb_db8500_rx_dma_cfg[] = {
@@ -167,10 +294,11 @@ void __init u8500_init_devices(void)
 
 #ifdef CONFIG_STM_TRACE
 	/* Early init for STM tracing */
-	platform_device_register(&u8500_stm_device);
+	platform_device_register(&ux500_stm_device);
 #endif
 
 	db8500_dma_init();
+	db8500_icn_init();
 	db8500_add_rtc();
 	db8500_add_usb(usb_db8500_rx_dma_cfg, usb_db8500_tx_dma_cfg);
 
@@ -179,82 +307,3 @@ void __init u8500_init_devices(void)
 
 	return ;
 }
-
-#ifdef CONFIG_SYS_SOC
-#define U8500_BB_UID_BASE (U8500_BACKUPRAM1_BASE + 0xFC0)
-#define U8500_BB_UID_LENGTH 5
-
-static ssize_t ux500_get_machine(char *buf, struct sysfs_soc_info *si)
-{
-	return sprintf(buf, "DB%2x00\n", dbx500_id.partnumber);
-}
-
-static ssize_t ux500_get_soc_id(char *buf, struct sysfs_soc_info *si)
-{
-	void __iomem *uid_base;
-	int i;
-	ssize_t sz = 0;
-
-	if (dbx500_id.partnumber == 0x85) {
-		uid_base = __io_address(U8500_BB_UID_BASE);
-		for (i = 0; i < U8500_BB_UID_LENGTH; i++)
-			sz += sprintf(buf + sz, "%08x", readl(uid_base + i * sizeof(u32)));
-		sz += sprintf(buf + sz, "\n");
-	}
-	else {
-		/* Don't know where it is located for U5500 */
-		sz = sprintf(buf, "N/A\n");
-	}
-
-	return sz;
-}
-
-static ssize_t ux500_get_revision(char *buf, struct sysfs_soc_info *si)
-{
-	unsigned int rev = dbx500_id.revision;
-
-	if (rev == 0x01)
-		return sprintf(buf, "%s\n", "ED");
-	else if (rev >= 0xA0)
-		return sprintf(buf, "%d.%d\n" , (rev >> 4) - 0xA + 1, rev & 0xf);
-
-	return sprintf(buf, "%s", "Unknown\n");
-}
-
-static ssize_t ux500_get_process(char *buf, struct sysfs_soc_info *si)
-{
-	if (dbx500_id.process == 0x00)
-		return sprintf(buf, "Standard\n");
-
-	return sprintf(buf, "%02xnm\n", dbx500_id.process);
-}
-
-static ssize_t ux500_get_reset_code(char *buf, struct sysfs_soc_info *si)
-{
-	return sprintf(buf, "0x%04x\n", prcmu_get_reset_code());
-}
-
-static ssize_t ux500_get_reset_reason(char *buf, struct sysfs_soc_info *si)
-{
-	return sprintf(buf, "%s\n",
-		reboot_reason_string(prcmu_get_reset_code()));
-}
-
-static struct sysfs_soc_info soc_info[] = {
-	SYSFS_SOC_ATTR_CALLBACK("machine", ux500_get_machine),
-	SYSFS_SOC_ATTR_VALUE("family", "Ux500"),
-	SYSFS_SOC_ATTR_CALLBACK("soc_id", ux500_get_soc_id),
-	SYSFS_SOC_ATTR_CALLBACK("revision", ux500_get_revision),
-	SYSFS_SOC_ATTR_CALLBACK("process", ux500_get_process),
-	SYSFS_SOC_ATTR_CALLBACK("reset_code", ux500_get_reset_code),
-	SYSFS_SOC_ATTR_CALLBACK("reset_reason", ux500_get_reset_reason),
-};
-
-static int __init ux500_sys_soc_init(void)
-{
-	return register_sysfs_soc(soc_info, ARRAY_SIZE(soc_info));
-}
-
-module_init(ux500_sys_soc_init);
-#endif
-

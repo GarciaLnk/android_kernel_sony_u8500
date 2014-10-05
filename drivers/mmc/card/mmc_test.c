@@ -250,7 +250,7 @@ static int mmc_test_wait_busy(struct mmc_test_card *test)
 		if (!busy && mmc_test_busy(&cmd)) {
 			busy = 1;
 			if (test->card->host->caps & MMC_CAP_WAIT_WHILE_BUSY)
-				printk(KERN_INFO "%s: Warning: Host did not "
+				pr_info("%s: Warning: Host did not "
 					"wait for busy state to end.\n",
 					mmc_hostname(test->card->host));
 		}
@@ -552,7 +552,7 @@ static void mmc_test_print_rate(struct mmc_test_card *test, uint64_t bytes,
 	rate = mmc_test_rate(bytes, &ts);
 	iops = mmc_test_rate(100, &ts); /* I/O ops per sec x 100 */
 
-	printk(KERN_INFO "%s: Transfer of %u sectors (%u%s KiB) took %lu.%09lu "
+	pr_info("%s: Transfer of %u sectors (%u%s KiB) took %lu.%09lu "
 			 "seconds (%u kB/s, %u KiB/s, %u.%02u IOPS)\n",
 			 mmc_hostname(test->card->host), sectors, sectors >> 1,
 			 (sectors & 1 ? ".5" : ""), (unsigned long)ts.tv_sec,
@@ -578,7 +578,7 @@ static void mmc_test_print_avg_rate(struct mmc_test_card *test, uint64_t bytes,
 	rate = mmc_test_rate(tot, &ts);
 	iops = mmc_test_rate(count * 100, &ts); /* I/O ops per sec x 100 */
 
-	printk(KERN_INFO "%s: Transfer of %u x %u sectors (%u x %u%s KiB) took "
+	pr_info("%s: Transfer of %u x %u sectors (%u x %u%s KiB) took "
 			 "%lu.%09lu seconds (%u kB/s, %u KiB/s, "
 			 "%u.%02u IOPS, sg_len %d)\n",
 			 mmc_hostname(test->card->host), count, sectors, count,
@@ -1252,6 +1252,130 @@ static int mmc_test_align_multi_read(struct mmc_test_card *test)
 	return 0;
 }
 
+
+/* helper function for various address alignment and sg length alignment */
+static int mmc_test_align_multi(struct mmc_test_card *test, bool do_write,
+				struct scatterlist *sg,
+				u32 *sizes, int sg_len, int offset)
+{
+	int ret, i;
+	unsigned int size;
+	u32 buf_off;
+	u32 sg_size;
+
+	if (test->card->host->max_blk_count == 1)
+		return RESULT_UNSUP_HOST;
+
+	size = PAGE_SIZE * 2;
+	size = min(size, test->card->host->max_req_size);
+	size = min(size, test->card->host->max_seg_size);
+	size = min(size, test->card->host->max_blk_count * 512);
+	size -= offset;
+	size -= size % 512;
+
+	if (size < 1024)
+		return RESULT_UNSUP_HOST;
+
+	for (i = 0, sg_size = 0;
+	     i < sg_len && sg_size + sizes[i] < size; i++)
+		sg_size += sizes[i];
+
+	if (sg_size < size)
+		sizes[i-1] += size - sg_size;
+	sg_len = i;
+
+	sg_init_table(sg, sg_len);
+	for (i = 0, buf_off = offset; i < sg_len; i++) {
+		sg_set_buf(&sg[i], test->buffer + buf_off, sizes[i]);
+		buf_off += sizes[i];
+	}
+
+	ret = mmc_test_transfer(test, sg, sg_len, 0, size/512, 512, do_write);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static int mmc_test_align_length_32(struct mmc_test_card *test, bool do_write)
+{
+	u32 sizes[] = {512, 32*1, 32*2, 32*3, 32*4, 32*5, 32*6, 32*7,
+		       32*8, 32*9, 32*10, 32*11, 32*12, 32*13, 2048};
+	struct scatterlist sg[ARRAY_SIZE(sizes)];
+
+	return mmc_test_align_multi(test, do_write, sg, sizes,
+				    ARRAY_SIZE(sg), 0);
+}
+
+static int mmc_test_align_length_4(struct mmc_test_card *test, bool do_write)
+{
+	u32 sizes[] = {512, 4*1, 4*2, 4*3, 4*4, 4*5, 4*6, 4*7,
+		       4*8, 4*9, 520, 1040, 2080};
+	struct scatterlist sg[ARRAY_SIZE(sizes)];
+
+	return mmc_test_align_multi(test, do_write, sg, sizes,
+				    ARRAY_SIZE(sg), 0);
+}
+
+static int mmc_test_align_length_4_write(struct mmc_test_card *test)
+{
+	bool do_write = true;
+	return mmc_test_align_length_4(test, do_write);
+}
+
+static int mmc_test_align_length_4_read(struct mmc_test_card *test)
+{
+	bool do_write = false;
+	return mmc_test_align_length_4(test, do_write);
+}
+
+static int mmc_test_align_length_32_write(struct mmc_test_card *test)
+{
+	bool do_write = true;
+	return mmc_test_align_length_32(test, do_write);
+}
+
+static int mmc_test_align_length_32_read(struct mmc_test_card *test)
+{
+	bool do_write = false;
+	return mmc_test_align_length_32(test, do_write);
+}
+
+/* helper function for testing address alignment */
+static int mmc_test_align_address(struct mmc_test_card *test, bool do_write,
+				  u32 offset)
+{
+	u32 sizes[] = {512, 512, 1024, 1024, 2048};
+	struct scatterlist sg[ARRAY_SIZE(sizes)];
+
+	return mmc_test_align_multi(test, do_write, sg,
+				    sizes, ARRAY_SIZE(sg), offset);
+}
+
+static int mmc_test_align_address_4_write(struct mmc_test_card *test)
+{
+	bool do_write = true;
+	return mmc_test_align_address(test, do_write, 4);
+}
+
+static int mmc_test_align_address_4_read(struct mmc_test_card *test)
+{
+	bool do_write = false;
+	return mmc_test_align_address(test, do_write, 4);
+}
+
+static int mmc_test_align_address_32_write(struct mmc_test_card *test)
+{
+	bool do_write = true;
+	return mmc_test_align_address(test, do_write, 32);
+}
+
+static int mmc_test_align_address_32_read(struct mmc_test_card *test)
+{
+	bool do_write = false;
+	return mmc_test_align_address(test, do_write, 32);
+}
+
 static int mmc_test_xfersize_write(struct mmc_test_card *test)
 {
 	int ret;
@@ -1408,7 +1532,7 @@ static int mmc_test_multi_read_high(struct mmc_test_card *test)
 
 static int mmc_test_no_highmem(struct mmc_test_card *test)
 {
-	printk(KERN_INFO "%s: Highmem not configured - test skipped\n",
+	pr_info("%s: Highmem not configured - test skipped\n",
 	       mmc_hostname(test->card->host));
 	return 0;
 }
@@ -1435,7 +1559,7 @@ static int mmc_test_area_map(struct mmc_test_card *test, unsigned long sz,
 				      t->max_seg_sz, &t->sg_len, min_sg_len);
 	}
 	if (err)
-		printk(KERN_INFO "%s: Failed to map sg list\n",
+		pr_info("%s: Failed to map sg list\n",
 		       mmc_hostname(test->card->host));
 	return err;
 }
@@ -1580,6 +1704,7 @@ static int mmc_test_area_init(struct mmc_test_card *test, int erase, int fill)
 
 	t->max_segs = test->card->host->max_segs;
 	t->max_seg_sz = test->card->host->max_seg_size;
+	t->max_seg_sz -= t->max_seg_sz % 512;
 
 	t->max_tfr = t->max_sz;
 	if (t->max_tfr >> 9 > test->card->host->max_blk_count)
@@ -2135,7 +2260,7 @@ static int mmc_test_rw_multiple(struct mmc_test_card *test,
 
 	return ret;
  err:
-	printk(KERN_INFO "[%s] error\n", __func__);
+	pr_info("[%s] error\n", __func__);
 	return ret;
 }
 
@@ -2149,7 +2274,7 @@ static int mmc_test_rw_multiple_size(struct mmc_test_card *test,
 
 	if (rw->do_nonblock_req &&
 	    ((!pre_req && post_req) || (pre_req && !post_req))) {
-		printk(KERN_INFO "error: only one of pre/post is defined\n");
+		pr_info("error: only one of pre/post is defined\n");
 		return -EINVAL;
 	}
 
@@ -2449,6 +2574,62 @@ static const struct mmc_test_case mmc_test_cases[] = {
 	},
 
 	{
+		.name = "4 bytes aligned sg-element length write",
+		.prepare = mmc_test_prepare_write,
+		.run = mmc_test_align_length_4_write,
+		.cleanup = mmc_test_cleanup,
+	},
+
+	{
+		.name = "4 bytes aligned sg-element length read",
+		.prepare = mmc_test_prepare_read,
+		.run = mmc_test_align_length_4_read,
+		.cleanup = mmc_test_cleanup,
+	},
+
+	{
+		.name = "32 bytes aligned sg-element length write",
+		.prepare = mmc_test_prepare_write,
+		.run = mmc_test_align_length_32_write,
+		.cleanup = mmc_test_cleanup,
+	},
+
+	{
+		.name = "32 bytes aligned sg-element length read",
+		.prepare = mmc_test_prepare_read,
+		.run = mmc_test_align_length_32_read,
+		.cleanup = mmc_test_cleanup,
+	},
+
+	{
+		.name = "4 bytes aligned sg-element address write",
+		.prepare = mmc_test_prepare_write,
+		.run = mmc_test_align_address_4_write,
+		.cleanup = mmc_test_cleanup,
+	},
+
+	{
+		.name = "4 bytes aligned sg-element address read",
+		.prepare = mmc_test_prepare_read,
+		.run = mmc_test_align_address_4_read,
+		.cleanup = mmc_test_cleanup,
+	},
+
+	{
+		.name = "32 bytes aligned sg-element address write",
+		.prepare = mmc_test_prepare_write,
+		.run = mmc_test_align_address_32_write,
+		.cleanup = mmc_test_cleanup,
+	},
+
+	{
+		.name = "32 bytes aligned sg-element address read",
+		.prepare = mmc_test_prepare_read,
+		.run = mmc_test_align_address_32_read,
+		.cleanup = mmc_test_cleanup,
+	},
+
+	{
 		.name = "Correct xfer_size at write (start failure)",
 		.run = mmc_test_xfersize_write,
 	},
@@ -2690,7 +2871,7 @@ static void mmc_test_run(struct mmc_test_card *test, int testcase)
 {
 	int i, ret;
 
-	printk(KERN_INFO "%s: Starting tests of card %s...\n",
+	pr_info("%s: Starting tests of card %s...\n",
 		mmc_hostname(test->card->host), mmc_card_id(test->card));
 
 	mmc_claim_host(test->card->host);
@@ -2701,14 +2882,14 @@ static void mmc_test_run(struct mmc_test_card *test, int testcase)
 		if (testcase && ((i + 1) != testcase))
 			continue;
 
-		printk(KERN_INFO "%s: Test case %d. %s...\n",
+		pr_info("%s: Test case %d. %s...\n",
 			mmc_hostname(test->card->host), i + 1,
 			mmc_test_cases[i].name);
 
 		if (mmc_test_cases[i].prepare) {
 			ret = mmc_test_cases[i].prepare(test);
 			if (ret) {
-				printk(KERN_INFO "%s: Result: Prepare "
+				pr_info("%s: Result: Prepare "
 					"stage failed! (%d)\n",
 					mmc_hostname(test->card->host),
 					ret);
@@ -2738,25 +2919,25 @@ static void mmc_test_run(struct mmc_test_card *test, int testcase)
 		ret = mmc_test_cases[i].run(test);
 		switch (ret) {
 		case RESULT_OK:
-			printk(KERN_INFO "%s: Result: OK\n",
+			pr_info("%s: Result: OK\n",
 				mmc_hostname(test->card->host));
 			break;
 		case RESULT_FAIL:
-			printk(KERN_INFO "%s: Result: FAILED\n",
+			pr_info("%s: Result: FAILED\n",
 				mmc_hostname(test->card->host));
 			break;
 		case RESULT_UNSUP_HOST:
-			printk(KERN_INFO "%s: Result: UNSUPPORTED "
+			pr_info("%s: Result: UNSUPPORTED "
 				"(by host)\n",
 				mmc_hostname(test->card->host));
 			break;
 		case RESULT_UNSUP_CARD:
-			printk(KERN_INFO "%s: Result: UNSUPPORTED "
+			pr_info("%s: Result: UNSUPPORTED "
 				"(by card)\n",
 				mmc_hostname(test->card->host));
 			break;
 		default:
-			printk(KERN_INFO "%s: Result: ERROR (%d)\n",
+			pr_info("%s: Result: ERROR (%d)\n",
 				mmc_hostname(test->card->host), ret);
 		}
 
@@ -2767,7 +2948,7 @@ static void mmc_test_run(struct mmc_test_card *test, int testcase)
 		if (mmc_test_cases[i].cleanup) {
 			ret = mmc_test_cases[i].cleanup(test);
 			if (ret) {
-				printk(KERN_INFO "%s: Warning: Cleanup "
+				pr_info("%s: Warning: Cleanup "
 					"stage failed! (%d)\n",
 					mmc_hostname(test->card->host),
 					ret);
@@ -2777,7 +2958,7 @@ static void mmc_test_run(struct mmc_test_card *test, int testcase)
 
 	mmc_release_host(test->card->host);
 
-	printk(KERN_INFO "%s: Tests completed.\n",
+	pr_info("%s: Tests completed.\n",
 		mmc_hostname(test->card->host));
 }
 

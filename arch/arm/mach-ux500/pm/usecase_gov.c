@@ -48,7 +48,6 @@ struct hotplug_cpu_info {
 	cputime64_t prev_cpu_idle;
 	cputime64_t prev_cpu_io;
 	unsigned int load[LOAD_MONITOR];
-	unsigned int io[LOAD_MONITOR];
 	unsigned int idx;
 };
 
@@ -71,6 +70,7 @@ static u32 exit_irq_per_s = 1000;
 static u64 old_num_irqs;
 
 static DEFINE_MUTEX(usecase_mutex);
+static DEFINE_MUTEX(state_mutex);
 static bool user_config_updated;
 static enum ux500_uc current_uc = UX500_UC_MAX;
 static bool is_work_scheduled;
@@ -81,8 +81,8 @@ static unsigned int cpuidle_deepest_state;
 
 struct usecase_config {
 	char *name;
-	unsigned long max_freq;
-	unsigned long min_freq; /* if no requirement set 0 */
+	unsigned int min_arm;
+	unsigned int max_arm;
 	unsigned long cpuidle_multiplier;
 	bool second_cpu_online;
 	bool l2_prefetch_en;
@@ -94,8 +94,6 @@ struct usecase_config {
 static struct usecase_config usecase_conf[UX500_UC_MAX] = {
 	[UX500_UC_NORMAL] = {
 		.name			= "normal",
-		.max_freq		= 1000000,
-		.min_freq		= 200000,
 		.cpuidle_multiplier	= 1024,
 		.second_cpu_online	= true,
 		.l2_prefetch_en		= true,
@@ -105,8 +103,6 @@ static struct usecase_config usecase_conf[UX500_UC_MAX] = {
 	},
 	[UX500_UC_AUTO] = {
 		.name			= "auto",
-		.max_freq		= 400000,
-		.min_freq		= 200000,
 		.cpuidle_multiplier	= 0,
 		.second_cpu_online	= false,
 		.l2_prefetch_en		= true,
@@ -116,10 +112,9 @@ static struct usecase_config usecase_conf[UX500_UC_MAX] = {
 	},
 	[UX500_UC_VC] = {
 		.name			= "voice-call",
-		.max_freq		= 400000,
-		.min_freq		= 400000,
+		.min_arm		= 400000,
 		.cpuidle_multiplier	= 0,
-		.second_cpu_online	= false,
+		.second_cpu_online	= true,
 		.l2_prefetch_en		= false,
 		.enable			= false,
 		.forced_state		= 0,
@@ -127,8 +122,7 @@ static struct usecase_config usecase_conf[UX500_UC_MAX] = {
 	},
 	[UX500_UC_LPA] = {
 		.name			= "low-power-audio",
-		.max_freq		= 400000,
-		.min_freq		= 400000,
+		.min_arm		= 400000,
 		.cpuidle_multiplier	= 0,
 		.second_cpu_online	= false,
 		.l2_prefetch_en		= false,
@@ -141,6 +135,9 @@ static struct usecase_config usecase_conf[UX500_UC_MAX] = {
 /* daemon */
 static struct delayed_work work_usecase;
 static struct early_suspend usecase_early_suspend;
+
+static unsigned int system_min_freq;
+static unsigned int system_max_freq;
 
 /* calculate loadavg */
 #define LOAD_INT(x) ((x) >> FSHIFT)
@@ -168,16 +165,15 @@ static unsigned long determine_cpu_load(void)
 
 	/* get cpu load of each cpu */
 	for_each_online_cpu(i) {
-		unsigned int load, iowait;
-		unsigned int idle_time, iowait_time, wall_time;
-		cputime64_t cur_wall_time, cur_idle_time, cur_iowait_time;
+		unsigned int load;
+		unsigned int idle_time, wall_time;
+		cputime64_t cur_wall_time, cur_idle_time;
 		struct hotplug_cpu_info *info;
 
 		info = &per_cpu(hotplug_info, i);
 
 		/* update both cur_idle_time and cur_wall_time */
 		cur_idle_time = get_cpu_idle_time_us(i, &cur_wall_time);
-		cur_iowait_time = get_cpu_iowait_time_us(i, &cur_wall_time);
 
 		/* how much wall time has passed since last iteration? */
 		wall_time = (unsigned int) cputime64_sub(cur_wall_time,
@@ -189,26 +185,16 @@ static unsigned long determine_cpu_load(void)
 							info->prev_cpu_idle);
 		info->prev_cpu_idle = cur_idle_time;
 
-		/* how much io wait time has passed since last iteration? */
-		iowait_time = (unsigned int) cputime64_sub(cur_iowait_time,
-							info->prev_cpu_io);
-		info->prev_cpu_io = cur_iowait_time;
-
 		if (unlikely(!wall_time || wall_time < idle_time))
 			continue;
 
 		/* load is the percentage of time not spent in idle */
 		load = 100 * (wall_time - idle_time) / wall_time;
-		info->load[info->idx] = load;
-		hp_printk("cpu %d load %u ", i, load);
-
-		/* iowait is the percentage of time not spent in io wait */
-		iowait = 100 * (iowait_time) / wall_time;
-		info->io[info->idx++] = load;
-		hp_printk("iowait %u\n", iowait);
-
+		info->load[info->idx++] = load;
 		if (info->idx >= LOAD_MONITOR)
 			info->idx = 0;
+
+		hp_printk("cpu %d load %u ", i, load);
 
 		total_load += load;
 	}
@@ -218,7 +204,7 @@ static unsigned long determine_cpu_load(void)
 
 static unsigned long determine_cpu_load_trend(void)
 {
-	int i, j, k;
+	int i, k;
 	unsigned long total_load = 0;
 
 	/* Get cpu load of each cpu */
@@ -228,8 +214,8 @@ static unsigned long determine_cpu_load_trend(void)
 
 		info = &per_cpu(hotplug_info, i);
 
-		for (k = 0, j = info->idx; k < LOAD_MONITOR; k++, j++)
-			load +=	info->load[j];
+		for (k = 0; k < LOAD_MONITOR; k++)
+			load +=	info->load[k];
 
 		load /= LOAD_MONITOR;
 
@@ -243,7 +229,7 @@ static unsigned long determine_cpu_load_trend(void)
 
 static unsigned long determine_cpu_balance_trend(void)
 {
-	int i, j, k;
+	int i, k;
 	unsigned long total_load = 0;
 	unsigned long min_load = (unsigned long) (-1);
 
@@ -251,11 +237,10 @@ static unsigned long determine_cpu_balance_trend(void)
 	for_each_online_cpu(i) {
 		unsigned int load = 0;
 		struct hotplug_cpu_info *info;
+		info = &per_cpu(hotplug_info, i);
 
-	info = &per_cpu(hotplug_info, i);
-
-		for (k = 0, j = info->idx; k < LOAD_MONITOR; k++, j++)
-			load +=	info->load[j];
+		for (k = 0; k < LOAD_MONITOR; k++)
+			load +=	info->load[k];
 
 		load /= LOAD_MONITOR;
 
@@ -289,7 +274,6 @@ static void init_cpu_load_trend(void)
 
 		for (j = 0; j < LOAD_MONITOR; j++) {
 			info->load[j] = 100;
-			info->io[j] = 100;
 		}
 		info->idx = 0;
 	}
@@ -327,12 +311,42 @@ static u32 get_num_interrupts_per_s(void)
 	return irqs;
 }
 
+static int set_cpufreq(int cpu, int min_freq, int max_freq)
+{
+	int ret;
+	struct cpufreq_policy policy;
+
+	pr_debug("set cpu freq: min %d max: %d\n", min_freq, max_freq);
+
+	ret = cpufreq_get_policy(&policy, cpu);
+	if (ret < 0) {
+		pr_err("usecase-gov: failed to read policy\n");
+		return ret;
+	}
+
+	if (policy.min > max_freq) {
+		ret = cpufreq_update_freq(cpu, min_freq, policy.max);
+		if (ret)
+			pr_err("usecase-gov: update min cpufreq failed (1)\n");
+	}
+	if (policy.max < min_freq) {
+		ret = cpufreq_update_freq(cpu, policy.min, max_freq);
+		if (ret)
+			pr_err("usecase-gov: update max cpufreq failed (2)\n");
+	}
+
+	ret = cpufreq_update_freq(cpu, min_freq, max_freq);
+	if (ret)
+		pr_err("usecase-gov: update min-max cpufreq failed\n");
+
+	return ret;
+}
+
 static void set_cpu_config(enum ux500_uc new_uc)
 {
-	struct cpufreq_policy policy;
-	int err;
 	bool update = false;
-	u32 min_freq, max_freq;
+	int cpu;
+	int min_freq, max_freq;
 
 	if (new_uc != current_uc)
 		update = true;
@@ -340,7 +354,7 @@ static void set_cpu_config(enum ux500_uc new_uc)
 		update = true;
 
 	pr_debug("%s: new_usecase=%d, current_usecase=%d, update=%d\n",
-			__func__, new_uc, current_uc, update);
+		__func__, new_uc, current_uc, update);
 
 	if (!update)
 		goto exit;
@@ -353,38 +367,30 @@ static void set_cpu_config(enum ux500_uc new_uc)
 		 (num_online_cpus() < 2))
 		cpu_up(1);
 
-	/* Cpu freq */
-	err = cpufreq_get_policy(&policy, 0);
-	if (err)
-		pr_err("usecase-gov: get cpufreq policy failed\n");
+	if (usecase_conf[new_uc].max_arm)
+		max_freq = usecase_conf[new_uc].max_arm;
+	else
+		max_freq = system_max_freq;
 
-	/* If requirement is 0, use current policy value */
-	min_freq = usecase_conf[new_uc].min_freq ?
-		usecase_conf[new_uc].min_freq : policy.min;
+	if (usecase_conf[new_uc].min_arm)
+		min_freq = usecase_conf[new_uc].min_arm;
+	else
+		min_freq = system_min_freq;
 
-	max_freq = usecase_conf[new_uc].max_freq ?
-		usecase_conf[new_uc].max_freq : policy.max;
+	for_each_online_cpu(cpu)
+		set_cpufreq(cpu,
+			    min_freq,
+			    max_freq);
 
-	/*
-	 * cpufreq fw does not allow frequency change if
-	 * "current min freq" > "new max freq" or
-	 * "current max freq" < "new min freq".
-	 * Thus the intermediate steps below.
-	 */
-	if (policy.min > max_freq) {
-		err = cpufreq_update_freq(0, min_freq, policy.max);
-		if (err)
-			pr_err("usecase-gov: update min cpufreq failed\n");
-	}
-	if (policy.max < min_freq) {
-		err = cpufreq_update_freq(0, policy.min, max_freq);
-		if (err)
-			pr_err("usecase-gov: update max cpufreq failed\n");
-	}
-
-	err = cpufreq_update_freq(0, min_freq, max_freq);
-	if (err)
-		pr_err("usecase-gov: update min/max cpufreq failed\n");
+	/* Kinda doing the job twice, but this is needed for reference keeping */
+	if (usecase_conf[new_uc].min_arm)
+		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
+					     "usecase",
+					     usecase_conf[new_uc].min_arm);
+	else
+		prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
+					     "usecase",
+					     PRCMU_QOS_DEFAULT_VALUE);
 
 	/* Cpu idle */
 	cpuidle_set_multiplier(usecase_conf[new_uc].cpuidle_multiplier);
@@ -412,6 +418,12 @@ void usecase_update_governor_state(void)
 {
 	bool cancel_work = false;
 
+	/*
+	 * usecase_mutex will have to be unlocked to ensure safe exit of
+	 * delayed_usecase_work(). Protect this function with its own mutex
+	 * from being executed by multiple threads at that point.
+	 */
+	mutex_lock(&state_mutex);
 	mutex_lock(&usecase_mutex);
 
 	if (uc_master_enable && (usecase_conf[UX500_UC_AUTO].enable ||
@@ -435,7 +447,14 @@ void usecase_update_governor_state(void)
 	}
 
 	if (cancel_work) {
+		/*
+		 * usecase_mutex is used by delayed_usecase_work() so it must
+		 * be unlocked before we call to cacnel the work.
+		 */
+		mutex_unlock(&usecase_mutex);
 		cancel_delayed_work_sync(&work_usecase);
+		mutex_lock(&usecase_mutex);
+
 		is_work_scheduled = false;
 
 		/* Set the default settings before exiting. */
@@ -443,7 +462,7 @@ void usecase_update_governor_state(void)
 	}
 
 	mutex_unlock(&usecase_mutex);
-
+	mutex_unlock(&state_mutex);
 }
 
 /*
@@ -687,8 +706,8 @@ static void usecase_update_user_config(void)
 
 	mutex_lock(&usecase_mutex);
 
-	user_conf->max_freq = 0;
-	user_conf->min_freq = 0;
+	user_conf->min_arm = system_min_freq;
+	user_conf->max_arm = system_max_freq;
 	user_conf->cpuidle_multiplier = 0;
 	user_conf->second_cpu_online = false;
 	user_conf->l2_prefetch_en = false;
@@ -702,11 +721,12 @@ static void usecase_update_user_config(void)
 
 		config_enable = true;
 
-		if (usecase_conf[i].max_freq > user_conf->max_freq)
-			user_conf->max_freq = usecase_conf[i].max_freq;
-		/* It's the highest min freq requirement that should be used */
-		if (usecase_conf[i].min_freq > user_conf->min_freq)
-			user_conf->min_freq = usecase_conf[i].min_freq;
+		/* It's the highest arm opp requirement that should be used */
+		if (usecase_conf[i].min_arm > user_conf->min_arm)
+			user_conf->min_arm = usecase_conf[i].min_arm;
+
+		if (usecase_conf[i].max_arm > user_conf->max_arm)
+			user_conf->max_arm = usecase_conf[i].max_arm;
 
 		if (usecase_conf[i].cpuidle_multiplier >
 					user_conf->cpuidle_multiplier)
@@ -761,15 +781,15 @@ static ssize_t show_current(struct sysdev_class *class,
 	enum ux500_uc display_uc = (current_uc == UX500_UC_MAX) ?
 					UX500_UC_NORMAL : current_uc;
 
-	return sprintf(buf, "max_freq: %ld\n"
-		"min_freq: %ld\n"
+	return sprintf(buf, "min_arm: %d\n"
+		"max_arm: %d\n"
 		"cpuidle_multiplier: %ld\n"
 		"second_cpu_online: %s\n"
 		"l2_prefetch_en: %s\n"
 		"forced_state: %d\n"
 		"vc_override: %s\n",
-		usecase_conf[display_uc].max_freq,
-		usecase_conf[display_uc].min_freq,
+		usecase_conf[display_uc].min_arm,
+		usecase_conf[display_uc].max_arm,
 		usecase_conf[display_uc].cpuidle_multiplier,
 		usecase_conf[display_uc].second_cpu_online ? "true" : "false",
 		usecase_conf[display_uc].l2_prefetch_en ? "true" : "false",
@@ -828,6 +848,9 @@ static ssize_t store_dc_attr(struct sysdev_class *class,
 		return -EINVAL;
 
 	usecase_conf[uattr->index].enable = (bool)input;
+
+	if (uattr->index == UX500_UC_VC)
+		prcmu_vc(usecase_conf[UX500_UC_VC].enable);
 
 	usecase_update_user_config();
 
@@ -908,8 +931,22 @@ static void usecase_cpuidle_init(void)
 static int __init init_usecase_devices(void)
 {
 	int err;
+	struct cpufreq_frequency_table *table;
+	unsigned int min_freq = UINT_MAX;
+	unsigned int max_freq = 0;
+	int i;
 
-	pr_info("Use-case governor initialized\n");
+	table = cpufreq_frequency_get_table(0);
+
+	for (i = 0; table[i].frequency != CPUFREQ_TABLE_END; i++) {
+		if (min_freq > table[i].frequency)
+			min_freq = table[i].frequency;
+		if (max_freq < table[i].frequency)
+			max_freq = table[i].frequency;
+	}
+
+	system_min_freq = min_freq;
+	system_max_freq = max_freq;
 
 	/*  add early_suspend callback */
 	usecase_early_suspend.level = 200;
@@ -932,6 +969,11 @@ static int __init init_usecase_devices(void)
 
 	usecase_cpuidle_init();
 
+	prcmu_qos_add_requirement(PRCMU_QOS_ARM_KHZ, "usecase",
+				  PRCMU_QOS_DEFAULT_VALUE);
+
+	pr_info("Use-case governor initialized\n");
+
 	return 0;
 error2:
 	debugfs_remove_recursive(usecase_dir);
@@ -940,4 +982,4 @@ error:
 	return err;
 }
 
-device_initcall(init_usecase_devices);
+late_initcall(init_usecase_devices);

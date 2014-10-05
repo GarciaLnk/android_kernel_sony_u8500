@@ -3,6 +3,7 @@
  * Authors:
  * Par-Gunnar Hjalmdahl (par-gunnar.p.hjalmdahl@stericsson.com) for ST-Ericsson.
  * Kjell Andersson (kjell.k.andersson@stericsson.com) for ST-Ericsson.
+ * Hemant Gupta (hemant.gupta@stericsson.com) for ST-Ericsson.
  * License terms:  GNU General Public License (GPL), version 2
  *
  * Linux Bluetooth Audio Driver for ST-Ericsson CG2900 controller.
@@ -45,13 +46,22 @@
 #define BT_DEV					(info->dev_bt)
 #define FM_DEV					(info->dev_fm)
 
+/* FM Set control conversion macros for CG2905/10 */
+#define CG2910_FM_CMD_SET_CTRL_48000_HEX	0x12C0
+#define CG2910_FM_CMD_SET_CTRL_44100_HEX	0x113A
+
 /* Bluetooth error codes */
 #define HCI_BT_ERROR_NO_ERROR			0x00
 
 /* Used to select proper API, ignoring subrevisions etc */
 enum chip_revision {
-	CHIP_REV_PG1,
-	CHIP_REV_PG2
+	CG2900_CHIP_REV_PG1,
+	CG2900_CHIP_REV_PG2,
+	CG2905_CHIP_REV_PG1_05,
+	CG2905_CHIP_REV_PG2,
+	CG2910_CHIP_REV_PG1,
+	CG2910_CHIP_REV_PG1_05,
+	CG2910_CHIP_REV_PG2
 };
 
 /**
@@ -130,7 +140,7 @@ struct endpoint_config_node {
  *				@false otherwise.
  * @endpoints:			List containing the endpoint configurations.
  * @stream_ids:			Bitmask for in-use stream ids (only used with
- *				PG2 chip API).
+ *				CG2900 PG2 onwards chip API).
  */
 struct audio_info {
 	struct list_head		list;
@@ -342,12 +352,25 @@ static u8 mc_pcm_role(enum cg2900_dai_mode mode)
  * fm_get_conversion() - Convert sample rate to convert up/down used in X_Set_Control FM commands.
  * @srate: Sample rate.
  */
-static u16 fm_get_conversion(enum cg2900_endpoint_sample_rate srate)
+static u16 fm_get_conversion(struct audio_info *info,
+		enum cg2900_endpoint_sample_rate srate)
 {
-	if (srate >= ENDPOINT_SAMPLE_RATE_44_1_KHZ)
-		return CG2900_FM_CMD_SET_CTRL_CONV_UP;
-	else
-		return CG2900_FM_CMD_SET_CTRL_CONV_DOWN;
+	/*
+	 * For CG2910, Set the external sample rate (host side)
+	 * of the digital output in units of [10Hz]
+	 */
+	if (info->revision == CG2900_CHIP_REV_PG1 ||
+			info->revision == CG2900_CHIP_REV_PG2) {
+		if (srate >= ENDPOINT_SAMPLE_RATE_44_1_KHZ)
+			return CG2900_FM_CMD_SET_CTRL_CONV_UP;
+		else
+			return CG2900_FM_CMD_SET_CTRL_CONV_DOWN;
+	} else {
+		if (srate > ENDPOINT_SAMPLE_RATE_44_1_KHZ)
+			return CG2910_FM_CMD_SET_CTRL_48000_HEX;
+		else
+			return CG2910_FM_CMD_SET_CTRL_44100_HEX;
+	}
 }
 
 /**
@@ -880,7 +903,7 @@ static int send_vs_delete_stream(struct audio_user *audio_user,
 	struct audio_cb_info *cb_info = cg2900_get_usr(pf_data);
 
 	/* Now delete the stream - format command... */
-	if (info->revision == CHIP_REV_PG1) {
+	if (info->revision == CG2900_CHIP_REV_PG1) {
 		struct bt_vs_reset_session_cfg_cmd *cmd;
 
 		dev_dbg(BT_DEV, "BT: HCI_VS_Reset_Session_Configuration\n");
@@ -933,12 +956,13 @@ static int send_vs_delete_stream(struct audio_user *audio_user,
 	}
 
 	/* wait for response */
-	if (info->revision == CHIP_REV_PG1) {
+	if (info->revision == CG2900_CHIP_REV_PG1) {
 		err = receive_bt_cmd_complete(audio_user, opcode, NULL, 0);
 	} else {
 		u8 vs_err;
 
-		/* All commands in PG2 API returns one byte extra status */
+		/* All commands on CG2900 PG2 onwards
+		 * API returns one byte extra status */
 		err = receive_bt_cmd_complete(audio_user, opcode,
 					      &vs_err, sizeof(vs_err));
 
@@ -1250,7 +1274,8 @@ static int send_vs_stream_ctrl(struct audio_user *user, u8 stream, u8 command)
 		goto finished;
 	}
 
-	/* All commands in PG2 API returns one byte with extra status */
+	/* All commands on CG2900 PG2 onwards
+	 * API returns one byte extra status */
 	err = receive_bt_cmd_complete(user,
 				      CG2900_MC_VS_STREAM_CONTROL,
 				      &vs_err, sizeof(vs_err));
@@ -1338,7 +1363,8 @@ static int send_vs_create_stream(struct audio_user *user, u8 inport,
 		goto finished_release_id;
 	}
 
-	/* All commands in PG2 API returns one byte with extra status */
+	/* All commands on CG2900 PG2 onwards
+	 * API returns one byte extra status */
 	err = receive_bt_cmd_complete(user,
 				      CG2900_MC_VS_CREATE_STREAM,
 				      &vs_err, sizeof(vs_err));
@@ -1423,7 +1449,8 @@ static int send_vs_port_cfg(struct audio_user *user, u8 port,
 		goto finished;
 	}
 
-	/* All commands in PG2 API returns one byte with extra status */
+	/* All commands on CG2900 PG2 onwards
+	 * API returns one byte extra status */
 	err = receive_bt_cmd_complete(user, CG2900_MC_VS_PORT_CONFIG,
 				      &vs_err, sizeof(vs_err));
 	if (err)
@@ -1516,8 +1543,8 @@ static int set_dai_config_pg1(struct audio_user *audio_user,
 		i2s_pcm = &config->conf.i2s_pcm;
 
 		/*
-		 * PG1 chips don't support I2S over the PCM/I2S bus,
-		 * and PG2 chips don't use this command
+		 * CG2900 PG1 chips don't support I2S over the PCM/I2S bus,
+		 * and CG2900 PG2 onwards chips don't use this command
 		 */
 		if (i2s_pcm->protocol != PORT_PROTOCOL_PCM) {
 			dev_err(BT_DEV,
@@ -1583,13 +1610,15 @@ finished_unlock_mutex:
 }
 
 /**
- * set_dai_config_pg2() - Internal implementation of @cg2900_audio_set_dai_config for PG2 hardware.
+ * set_dai_config_pg2() - Internal implementation of
+ * cg2900_audio_set_dai_config for CG2900 PG2 onwards hardware.
  * @audio_user:	Pointer to audio user struct.
  * @config:	Pointer to the configuration to set.
  *
- * Sets the Digital Audio Interface (DAI) configuration for PG2
- * hardware. This is an internal function and basic
- * argument-verification should have been done by the caller.
+ * Sets the Digital Audio Interface (DAI) configuration for
+ * CG2900 PG2 onwards hardware. This is an internal function
+ * and basic argument-verification should have been
+ * done by the caller.
  *
  * Returns:
  *  0 if there is no error.
@@ -1826,12 +1855,12 @@ static int conn_start_i2s_to_fm_rx(struct audio_user *audio_user,
 	 */
 	err = send_fm_write_1_param(
 		audio_user, CG2900_FM_CMD_ID_AUP_EXT_SET_CTRL,
-		fm_get_conversion(fm_config->fm.sample_rate));
+		fm_get_conversion(info, fm_config->fm.sample_rate));
 	if (err)
 		goto finished_unlock_mutex;
 
 	/* Set up the stream */
-	if (info->revision == CHIP_REV_PG1) {
+	if (info->revision == CG2900_CHIP_REV_PG1) {
 		struct i2s_fm_stream_config_priv stream_priv;
 
 		/* Now send HCI_VS_Set_Session_Configuration command */
@@ -1868,7 +1897,7 @@ static int conn_start_i2s_to_fm_rx(struct audio_user *audio_user,
 	dev_dbg(FM_DEV, "stream_handle set to %d\n", *stream_handle);
 
 	/* Now start the stream */
-	if (info->revision == CHIP_REV_PG1)
+	if (info->revision == CG2900_CHIP_REV_PG1)
 		err = send_vs_session_ctrl(audio_user, *stream_handle,
 					   CG2900_BT_SESSION_START);
 	else
@@ -1935,12 +1964,15 @@ static int conn_start_i2s_to_fm_tx(struct audio_user *audio_user,
 	 * Select Audio Input Source by sending HCI_Write command with
 	 * AIP_SetMode.
 	 */
-	dev_dbg(FM_DEV, "FM: AIP_SetMode\n");
-	err = send_fm_write_1_param(audio_user, CG2900_FM_CMD_ID_AIP_SET_MODE,
-				    CG2900_FM_CMD_AIP_SET_MODE_INPUT_DIG);
-	if (err)
-		goto finished_unlock_mutex;
-
+	if (info->revision == CG2900_CHIP_REV_PG1 ||
+			info->revision == CG2900_CHIP_REV_PG2) {
+		dev_dbg(FM_DEV, "FM: AIP_SetMode\n");
+		err = send_fm_write_1_param(audio_user,
+				CG2900_FM_CMD_ID_AIP_SET_MODE,
+				CG2900_FM_CMD_AIP_SET_MODE_INPUT_DIG);
+		if (err)
+			goto finished_unlock_mutex;
+	}
 	/*
 	 * Now configure the BT sample rate converter by sending HCI_Write
 	 * command with AIP_BT_SetControl.
@@ -1948,7 +1980,7 @@ static int conn_start_i2s_to_fm_tx(struct audio_user *audio_user,
 	dev_dbg(FM_DEV, "FM: AIP_BT_SetControl\n");
 	err = send_fm_write_1_param(
 		audio_user, CG2900_FM_CMD_ID_AIP_BT_SET_CTRL,
-		fm_get_conversion(fm_config->fm.sample_rate));
+		fm_get_conversion(info, fm_config->fm.sample_rate));
 	if (err)
 		goto finished_unlock_mutex;
 
@@ -1964,7 +1996,7 @@ static int conn_start_i2s_to_fm_tx(struct audio_user *audio_user,
 		goto finished_unlock_mutex;
 
 	/* Set up the stream */
-	if (info->revision == CHIP_REV_PG1) {
+	if (info->revision == CG2900_CHIP_REV_PG1) {
 		struct i2s_fm_stream_config_priv stream_priv;
 
 		/* Now send HCI_VS_Set_Session_Configuration command */
@@ -2001,7 +2033,7 @@ static int conn_start_i2s_to_fm_tx(struct audio_user *audio_user,
 	dev_dbg(FM_DEV, "stream_handle set to %d\n", *stream_handle);
 
 	/* Now start the stream */
-	if (info->revision == CHIP_REV_PG1)
+	if (info->revision == CG2900_CHIP_REV_PG1)
 		err = send_vs_session_ctrl(audio_user, *stream_handle,
 					   CG2900_BT_SESSION_START);
 	else
@@ -2112,7 +2144,7 @@ static int conn_start_pcm_to_sco(struct audio_user *audio_user,
 	mutex_lock(&info->bt_mutex);
 
 	/* Set up the stream */
-	if (info->revision == CHIP_REV_PG1) {
+	if (info->revision == CG2900_CHIP_REV_PG1) {
 		err = send_vs_session_config(audio_user, config_pcm_sco_stream,
 					     &bt_config->sco);
 	} else {
@@ -2143,7 +2175,7 @@ static int conn_start_pcm_to_sco(struct audio_user *audio_user,
 	dev_dbg(BT_DEV, "stream_handle set to %d\n", *stream_handle);
 
 	/* Now start the stream */
-	if (info->revision == CHIP_REV_PG1)
+	if (info->revision == CG2900_CHIP_REV_PG1)
 		err = send_vs_session_ctrl(audio_user, *stream_handle,
 					   CG2900_BT_SESSION_START);
 	else
@@ -2193,7 +2225,7 @@ static int conn_stop_stream(struct audio_user *audio_user,
 	mutex_lock(&info->bt_mutex);
 
 	/* Now stop the stream */
-	if (info->revision == CHIP_REV_PG1)
+	if (info->revision == CG2900_CHIP_REV_PG1)
 		err = send_vs_session_ctrl(audio_user, stream_handle,
 					   CG2900_BT_SESSION_STOP);
 	else
@@ -2357,11 +2389,31 @@ int cg2900_audio_open(unsigned int *session, struct device *parent)
 		switch (rev_data.revision) {
 		case CG2900_PG1_REV:
 		case CG2900_PG1_SPECIAL_REV:
-			info->revision = CHIP_REV_PG1;
+			info->revision = CG2900_CHIP_REV_PG1;
 			break;
 
 		case CG2900_PG2_REV:
-			info->revision = CHIP_REV_PG2;
+			info->revision = CG2900_CHIP_REV_PG2;
+			break;
+
+		case CG2905_PG1_05_REV:
+			info->revision = CG2905_CHIP_REV_PG1_05;
+			break;
+
+		case CG2905_PG2_REV:
+			info->revision = CG2905_CHIP_REV_PG2;
+			break;
+
+		case CG2910_PG1_REV:
+			info->revision = CG2910_CHIP_REV_PG1;
+			break;
+
+		case CG2910_PG1_05_REV:
+			info->revision = CG2910_CHIP_REV_PG1_05;
+			break;
+
+		case CG2910_PG2_REV:
+			info->revision = CG2910_CHIP_REV_PG2;
 			break;
 
 		default:
@@ -2501,10 +2553,10 @@ int cg2900_audio_set_dai_config(unsigned int session,
 		return -EIO;
 	}
 
-	/* Different commands are used for PG1 and PG2 */
-	if (info->revision == CHIP_REV_PG1)
+	/* Different command is used for CG2900 PG1 */
+	if (info->revision == CG2900_CHIP_REV_PG1)
 		err = set_dai_config_pg1(audio_user, config);
-	else if (info->revision == CHIP_REV_PG2)
+	else
 		err = set_dai_config_pg2(audio_user, config);
 
 	return err;

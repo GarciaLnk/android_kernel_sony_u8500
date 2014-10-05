@@ -25,7 +25,6 @@
 #include <linux/mfd/abx500/ab5500-gpadc.h>
 #include <linux/mfd/abx500/ab5500-bm.h>
 #include "abx500.h"
-#include <asm/mach-types.h>
 
 /* AB5500 driver monitors GPADC - XTAL_TEMP, PCB_TEMP,
  * BTEMP_BALL, BAT_CTRL and DIE_TEMP
@@ -128,8 +127,13 @@ static int ab5500_temp_shutdown_auto(struct abx500_temp *data)
 
 	auto_ip->mux = DIE_TEMP;
 	auto_ip->freq = MS500;
-	auto_ip->min = SHUTDOWN_AUTO_MIN_LIMIT;
-	auto_ip->max = SHUTDOWN_AUTO_MAX_LIMIT;
+	/*
+	 * As per product specification, voltage decreases as
+	 * temperature increases. Hence the min and max values
+	 * should be passed in reverse order.
+	 */
+	auto_ip->min = SHUTDOWN_AUTO_MAX_LIMIT;
+	auto_ip->max = SHUTDOWN_AUTO_MIN_LIMIT;
 	auto_ip->auto_adc_callback = temp_shutdown_trig;
 	data->gpadc_auto = auto_ip;
 	ret = ab5500_gpadc_convert_auto(data->ab5500_gpadc,
@@ -160,7 +164,7 @@ static int ab5500_temp_irq_handler(int irq, struct abx500_temp *data)
 	return 0;
 }
 
-int __init ab5500_hwmon_init(struct abx500_temp *data)
+int __init abx500_hwmon_init(struct abx500_temp *data)
 {
 	int err;
 

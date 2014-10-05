@@ -139,6 +139,41 @@ config TOUCHSCREEN_CYTTSP_SPI
 	  To compile this driver as a module, choose M here: the
 	  module will be called cyttsp-spi.
 
+config TOUCHSCREEN_CYTTSP_I2C
+	default n
+	tristate "Cypress TTSP i2c touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you have a Cypress TTSP touchscreen
+	  connected to your system's i2c bus.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called cyttsp_i2c.
+
+config TOUCHSCREEN_CYTTSP_MAX_X
+	default 479
+	int "Cypress TTSP touchscreen X resolution"
+	depends on TOUCHSCREEN_CYTTSP_CORE
+
+config TOUCHSCREEN_CYTTSP_MAX_Y
+	default 853
+	int "Cypress TTSP touchscreen Y resolution"
+	depends on TOUCHSCREEN_CYTTSP_CORE
+
+config TOUCHSCREEN_CYTTSP_MAX_Z
+	default 100
+	int "Cypress TTSP touchscreen Z resolution"
+	depends on TOUCHSCREEN_CYTTSP_CORE
+
+config TOUCHSCREEN_CYTTSP_KEY
+	default n
+	bool "Cypress TTSP touchkey"
+	depends on TOUCHSCREEN_CYTTSP_CORE
+	help
+	  Activated for Cypress TTSP touchkey function
+
 config TOUCHSCREEN_CY8CTMG110
 	tristate "cy8ctmg110 touchscreen"
 	depends on I2C
@@ -399,6 +434,12 @@ config TOUCHSCREEN_TNETV107X
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called tnetv107x-ts.
+
+config TOUCHSCREEN_SYNAPTICS_I2C_RMI
+	tristate "Synaptics i2c touchscreen"
+	depends on I2C
+	help
+	  This enables support for Synaptics RMI over I2C based touchscreens.
 
 config TOUCHSCREEN_TOUCHRIGHT
 	tristate "Touchright serial touchscreen"

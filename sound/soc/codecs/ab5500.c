@@ -18,6 +18,7 @@
 #include <linux/delay.h>
 #include <linux/pm.h>
 #include <linux/platform_device.h>
+#include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -45,11 +46,28 @@ struct ab5500_codec_dai_data {
 
 };
 
+enum regulator_idx {
+	REGULATOR_DMIC,
+	REGULATOR_AMIC
+};
+
 static struct device *ab5500_dev;
+static struct regulator_bulk_data reg_info[2] = {
+	{	.supply = "vdigmic"	},
+	{	.supply = "v-amic"	}
+};
+
+static bool reg_enabled[2] = {
+	false,
+	false
+};
 
 static u8 virtual_regs[] = {
 	0, 0, 0, 0, 0
 };
+
+static int ab5500_clk_request;
+static DEFINE_MUTEX(ab5500_clk_mutex);
 
 #define set_reg(reg, val) mask_set_reg((reg), 0xff, (val))
 
@@ -267,8 +285,7 @@ static struct widget_pm widget_pm_array[] = {
 	{.widget = widget_auxo3, .reg = AUXO3, .shift = AUXOx_PWR_SHIFT},
 	{.widget = widget_auxo4, .reg = AUXO4, .shift = AUXOx_PWR_SHIFT},
 
-	{.widget = widget_spkr1, .reg = AB5500_VIRTUAL_REG3,
-	 .shift = SPKR1_PWR_SHIFT},
+	{.widget = widget_spkr1, .reg = DUMMY_REG,  .shift = 0},
 	{.widget = widget_spkr2, .reg = AB5500_VIRTUAL_REG3,
 	 .shift = SPKR2_PWR_SHIFT},
 
@@ -437,7 +454,7 @@ static const char *enum_tx2_input_select[] = {
 };
 static const char *enum_signal_inversion[] = {"normal", "inverted"};
 static const char *enum_spkr1_mode[] = {
-	"Vibra PWM", "class D amplifier", "class AB amplifier"
+	"SPKR1 power down", "Vibra PWM", "class D amplifier", "class AB amplifier"
 };
 static const char *enum_spkr2_mode[] = {
 	"Vibra PWM", "class D amplifier",
@@ -695,7 +712,7 @@ static struct soc_enum soc_enum_auxo2_pulldown_resistor =
 			enum_optional_resistor);
 
 static struct soc_enum soc_enum_spkr1_mode =
-	SOC_ENUM_SINGLE(AB5500_VIRTUAL_REG3, SPKR1_MODE_SHIFT,
+	SOC_ENUM_SINGLE(SPKR1, SPKRx_PWR_SHIFT,
 			ARRAY_SIZE(enum_spkr1_mode),
 			enum_spkr1_mode);
 
@@ -753,7 +770,7 @@ static struct snd_kcontrol_new ab5500_snd_controls[] = {
 	SOC_ENUM("DAC2 Side Tone",		soc_enum_dac2_side_tone),
 	/* RX Volume Control */
 	SOC_SINGLE("RX-DPGA1 Gain",		RX1_DPGA, 0, 0x43, 0),
-	SOC_SINGLE("RX-DPGA2 Gain",		RX1_DPGA, 0, 0x43, 0),
+	SOC_SINGLE("RX-DPGA2 Gain",		RX2_DPGA, 0, 0x43, 0),
 	SOC_SINGLE("RX-DPGA3 Gain",		RX3_DPGA, 0, 0x43, 0),
 	SOC_SINGLE("LINE1 Gain", LINE1, LINEx_GAIN_SHIFT, 0x0a, 0),
 	SOC_SINGLE("LINE2 Gain", LINE2, LINEx_GAIN_SHIFT, 0x0a, 0),
@@ -1105,24 +1122,61 @@ static void power_for_playback(enum enum_power onoff, int ifsel)
 		return;
 	}
 	mask_set_reg(ENV_THR, ENV_THR_HIGH_MASK, 0x0F << ENV_THR_HIGH_SHIFT);
-	mask_set_reg(ENV_THR, ENV_THR_LOW_MASK, 0x0F << ENV_THR_LOW_SHIFT);
+	mask_set_reg(ENV_THR, ENV_THR_LOW_MASK, 0x00 << ENV_THR_LOW_SHIFT);
+	mask_set_reg(DC_CANCEL, DC_CANCEL_AUXO12_MASK,
+		0x01 << DC_CANCEL_AUXO12_SHIFT);
 
 	power_widget_unlocked(onoff, ifsel == 0 ?
 			      widget_if0_dld_l : widget_if1_dld_l);
 	power_widget_unlocked(onoff, ifsel == 0 ?
-			      widget_if0_dld_r : widget_if1_dld_r);
-
-	mask_set_reg(SPKR1, SPKRx_PWR_MASK, 0x03 << SPKRx_PWR_SHIFT);
-	mask_set_reg(SPKR1, SPKRx_GAIN_MASK, 0x12 << SPKRx_GAIN_SHIFT);
-	mask_set_reg(RX3_DPGA, RXx_DPGA_MASK, 0x3F << RXx_DPGA_SHIFT);
-	mask_set_reg(DC_CANCEL, DC_CANCEL_AUXO12_MASK,
-			0x01 << DC_CANCEL_AUXO12_SHIFT);
+			widget_if0_dld_r : widget_if1_dld_r);
 
 	mutex_unlock(&ab5500_pm_mutex);
 }
 
+static int enable_regulator(enum regulator_idx idx)
+{
+	int ret;
+
+	if (reg_enabled[idx])
+		return 0;
+
+	ret = regulator_enable(reg_info[idx].consumer);
+	if (ret != 0) {
+		pr_err("%s: Failure to enable regulator '%s' (ret = %d)\n",
+			__func__, reg_info[idx].supply, ret);
+		return ret;
+	};
+
+	reg_enabled[idx] = true;
+	pr_debug("%s: Enabled regulator '%s', status: %d, %d\n",
+		__func__,
+		reg_info[idx].supply,
+		(int)reg_enabled[0],
+		(int)reg_enabled[1]);
+	return 0;
+}
+
+static void disable_regulator(enum regulator_idx idx)
+{
+	if (!reg_enabled[idx])
+		return;
+
+	regulator_disable(reg_info[idx].consumer);
+
+	reg_enabled[idx] = false;
+	pr_debug("%s: Disabled regulator '%s', status: %d, %d\n",
+		__func__,
+		reg_info[idx].supply,
+		(int)reg_enabled[0],
+		(int)reg_enabled[1]);
+}
+
 static void power_for_capture(enum enum_power onoff, int ifsel)
 {
+	int err;
+	int mask;
+
 	dev_info(ab5500_dev, "%s: interface %d power %s", __func__,
 		ifsel, onoff == POWER_ON ? "on" : "off");
 	if (mutex_lock_interruptible(&ab5500_pm_mutex)) {
@@ -1135,6 +1189,34 @@ static void power_for_capture(enum enum_power onoff, int ifsel)
 			      widget_if0_uld_l : widget_if1_uld_l);
 	power_widget_unlocked(onoff, ifsel == 0 ?
 			      widget_if0_uld_r : widget_if1_uld_r);
+
+	mask = (read_reg(TX2) & TXx_MUX_MASK) >> TXx_MUX_SHIFT;
+
+		switch (onoff << 2 | mask) {
+		case 0: /* Power off : Amic */
+			disable_regulator(REGULATOR_AMIC);
+		break;
+		case 1: /* Power off : Dmic */
+		case 2:
+			disable_regulator(REGULATOR_DMIC);
+		break;
+		case 4: /* Power on : Amic */
+			err = enable_regulator(REGULATOR_AMIC);
+			if (err < 0)
+				goto unlock;
+		break;
+		case 5: /* Power on : Dmic */
+		case 6:
+			err = enable_regulator(REGULATOR_DMIC);
+			if (err < 0)
+				goto unlock;
+		break;
+		default:
+			pr_debug("%s : Not a valid regulator combination\n",
+					__func__);
+		break;
+		}
+unlock:
 	mutex_unlock(&ab5500_pm_mutex);
 }
 
@@ -1212,8 +1294,9 @@ static int ab5500_pcm_hw_params(struct snd_pcm_substream *substream,
 static int ab5500_pcm_prepare(struct snd_pcm_substream *substream,
 			      struct snd_soc_dai *dai)
 {
-	dev_info(ab5500_dev, "%s called.\n", __func__);
 	u8 value = (dai->id == 1) ? INTERFACE1 : INTERFACE0;
+
+	dev_info(ab5500_dev, "%s called.\n", __func__);
 
 	/* Configure registers for either playback or capture */
 	if ((substream->stream == SNDRV_PCM_STREAM_PLAYBACK) &&
@@ -1230,6 +1313,11 @@ static int ab5500_pcm_prepare(struct snd_pcm_substream *substream,
 						0 << I2Sx_TRISTATE_SHIFT);
 
 	}
+	mutex_lock(&ab5500_clk_mutex);
+	ab5500_clk_request++;
+	if (ab5500_clk_request == 1)
+		mask_set_reg(CLOCK, CLOCK_ENABLE_MASK, 1 << CLOCK_ENABLE_SHIFT);
+	mutex_unlock(&ab5500_clk_mutex);
 
 	dump_registers(__func__, RX1, AUXO1_ADDER, RX2,
 			AUXO2_ADDER, RX1_DPGA, RX2_DPGA, AUXO1, AUXO2, -1);
@@ -1255,6 +1343,11 @@ static void ab5500_pcm_shutdown(struct snd_pcm_substream *substream,
 					1 << I2Sx_TRISTATE_SHIFT);
 		mask_set_reg(iface, MASTER_GENx_PWR_MASK, 0);
 		}
+	mutex_lock(&ab5500_clk_mutex);
+	ab5500_clk_request--;
+	if (ab5500_clk_request == 0)
+		mask_set_reg(CLOCK, CLOCK_ENABLE_MASK, 0 << CLOCK_ENABLE_SHIFT);
+	mutex_unlock(&ab5500_clk_mutex);
 }
 
 static int ab5500_set_dai_sysclk(struct snd_soc_dai *dai, int clk_id,
@@ -1379,13 +1472,15 @@ static int ab5500_codec_remove(struct snd_soc_codec *codec)
 static int ab5500_codec_suspend(struct snd_soc_codec *codec,
 				pm_message_t state)
 {
-	mask_set_reg(CLOCK, CLOCK_ENABLE_MASK, 0);
+	if (!ab5500_clk_request)
+		mask_set_reg(CLOCK, CLOCK_ENABLE_MASK, 0);
 	return 0;
 }
 
 static int ab5500_codec_resume(struct snd_soc_codec *codec)
 {
-	mask_set_reg(CLOCK, CLOCK_ENABLE_MASK, 0xff);
+	if (ab5500_clk_request)
+		mask_set_reg(CLOCK, CLOCK_ENABLE_MASK, 0xff);
 	return 0;
 }
 #else
@@ -1435,12 +1530,8 @@ static int ab5500_codec_write_reg(struct snd_soc_codec *codec,
 		break;
 	}
 
-	case EAR_ADDER:
-	case AUXO1_ADDER:
-	case AUXO2_ADDER:
 	case AUXO3_ADDER:
 	case AUXO4_ADDER:
-	case SPKR1_ADDER:
 	case SPKR2_ADDER:
 	case LINE1_ADDER:
 	case LINE2_ADDER: {
@@ -1536,92 +1627,77 @@ EXPORT_SYMBOL_GPL(ab5500_codec_drv);
 static inline void init_playback_route(void)
 {
 	/* if0_dld_l -> rx1 -> dac1 -> auxo1 */
-	update_widgets_link(LINK, widget_if0_dld_l, widget_rx1,
-			    RX1, RXx_DATA_MASK, 0x03 << RXx_DATA_SHIFT);
+	update_widgets_link(LINK, widget_if0_dld_l, widget_rx1, 0, 0, 0);
 	update_widgets_link(LINK, widget_rx1, widget_dac1, 0, 0, 0);
-	update_widgets_link(LINK, widget_dac1, widget_auxo1,
-			    AUXO1_ADDER, DAC1_TO_X_MASK, 0xff);
+	update_widgets_link(LINK, widget_dac1, widget_auxo1, 0, 0, 0);
 
 	/* if0_dld_r -> rx2 -> dac2 -> auxo2 */
-	update_widgets_link(LINK, widget_if0_dld_r, widget_rx2,
-			    RX2, RXx_DATA_MASK, 0x04 << RXx_DATA_SHIFT);
+	update_widgets_link(LINK, widget_if0_dld_r, widget_rx2, 0, 0, 0);
 	update_widgets_link(LINK, widget_rx2, widget_dac2, 0, 0, 0);
-	update_widgets_link(LINK, widget_dac2, widget_auxo2,
-			    AUXO2_ADDER, DAC2_TO_X_MASK, 0xff);
+	update_widgets_link(LINK, widget_dac2, widget_auxo2, 0, 0, 0);
+
+	/*  Earpiece */
+	update_widgets_link(LINK, widget_dac1, widget_ear, 0, 0, 0);
 
 	/* if1_dld_l -> rx3 -> dac3 -> spkr1 */
-	update_widgets_link(LINK, widget_if1_dld_l, widget_rx3, RX3,
-				RXx_DATA_MASK, 0x05 << RXx_DATA_SHIFT);
+	update_widgets_link(LINK, widget_if1_dld_l, widget_rx3, 0, 0, 0);
 	update_widgets_link(LINK, widget_rx3, widget_dac3, 0, 0, 0);
-	update_widgets_link(LINK, widget_dac3, widget_spkr1, SPKR1_ADDER,
-				DAC3_TO_X_MASK, 0xff);
+	update_widgets_link(LINK, widget_dac3, widget_spkr1, 0, 0, 0);
+
 }
 
 static inline void init_capture_route(void)
 {
 	/* mic bias - > mic2 inputs */
-	update_widgets_link(LINK, widget_micbias1, widget_mic2p2,
-			    0, 0, 0);
-	update_widgets_link(LINK, widget_micbias1, widget_mic2n2,
-			    0, 0, 0);
-	update_widgets_link(LINK, widget_micbias2, widget_mic2p2,
-			    0, 0, 0);
-	update_widgets_link(LINK, widget_micbias2, widget_mic2n2,
-			    0, 0, 0);
-
+	update_widgets_link(LINK, widget_micbias1, widget_mic2p2, 0, 0, 0);
+	update_widgets_link(LINK, widget_micbias1, widget_mic2n2, 0, 0, 0);
 
 	/* mic2 inputs -> mic2 */
-	update_widgets_link(LINK, widget_mic2p2, widget_mic2,
-			    MIC2_INPUT_SELECT, MICxP2_SEL_MASK, 0xff);
-	update_widgets_link(LINK, widget_mic2n2, widget_mic2,
-			    MIC2_INPUT_SELECT, MICxN2_SEL_MASK, 0xff);
+	update_widgets_link(LINK, widget_mic2p2, widget_mic2, 0, 0, 0);
+	update_widgets_link(LINK, widget_mic2n2, widget_mic2, 0, 0, 0);
 
 	/* mic2 -> adc2 -> tx2 */
-	update_widgets_link(LINK, widget_mic2, widget_adc2,
-			    0, 0, 0);
-	update_widgets_link(LINK, widget_adc2, widget_tx2,
-			    TX2, TXx_MUX_MASK, 0);
+	update_widgets_link(LINK, widget_mic2, widget_adc2, 0, 0, 0);
+	update_widgets_link(LINK, widget_adc2, widget_tx2, 0, 0, 0);
 
 	/* tx2 -> if0_uld_l & if0_uld_r */
-	update_widgets_link(LINK, widget_tx2, widget_if0_uld_l,
-			    INTERFACE0_ULD, I2Sx_ULD_L_MASK,
-			    0x02 << I2Sx_ULD_L_SHIFT);
-	update_widgets_link(LINK, widget_tx2, widget_if0_uld_r,
-			    INTERFACE0_ULD, I2Sx_ULD_R_MASK,
-			    0x02 << I2Sx_ULD_R_SHIFT);
-
-	/* mic2 -> apga2 */
-	update_widgets_link(LINK, widget_mic2, widget_apga2,
-			    ANALOG_LOOP_PGA2, APGAx_MUX_MIC2_MASK,
-			    1 << APGAx_MUX_MIC2_SHIFT);
-
-	/* apga2 -> auxo1 & auxo2 */
-	update_widgets_link(LINK, widget_apga2, widget_auxo1,
-			    AUXO1_ADDER, APGA2_TO_X_MASK,
-			    1 << APGA2_TO_X_SHIFT);
-	update_widgets_link(LINK, widget_apga2, widget_auxo2,
-			    AUXO2_ADDER, APGA2_TO_X_MASK,
-			    1 << APGA2_TO_X_SHIFT);
+	update_widgets_link(LINK, widget_tx2, widget_if0_uld_l, 0, 0, 0);
+	update_widgets_link(LINK, widget_tx2, widget_if0_uld_r, 0, 0, 0);
 }
 
-static inline void init_playback_gain(void)
+static int create_regulators(void)
 {
-	/* 0x43, 0x0C: pure gain values */
-	mask_set_reg(RX1_DPGA, RXx_DPGA_MASK,
-		     0x2C << RXx_DPGA_SHIFT);
-	mask_set_reg(RX2_DPGA, RXx_DPGA_MASK,
-		     0x2C << RXx_DPGA_SHIFT);
-	mask_set_reg(AUXO1, AUXOx_GAIN_MASK, 0x0A << AUXOx_GAIN_SHIFT);
-	mask_set_reg(AUXO2, AUXOx_GAIN_MASK, 0x0A << AUXOx_GAIN_SHIFT);
-}
+	int i, status = 0;
 
-static inline void init_capture_gain(void)
-{
-	/* 0x06, 0x0f: pure gain values */
-	mask_set_reg(MIC1_GAIN, MICx_GAIN_MASK, 0x08 << MICx_GAIN_SHIFT);
-	mask_set_reg(TX_DPGA1, TX_DPGAx_MASK, 0x0f << TX_DPGAx_SHIFT);
-	mask_set_reg(MIC2_GAIN, MICx_GAIN_MASK, 0x08 << MICx_GAIN_SHIFT);
-	mask_set_reg(TX_DPGA2, TX_DPGAx_MASK, 0x0f << TX_DPGAx_SHIFT);
+	pr_debug("%s: Enter.\n", __func__);
+
+	for (i = 0; i < ARRAY_SIZE(reg_info); ++i)
+		reg_info[i].consumer = NULL;
+
+	for (i = 0; i < ARRAY_SIZE(reg_info); ++i) {
+		reg_info[i].consumer = regulator_get(ab5500_dev,
+							reg_info[i].supply);
+		if (IS_ERR(reg_info[i].consumer)) {
+			status = PTR_ERR(reg_info[i].consumer);
+			pr_err("%s: ERROR: Failed to get regulator '%s' (ret = %d)!\n",
+				__func__, reg_info[i].supply, status);
+			reg_info[i].consumer = NULL;
+			goto err_get;
+		}
+	}
+
+	return 0;
+
+err_get:
+
+	for (i = 0; i < ARRAY_SIZE(reg_info); ++i) {
+		if (reg_info[i].consumer) {
+			regulator_put(reg_info[i].consumer);
+			reg_info[i].consumer = NULL;
+		}
+	}
+
+	return status;
 }
 
 static int __devinit ab5500_platform_probe(struct platform_device *pdev)
@@ -1629,9 +1705,17 @@ static int __devinit ab5500_platform_probe(struct platform_device *pdev)
 	int ret = 0;
 	u8 reg;
 	struct ab5500_codec_dai_data *codec_drvdata;
+	int status;
 
 	pr_info("%s invoked with pdev = %p.\n", __func__, pdev);
 	ab5500_dev = &pdev->dev;
+
+	status = create_regulators();
+	if (status < 0) {
+		pr_err("%s: ERROR: Failed to instantiate regulators (ret = %d)!\n",
+			__func__, status);
+		return status;
+	}
 	codec_drvdata = kzalloc(sizeof(struct ab5500_codec_dai_data),
 				GFP_KERNEL);
 	if (codec_drvdata == NULL)
@@ -1650,15 +1734,12 @@ static int __devinit ab5500_platform_probe(struct platform_device *pdev)
 	for (reg = AB5500_FIRST_REG; reg <= AB5500_LAST_REG; reg++)
 		set_reg(reg, 0);
 
-	mask_set_reg(CLOCK, CLOCK_ENABLE_MASK, 1 << CLOCK_ENABLE_SHIFT);
 	mask_set_reg(INTERFACE0, I2Sx_TRISTATE_MASK, 1 << I2Sx_TRISTATE_SHIFT);
 	mask_set_reg(INTERFACE1, I2Sx_TRISTATE_MASK, 1 << I2Sx_TRISTATE_SHIFT);
 
 	printk(KERN_ERR "Clock Setting ab5500\n");
 	init_playback_route();
-	init_playback_gain();
 	init_capture_route();
-	init_capture_gain();
 	memset(&pm_stack, 0, sizeof(pm_stack));
 	return ret;
 }
@@ -1666,6 +1747,7 @@ static int __devinit ab5500_platform_probe(struct platform_device *pdev)
 static int __devexit ab5500_platform_remove(struct platform_device *pdev)
 {
 	pr_info("%s called.\n", __func__);
+	regulator_bulk_free(ARRAY_SIZE(reg_info), reg_info);
 	mask_set_reg(CLOCK, CLOCK_ENABLE_MASK, 0);
 	snd_soc_unregister_codec(ab5500_dev);
 	kfree(platform_get_drvdata(pdev));

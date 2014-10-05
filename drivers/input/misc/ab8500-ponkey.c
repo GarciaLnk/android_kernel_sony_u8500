@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/mfd/abx500.h>
 #include <linux/mfd/abx500/ab5500.h>
+#include <linux/ab8500-ponkey.h>
 
 /* Ponkey time control bits */
 #define AB5500_MCB		0x2F
@@ -90,10 +91,13 @@ static irqreturn_t ab8500_ponkey_handler(int irq, void *data)
 {
 	struct ab8500_ponkey_info *info = data;
 
-	if (irq == info->irq_dbf)
+	if (irq == info->irq_dbf) {
+		ab8500_forced_key_detect(AB8500_PON_PRESSED);
 		input_report_key(info->idev, KEY_POWER, true);
-	else if (irq == info->irq_dbr)
+	} else if (irq == info->irq_dbr) {
+		ab8500_forced_key_detect(AB8500_PON_RELEASED);
 		input_report_key(info->idev, KEY_POWER, false);
+	}
 
 	input_sync(info->idev);
 
@@ -175,6 +179,7 @@ static int __devinit ab8500_ponkey_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, info);
+	ab8500_forcecrash_init(pdev);
 
 	return 0;
 
@@ -194,6 +199,7 @@ static int __devexit ab8500_ponkey_remove(struct platform_device *pdev)
 {
 	struct ab8500_ponkey_info *info = platform_get_drvdata(pdev);
 
+	ab8500_forcecrash_exit(pdev);
 	free_irq(info->irq_dbf, info);
 	free_irq(info->irq_dbr, info);
 	input_unregister_device(info->idev);

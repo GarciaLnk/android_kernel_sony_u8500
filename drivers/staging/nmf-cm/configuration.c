@@ -15,33 +15,51 @@
 #include <cm/engine/power_mgt/inc/power.h>
 #include "osal-kernel.h"
 
+/* Embedded Static RAM base address */
+/* 8500 config: 0-64k: secure */
+#define U8500_ESRAM_CM_BASE (U8500_ESRAM_BASE + U8500_ESRAM_DMA_LCPA_OFFSET)
+/* 9540 config: ESRAM base address is the same s on 8500  (incl. DMA part) */
+#define U9540_ESRAM_CM_BASE (U8500_ESRAM_BASE + U9540_ESRAM_DMA_LCPA_OFFSET)
+
+/*
+ * 8500 Embedded ram size for CM (in Kb)
+ * 5 banks of 128k: skip the first half bank (secure) and the last
+ * one (used for MCDE/B2R2), but include DMA part (4k after the secure part)
+ * to give access from DSP side
+ */
+#define U8500_ESRAM_CM_SIZE 448
+/* 9540 Embedded ram size for CM (in Kb) */
+#define U9540_ESRAM_CM_SIZE 406
+
 /* Per-driver environment */
 struct OsalEnvironment osalEnv =
 {
 	.mpc = {
 		{
-			.coreId          = SVA_CORE_ID,
-			.name            = "sva",
-			.base_phys       = (void*)U8500_SVA_BASE,
-			.interrupt0      = IRQ_DB8500_SVA,
-			.interrupt1      = IRQ_DB8500_SVA2,
-			.mmdsp_regulator = NULL,
-			.pipe_regulator  = NULL,
-			.monitor_tsk     = NULL,
-			.hwmem_code      = NULL,
-			.hwmem_data      = NULL,
+			.coreId           = SVA_CORE_ID,
+			.name             = "sva",
+			.base_phys        = (void*)U8500_SVA_BASE,
+			.interrupt0       = IRQ_DB8500_SVA,
+			.interrupt1       = IRQ_DB8500_SVA2,
+			.mmdsp_regulator  = NULL,
+			.pipe_regulator   = NULL,
+			.monitor_tsk      = NULL,
+			.hwmem_code       = NULL,
+			.hwmem_data       = NULL,
+			.trace_read_count = ATOMIC_INIT(0),
 		},
 		{
-			.coreId          = SIA_CORE_ID,
-			.name            = "sia",
-			.base_phys       = (void*)U8500_SIA_BASE,
-			.interrupt0      = IRQ_DB8500_SIA,
-			.interrupt1      = IRQ_DB8500_SIA2,
-			.mmdsp_regulator = NULL,
-			.pipe_regulator  = NULL,
-			.monitor_tsk     = NULL,
-			.hwmem_code      = NULL,
-			.hwmem_data      = NULL,
+			.coreId           = SIA_CORE_ID,
+			.name             = "sia",
+			.base_phys        = (void*)U8500_SIA_BASE,
+			.interrupt0       = IRQ_DB8500_SIA,
+			.interrupt1       = IRQ_DB8500_SIA2,
+			.mmdsp_regulator  = NULL,
+			.pipe_regulator   = NULL,
+			.monitor_tsk      = NULL,
+			.hwmem_code       = NULL,
+			.hwmem_data       = NULL,
+			.trace_read_count = ATOMIC_INIT(0),
 		}
 	},
 	.esram_regulator = { NULL, NULL},
@@ -87,7 +105,7 @@ bool cfgSemaphoreTypeHSEM = true;
 module_param(cfgSemaphoreTypeHSEM, bool, S_IRUGO);
 MODULE_PARM_DESC(cfgSemaphoreTypeHSEM, "Semaphore used (HSEM or LSEM)");
 
-int cfgESRAMSize = ESRAM_SIZE;
+int cfgESRAMSize;
 module_param(cfgESRAMSize, uint, S_IRUGO);
 MODULE_PARM_DESC(cfgESRAMSize, "Size of ESRAM used in the CM (in Kb)");
 
@@ -124,16 +142,28 @@ int init_config(void)
 		pr_err("SDRAM data size for SVA must be greater than 0\n");
 		return -EINVAL;
 	}
+
+	if (cpu_is_u9540()) {
+		osalEnv.esram_base_phys = U9540_ESRAM_CM_BASE;
+		cfgESRAMSize = U9540_ESRAM_CM_SIZE;
+	} else {
+		osalEnv.esram_base_phys = U8500_ESRAM_CM_BASE;
+		cfgESRAMSize = U8500_ESRAM_CM_SIZE;
+	}
+
 	osalEnv.mpc[SVA].nbYramBanks     = cfgMpcYBanks_SVA;
 	osalEnv.mpc[SVA].eeId            = cfgSchedulerTypeHybrid_SVA ? HYBRID_EXECUTIVE_ENGINE : SYNCHRONOUS_EXECUTIVE_ENGINE;
 	osalEnv.mpc[SVA].sdram_code.size = cfgMpcSDRAMCodeSize_SVA * ONE_KB;
 	osalEnv.mpc[SVA].sdram_data.size = cfgMpcSDRAMDataSize_SVA * ONE_KB;
 	osalEnv.mpc[SVA].base.size       = 128*ONE_KB; //we expose only TCM24
+	spin_lock_init(&osalEnv.mpc[SVA].trace_reader_lock);
+
 	osalEnv.mpc[SIA].nbYramBanks     = cfgMpcYBanks_SIA;
 	osalEnv.mpc[SIA].eeId            = cfgSchedulerTypeHybrid_SIA ? HYBRID_EXECUTIVE_ENGINE : SYNCHRONOUS_EXECUTIVE_ENGINE;
 	osalEnv.mpc[SIA].sdram_code.size = cfgMpcSDRAMCodeSize_SIA * ONE_KB;
 	osalEnv.mpc[SIA].sdram_data.size = cfgMpcSDRAMDataSize_SIA * ONE_KB;
 	osalEnv.mpc[SIA].base.size       = 128*ONE_KB; //we expose only TCM24
+	spin_lock_init(&osalEnv.mpc[SIA].trace_reader_lock);
 
 	return 0;
 }

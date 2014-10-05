@@ -5,6 +5,7 @@
  * Copyright (C) 2009 Alessandro Rubini <rubini@unipv.it>
  *   Rewritten based on work by Prafulla WADASKAR <prafulla.wadaskar@st.com>
  * Copyright (C) 2011 Linus Walleij <linus.walleij@linaro.org>
+ * Copyright (C) 2012 Sony Mobile Communications AB
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -23,9 +24,9 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/slab.h>
-#include <linux/gpio/nomadik.h>
 
 #include <asm/mach/irq.h>
+#include <plat/gpio-nomadik.h>
 #include <plat/pincfg.h>
 #include <mach/hardware.h>
 #include <mach/gpio.h>
@@ -61,6 +62,11 @@ struct nmk_gpio_chip {
 	u32 fimsc;
 	u32 pull_up;
 	u32 lowemi;
+	/*
+	 * NOTE: pin_lock doesn't support remove of lock! Main usecase is
+	 * to prevent software to mess with PTM pins configured from T32
+	 */
+	u32 pin_lock;
 };
 
 static struct nmk_gpio_chip *
@@ -75,6 +81,9 @@ static void __nmk_gpio_set_mode(struct nmk_gpio_chip *nmk_chip,
 {
 	u32 bit = 1 << offset;
 	u32 afunc, bfunc;
+
+	if (nmk_chip->pin_lock & bit)
+		return;
 
 	afunc = readl(nmk_chip->addr + NMK_GPIO_AFSLA) & ~bit;
 	bfunc = readl(nmk_chip->addr + NMK_GPIO_AFSLB) & ~bit;
@@ -92,6 +101,9 @@ static void __nmk_gpio_set_slpm(struct nmk_gpio_chip *nmk_chip,
 	u32 bit = 1 << offset;
 	u32 slpm;
 
+	if (nmk_chip->pin_lock & bit)
+		return;
+
 	slpm = readl(nmk_chip->addr + NMK_GPIO_SLPC);
 	if (mode == NMK_GPIO_SLPM_NOCHANGE)
 		slpm |= bit;
@@ -105,6 +117,9 @@ static void __nmk_gpio_set_pull(struct nmk_gpio_chip *nmk_chip,
 {
 	u32 bit = 1 << offset;
 	u32 pdis;
+
+	if (nmk_chip->pin_lock & bit)
+		return;
 
 	pdis = readl(nmk_chip->addr + NMK_GPIO_PDIS);
 	if (pull == NMK_GPIO_PULL_NONE) {
@@ -131,6 +146,9 @@ static void __nmk_gpio_set_lowemi(struct nmk_gpio_chip *nmk_chip,
 	u32 bit = BIT(offset);
 	bool enabled = nmk_chip->lowemi & bit;
 
+	if (nmk_chip->pin_lock & 1 << offset)
+		return;
+
 	if (lowemi == enabled)
 		return;
 
@@ -146,12 +164,18 @@ static void __nmk_gpio_set_lowemi(struct nmk_gpio_chip *nmk_chip,
 static void __nmk_gpio_make_input(struct nmk_gpio_chip *nmk_chip,
 				  unsigned offset)
 {
+	if (nmk_chip->pin_lock & 1 << offset)
+		return;
+
 	writel(1 << offset, nmk_chip->addr + NMK_GPIO_DIRC);
 }
 
 static void __nmk_gpio_set_output(struct nmk_gpio_chip *nmk_chip,
 				  unsigned offset, int val)
 {
+	if (nmk_chip->pin_lock & 1 << offset)
+		return;
+
 	if (val)
 		writel(1 << offset, nmk_chip->addr + NMK_GPIO_DATS);
 	else
@@ -161,6 +185,9 @@ static void __nmk_gpio_set_output(struct nmk_gpio_chip *nmk_chip,
 static void __nmk_gpio_make_output(struct nmk_gpio_chip *nmk_chip,
 				  unsigned offset, int val)
 {
+	if (nmk_chip->pin_lock & 1 << offset)
+		return;
+
 	writel(1 << offset, nmk_chip->addr + NMK_GPIO_DIRS);
 	__nmk_gpio_set_output(nmk_chip, offset, val);
 }
@@ -171,6 +198,9 @@ static void __nmk_gpio_set_mode_safe(struct nmk_gpio_chip *nmk_chip,
 {
 	u32 rwimsc = nmk_chip->rwimsc;
 	u32 fwimsc = nmk_chip->fwimsc;
+
+	if (nmk_chip->pin_lock & BIT(offset))
+		return;
 
 	if (glitch && nmk_chip->set_ioforce) {
 		u32 bit = BIT(offset);
@@ -200,6 +230,9 @@ nmk_gpio_disable_lazy_irq(struct nmk_gpio_chip *nmk_chip, unsigned offset)
 	int gpio = nmk_chip->chip.base + offset;
 	int irq = NOMADIK_GPIO_TO_IRQ(gpio);
 	struct irq_data *d = irq_get_irq_data(irq);
+
+	if (nmk_chip->pin_lock & BIT(offset))
+		return;
 
 	if (!rising && !falling)
 		return;
@@ -622,6 +655,9 @@ static void __nmk_gpio_irq_modify(struct nmk_gpio_chip *nmk_chip,
 	u32 rimscreg;
 	u32 fimscreg;
 
+	if (nmk_chip->pin_lock & bitmask)
+		return;
+
 	if (which == NORMAL) {
 		rimscreg = NMK_GPIO_RIMSC;
 		fimscreg = NMK_GPIO_FIMSC;
@@ -889,6 +925,9 @@ static int nmk_gpio_make_input(struct gpio_chip *chip, unsigned offset)
 	struct nmk_gpio_chip *nmk_chip =
 		container_of(chip, struct nmk_gpio_chip, chip);
 
+	if (nmk_chip->pin_lock & 1 << offset)
+		return 0;
+
 	clk_enable(nmk_chip->clk);
 
 	writel(1 << offset, nmk_chip->addr + NMK_GPIO_DIRC);
@@ -919,6 +958,9 @@ static void nmk_gpio_set_output(struct gpio_chip *chip, unsigned offset,
 {
 	struct nmk_gpio_chip *nmk_chip =
 		container_of(chip, struct nmk_gpio_chip, chip);
+
+	if (nmk_chip->pin_lock & 1 << offset)
+		return;
 
 	clk_enable(nmk_chip->clk);
 
@@ -979,14 +1021,15 @@ static void nmk_gpio_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 		is_out = readl(nmk_chip->addr + NMK_GPIO_DIR) & bit;
 		pull = !(readl(nmk_chip->addr + NMK_GPIO_PDIS) & bit);
 		mode = nmk_gpio_get_mode(gpio);
-		seq_printf(s, " gpio-%-3d (%-20.20s) %s %s %s %s",
+		seq_printf(s, " gpio-%-3d (%-20.20s) %s %s %s %s %s",
 			gpio, label ?: "(none)",
 			is_out ? "out" : "in ",
 			chip->get
 				? (chip->get(chip, i) ? "hi" : "lo")
 				: "?  ",
 			(mode < 0) ? "unknown" : modes[mode],
-			pull ? "pull" : "none");
+			pull ? "pull" : "none",
+			(nmk_chip->pin_lock & bit) ? "LOCKED" : "");
 
 		if (label && !is_out) {
 			int		irq = gpio_to_irq(gpio);
@@ -1083,6 +1126,9 @@ void nmk_gpio_wakeups_suspend(void)
 
 		clk_enable(chip->clk);
 
+		chip->rwimsc &= ~chip->pin_lock;
+		chip->fwimsc &= ~chip->pin_lock;
+
 		writel(chip->rwimsc & chip->real_wake,
 		       chip->addr + NMK_GPIO_RWIMSC);
 		writel(chip->fwimsc & chip->real_wake,
@@ -1103,6 +1149,9 @@ void nmk_gpio_wakeups_resume(void)
 			break;
 
 		clk_enable(chip->clk);
+
+		chip->rwimsc &= ~chip->pin_lock;
+		chip->fwimsc &= ~chip->pin_lock;
 
 		writel(chip->rwimsc, chip->addr + NMK_GPIO_RWIMSC);
 		writel(chip->fwimsc, chip->addr + NMK_GPIO_FWIMSC);
@@ -1185,7 +1234,7 @@ static int __devinit nmk_gpio_probe(struct platform_device *dev)
 	 */
 	nmk_chip->bank = dev->id;
 	nmk_chip->clk = clk;
-	nmk_chip->addr = io_p2v(res->start);
+	nmk_chip->addr = __io(IO_ADDRESS(res->start));
 	nmk_chip->chip = nmk_gpio_template;
 	nmk_chip->parent_irq = irq;
 	nmk_chip->secondary_parent_irq = secondary_irq;

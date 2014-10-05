@@ -1,11 +1,15 @@
+config MCDE
+	bool
+
 config FB_MCDE
-	tristate "MCDE support"
+	bool "MCDE fbdev support"
 	depends on FB
 	select FB_SYS_FILLRECT
 	select FB_SYS_COPYAREA
 	select FB_SYS_IMAGEBLIT
 	select FB_SYS_FOPS
 	select HWMEM
+	select MCDE
 	---help---
 	  This enables support for MCDE based frame buffer driver.
 
@@ -13,7 +17,7 @@ config FB_MCDE
 
 config FB_MCDE_DEBUG
 	bool "MCDE debug messages"
-	depends on FB_MCDE
+	depends on MCDE
 	---help---
 	  Say Y here if you want the MCDE driver to output debug messages
 
@@ -36,7 +40,7 @@ config MCDE_FB_AVOID_REALLOC
 
 config MCDE_DISPLAY_DSI
 	bool "Support for DSI displays within MCDE"
-	depends on FB_MCDE
+	depends on MCDE
 	default y
 
 menu "MCDE DSI displays"
@@ -45,13 +49,66 @@ menu "MCDE DSI displays"
 config MCDE_DISPLAY_GENERIC_DSI
 	tristate "Generic DSI display driver"
 
+config MCDE_DISPLAY_PANEL_DSI
+	bool "Display panel driver"
+
 config MCDE_DISPLAY_SAMSUNG_S6D16D0
 	bool "Samsung S6D16D0 DSI display driver"
+	depends on !MCDE_DISPLAY_PANEL_DSI
 	---help---
 	  Say Y if you have a TPO Taal or Blackpearl display panel.
 
 config MCDE_DISPLAY_SONY_ACX424AKP_DSI
 	tristate "Sony acx424akp DSI display driver"
+	depends on !MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_NT35560_DSI_SONY_ACX424AKM
+	bool "Sony ACX424AKM display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_ROTATE_NT35560_DSI_SONY_ACX424AKM
+	bool "Rotate Sony ACX424AKM content 180 degrees"
+	depends on MCDE_DISPLAY_NT35560_DSI_SONY_ACX424AKM
+
+config MCDE_DISPLAY_NT35560_DSI_HITACHI_DX09D09VM
+	bool "Hitachi DX09D09VM display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_ROTATE_NT35560_DSI_HITACHI_DX09D09VM
+	bool "Rotate Hitachi DX09D09VM content 180 degrees"
+	depends on MCDE_DISPLAY_NT35560_DSI_HITACHI_DX09D09VM
+
+config MCDE_DISPLAY_R61408_DSI_SEIKO_RB443
+	bool "Seiko RB443 display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_R61408_DSI_SAMSUNG_LMS347TF01
+	bool "Samsung LMS347TF01 display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_R61529_DSI_SEIKO_RJ248
+	bool "Seiko RJ248 display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_R61529_DSI_HITACHI_TX09D115VM
+	bool "Hitachi TX09D115VM display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_OTM9601_DSI_SONY_ACX438AKM
+	bool "Sony ACX438AKM display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_R61408_DSI_HITACHI_TX09D113
+	bool "Hitachi tx09d113 display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_R61408_DSI_SONY_L5F31178
+	bool "Sony l5f31178 display panel"
+	depends on MCDE_DISPLAY_PANEL_DSI
+
+config MCDE_DISPLAY_ROTATE_180
+	bool "Rotate display content 180 degrees"
+	depends on !MCDE_DISPLAY_PANEL_DSI
 
 config MCDE_DISPLAY_AV8100
 	tristate "AV8100 HDMI/CVBS display driver"
@@ -70,7 +127,7 @@ endmenu
 
 config MCDE_DISPLAY_DPI
 	bool "Support for DPI displays within MCDE"
-	depends on FB_MCDE
+	depends on MCDE
 	default n
 	---help---
 	  Add this option to choose which DPI display driver for MCDE to include
@@ -88,9 +145,9 @@ config MCDE_DISPLAY_VUIB500_DPI
 
 endmenu
 
-config MCDE_DISPLAY_AB8500_DENC
-	tristate "AB8500 CVBS display driver"
+config MCDE_DISPLAY_LOGO
+	bool "MCDE logo"
+	default n
 	depends on FB_MCDE
-	select AB8500_DENC
-
-
+	---help---
+	  Say Y here if you want to display the logo.

@@ -133,19 +133,16 @@ struct cw1200_common;
 #define WSM_PSM_ACTIVE			(0)
 
 /* 802.11 PS mode */
-#define WSM_PSM_PS			BIT(0)
-
-/* Fast Power Save bit */
-#define WSM_PSM_FAST_PS_FLAG		BIT(7)
-
-/* Dynamic aka Fast power save */
-#define WSM_PSM_FAST_PS			(BIT(0) | BIT(7))
+#define WSM_PSM_PS			(1)
 
 /* Undetermined */
 /* Note : Undetermined status is reported when the */
 /* NULL data frame used to advertise the PM mode to */
 /* the AP at Pre or Post Background Scan is not Acknowledged */
-#define WSM_PSM_UNKNOWN			BIT(1)
+#define WSM_PSM_UNKNOWN			(2)
+
+/* Use this flag to enable the fast power-saving mode */
+#define WSM_PM_F_FAST_PSM_ENABLE	(0x80)
 
 /* Queue IDs */
 /* best effort/legacy */
@@ -172,22 +169,6 @@ struct cw1200_common;
 
 /* STBC allowed */
 #define WSM_HT_TX_STBC			(BIT(7))
-
-/* EPTA prioirty flags for BT Coex */
-/* default epta priority */
-#define WSM_EPTA_PRIORITY_DEFAULT	4
-/* use for normal data */
-#define WSM_EPTA_PRIORITY_DATA		4
-/* use for connect/disconnect/roaming*/
-#define WSM_EPTA_PRIORITY_MGT		5
-/* use for action frames */
-#define WSM_EPTA_PRIORITY_ACTION	5
-/* use for AC_VI data */
-#define WSM_EPTA_PRIORITY_VIDEO		5
-/* use for AC_VO data */
-#define WSM_EPTA_PRIORITY_VOICE		6
-/* use for EAPOL exchange */
-#define WSM_EPTA_PRIORITY_EAPOL		7
 
 /* TX status */
 /* Frame was sent aggregated */
@@ -284,9 +265,6 @@ struct cw1200_common;
 /* Macro to fetch encryption key index. */
 #define WSM_RX_STATUS_KEY_IDX(status)	(((status >> 20)) & 0x0F)
 
-/* Frame Control field starts at Frame offset + 2 */
-#define WSM_TX_2BYTES_SHIFT		(BIT(7))
-
 /* Join mode */
 /* IBSS */
 #define WSM_JOIN_MODE_IBSS		(0)
@@ -306,16 +284,7 @@ struct cw1200_common;
 
 /* Join flags */
 /* Unsynchronized */
-#define WSM_JOIN_FLAGS_UNSYNCRONIZED	BIT(0)
-/* The BSS owner is a P2P GO */
-#define WSM_JOIN_FLAGS_P2P_GO		BIT(1)
-/* Force to join BSS with the BSSID and the
- * SSID specified without waiting for beacons. The
- * ProbeForJoin parameter is ignored. */
-#define WSM_JOIN_FLAGS_FORCE		BIT(2)
-/* Give probe request/response higher
- * priority over the BT traffic */
-#define WSM_JOIN_FLAGS_PRIO		BIT(3)
+#define WSM_JOIN_FLAGS_UNSYNCRONIZED	(1)
 
 /* Key types */
 #define WSM_KEY_TYPE_WEP_DEFAULT	(0)
@@ -351,11 +320,6 @@ struct cw1200_common;
 #define WSM_RCPI_RSSI_USE_RSSI		(BIT(1))
 #define WSM_RCPI_RSSI_DONT_USE_UPPER	(BIT(2))
 #define WSM_RCPI_RSSI_DONT_USE_LOWER	(BIT(3))
-
-/* Update-ie constants */
-#define WSM_UPDATE_IE_BEACON		(BIT(0))
-#define WSM_UPDATE_IE_PROBE_RESP	(BIT(1))
-#define WSM_UPDATE_IE_PROBE_REQ		(BIT(2))
 
 /* WSM events */
 /* Error */
@@ -394,7 +358,6 @@ struct cw1200_common;
 
 /* 4.5  dot11GroupAddressesTable */
 #define WSM_MIB_ID_DOT11_GROUP_ADDRESSES_TABLE	0x0004
-#define WSM_MAX_GRP_ADDRTABLE_ENTRIES		8
 
 /* 4.6  dot11WepDefaultKeyId */
 #define WSM_MIB_ID_DOT11_WEP_DEFAULT_KEY_ID	0x0005
@@ -410,7 +373,6 @@ struct cw1200_common;
 
 /* 4.10 ArpIpAddressesTable */
 #define WSM_MIB_ID_ARP_IP_ADDRESSES_TABLE	0x1001
-#define WSM_MAX_ARP_IP_ADDRTABLE_ENTRIES	1
 
 /* 4.11 TemplateFrame */
 #define WSM_MIB_ID_TEMPLATE_FRAME		0x1002
@@ -577,13 +539,6 @@ struct wsm_hdr {
 	__le16 id;
 };
 
-#define WSM_TX_SEQ_MAX			(7)
-#define WSM_TX_SEQ(seq)			\
-		((seq & WSM_TX_SEQ_MAX) << 13)
-#define WSM_TX_LINK_ID_MAX		(0x0F)
-#define WSM_TX_LINK_ID(link_id)		\
-		((link_id & WSM_TX_LINK_ID_MAX) << 6)
-
 /* ******************************************************************** */
 /* WSM capcbility							*/
 
@@ -745,8 +700,6 @@ struct wsm_tx_confirm {
 	/* The total time in microseconds that the frame spent in */
 	/* the WLAN device before transmission was started. */
 	/* [out] */ u32 txQueueDelay;
-
-	/* [out]*/ u32 link_id;
 };
 
 /* 3.15 */
@@ -756,11 +709,11 @@ typedef void (*wsm_tx_confirm_cb) (struct cw1200_common *priv,
 /* Note that ideology of wsm_tx struct is different against the rest of
  * WSM API. wsm_hdr is /not/ a caller-adapted struct to be used as an input
  * argument for WSM call, but a prepared bytestream to be sent to firmware.
- * It is filled partly in cw1200_tx, partly in low-level WSM code.
+ * It is filled partly in cw1200_skb_to_wsm, partly in low-level WSM code.
  * Please pay attention once again: ideology is different.
  *
  * Legend:
- * - [in]: cw1200_tx must fill this field.
+ * - [in]: cw1200_skb_to_wsm must fill this field.
  * - [wsm]: the field is filled by low-level WSM.
  */
 struct wsm_tx {
@@ -826,9 +779,6 @@ struct wsm_rx {
 
 	/* Size of the frame */
 	/* [out] */ size_t frame_size;
-
-	/* Link ID */
-	/* [out] */ int link_id;
 };
 
 /* = sizeof(generic hi hdr) + sizeof(wsm hdr) */
@@ -1074,9 +1024,6 @@ struct wsm_edca_queue_params {
 	/* the access class. Overrides the global */
 	/* dot11MaxReceiveLifetime value */
 	/* [in] */ u32 maxReceiveLifetime;
-
-	/* UAPSD trigger support for the access class. */
-	/* [in] */ bool uapsdEnable;
 };
 
 struct wsm_edca_params {
@@ -1084,20 +1031,16 @@ struct wsm_edca_params {
 	struct wsm_edca_queue_params params[4];
 };
 
-#define WSM_EDCA_SET(edca, queue, aifs, cw_min, cw_max, txop, uapsd)	\
+#define WSM_EDCA_SET(edca, queue, aifs, cw_min, cw_max, txop)	\
 	do {							\
 		struct wsm_edca_queue_params *p = &(edca)->params[queue]; \
 		p->cwMin = (cw_min);				\
 		p->cwMax = (cw_max);				\
 		p->aifns = (aifs);				\
 		p->txOpLimit = (txop);				\
-		p->uapsdEnable = (uapsd);			\
 	} while (0)
 
 int wsm_set_edca_params(struct cw1200_common *priv,
-			const struct wsm_edca_params *arg);
-
-int wsm_set_uapsd_param(struct cw1200_common *priv,
 			const struct wsm_edca_params *arg);
 
 /* 3.38 */
@@ -1195,17 +1138,7 @@ struct wsm_suspend_resume {
 typedef void (*wsm_suspend_resume_cb) (struct cw1200_common *priv,
 				       struct wsm_suspend_resume *arg);
 
-/* 3.54 Update-IE request. */
-struct wsm_update_ie {
-	/* WSM_UPDATE_IE_... */
-	/* [in] */ u16 what;
-	/* [in] */ u16 count;
-	/* [in] */ u8 *ies;
-	/* [in] */ size_t length;
-};
-
-int wsm_update_ie(struct cw1200_common *priv,
-		  const struct wsm_update_ie *arg);
+/* 3.53 Update-IE request: Not implemented: not relevant. */
 
 /* 3.56 */
 struct wsm_map_link {
@@ -1269,39 +1202,7 @@ static inline int wsm_set_rcpi_rssi_threshold(struct cw1200_common *priv,
 			     sizeof(*arg));
 }
 
-struct wsm_counters_table {
-	__le32 countPlcpErrors;
-	__le32 countFcsErrors;
-	__le32 countTxPackets;
-	__le32 countRxPackets;
-	__le32 countRxPacketErrors;
-	__le32 countRxDecryptionFailures;
-	__le32 countRxMicFailures;
-	__le32 countRxNoKeyFailures;
-	__le32 countTxMulticastFrames;
-	__le32 countTxFramesSuccess;
-	__le32 countTxFrameFailures;
-	__le32 countTxFramesRetried;
-	__le32 countTxFramesMultiRetried;
-	__le32 countRxFrameDuplicates;
-	__le32 countRtsSuccess;
-	__le32 countRtsFailures;
-	__le32 countAckFailures;
-	__le32 countRxMulticastFrames;
-	__le32 countRxFramesSuccess;
-	__le32 countRxCMACICVErrors;
-	__le32 countRxCMACReplays;
-	__le32 countRxMgmtCCMPReplays;
-};
-
-static inline int wsm_get_counters_table(struct cw1200_common *priv,
-					 struct wsm_counters_table *arg)
-{
-	return wsm_read_mib(priv, WSM_MIB_ID_COUNTERS_TABLE,
-			arg, sizeof(*arg));
-}
-
-static inline int wsm_get_station_id(struct cw1200_common *priv, u8 *mac)
+static inline int wsm_get_station_id(struct cw1200_common *priv, u8 * mac)
 {
 	return wsm_read_mib(priv, WSM_MIB_ID_DOT11_STATION_ID, mac, ETH_ALEN);
 }
@@ -1323,32 +1224,6 @@ static inline int wsm_set_rx_filter(struct cw1200_common *priv,
 	if (arg->fcs)
 		val |= __cpu_to_le32(BIT(2));
 	return wsm_write_mib(priv, WSM_MIB_ID_RX_FILTER, &val, sizeof(val));
-}
-
-#define WSM_BEACON_FILTER_IE_HAS_CHANGED	BIT(0)
-#define WSM_BEACON_FILTER_IE_NO_LONGER_PRESENT	BIT(1)
-#define WSM_BEACON_FILTER_IE_HAS_APPEARED	BIT(2)
-
-struct wsm_beacon_filter_table_entry {
-	u8	ieId;
-	u8	actionFlags;
-	u8	oui[3];
-	u8	matchData[3];
-} __packed;
-
-struct wsm_beacon_filter_table {
-	__le32 numOfIEs;
-	struct wsm_beacon_filter_table_entry entry[10];
-} __packed;
-
-static inline int wsm_set_beacon_filter_table(struct cw1200_common *priv,
-					struct wsm_beacon_filter_table *ft)
-{
-	size_t size = __le32_to_cpu(ft->numOfIEs) *
-		     sizeof(struct wsm_beacon_filter_table_entry) +
-		     sizeof(__le32);
-
-	return wsm_write_mib(priv, WSM_MIB_ID_BEACON_FILTER_TABLE, ft, size);
 }
 
 struct wsm_beacon_filter_control {
@@ -1406,7 +1281,7 @@ static inline int wsm_set_template_frame(struct cw1200_common *priv,
 	u8 *p = skb_push(arg->skb, 4);
 	p[0] = arg->frame_type;
 	p[1] = arg->rate;
-	((u16 *) p)[1] = __cpu_to_le16(arg->skb->len - 4);
+	((u16 *) p)[1] = __cpu_to_le32(arg->skb->len - 4);
 	ret = wsm_write_mib(priv, WSM_MIB_ID_TEMPLATE_FRAME, p, arg->skb->len);
 	skb_pull(arg->skb, 4);
 	return ret;
@@ -1549,7 +1424,7 @@ static inline int wsm_keep_alive_period(struct cw1200_common *priv,
 					int period)
 {
 	struct wsm_keep_alive_period arg = {
-		.keepAlivePeriod = __cpu_to_le16(period),
+		.keepAlivePeriod = period,
 	};
 	return wsm_write_mib(priv, WSM_MIB_ID_KEEP_ALIVE_PERIOD,
 			&arg, sizeof(arg));
@@ -1571,51 +1446,6 @@ static inline int wsm_set_bssid_filtering(struct cw1200_common *priv,
 			&arg, sizeof(arg));
 }
 
-/* Multicat filtering - 4.5 */
-struct wsm_multicast_filter {
-	__le32 enable;
-	__le32 numOfAddresses;
-	u8 macAddress[WSM_MAX_GRP_ADDRTABLE_ENTRIES][ETH_ALEN];
-} __packed;
-
-static inline int wsm_set_multicast_filter(struct cw1200_common *priv,
-					   struct wsm_multicast_filter *fp)
-{
-	return wsm_write_mib(priv, WSM_MIB_ID_DOT11_GROUP_ADDRESSES_TABLE,
-			     fp, sizeof(*fp));
-}
-
-/* ARP IPv4 filtering - 4.10 */
-struct wsm_arp_ipv4_filter {
-	__le32 enable;
-	__be32 ipv4Address[WSM_MAX_ARP_IP_ADDRTABLE_ENTRIES];
-} __packed;
-
-static inline int wsm_set_arp_ipv4_filter(struct cw1200_common *priv,
-					  struct wsm_arp_ipv4_filter *fp)
-{
-	return wsm_write_mib(priv, WSM_MIB_ID_ARP_IP_ADDRESSES_TABLE,
-			    fp, sizeof(*fp));
-}
-
-/* P2P Power Save Mode Info - 4.31 */
-struct wsm_p2p_ps_modeinfo {
-	u8	oppPsCTWindow;
-	u8	count;
-	u8	reserved;
-	u8	dtimCount;
-	__le32	duration;
-	__le32	interval;
-	__le32	startTime;
-} __packed;
-
-static inline int wsm_set_p2p_ps_modeinfo(struct cw1200_common *priv,
-					  struct wsm_p2p_ps_modeinfo *mi)
-{
-	return wsm_write_mib(priv, WSM_MIB_ID_P2P_PS_MODE_INFO,
-			     mi, sizeof(*mi));
-}
-
 /* UseMultiTxConfMessage */
 
 static inline int wsm_use_multi_tx_conf(struct cw1200_common *priv,
@@ -1625,36 +1455,6 @@ static inline int wsm_use_multi_tx_conf(struct cw1200_common *priv,
 
 	return wsm_write_mib(priv, WSM_MIB_USE_MULTI_TX_CONF,
 			&arg, sizeof(arg));
-}
-
-
-/* 4.26 SetUpasdInformation */
-struct wsm_uapsd_info {
-	__le16 uapsdFlags;
-	__le16 minAutoTriggerInterval;
-	__le16 maxAutoTriggerInterval;
-	__le16 autoTriggerStep;
-};
-
-static inline int wsm_set_uapsd_info(struct cw1200_common *priv,
-				     struct wsm_uapsd_info *arg)
-{
-	return wsm_write_mib(priv, WSM_MIB_ID_SET_UAPSD_INFORMATION,
-				arg, sizeof(*arg));
-}
-
-/* 4.22 OverrideInternalTxRate */
-struct wsm_override_internal_txrate {
-	u8 internalTxRate;
-	u8 nonErpInternalTxRate;
-	u8 reserved[2];
-} __packed;
-
-static inline int wsm_set_override_internal_txrate(struct cw1200_common *priv,
-				     struct wsm_override_internal_txrate *arg)
-{
-	return wsm_write_mib(priv, WSM_MIB_ID_OVERRIDE_INTERNAL_TX_RATE,
-				arg, sizeof(*arg));
 }
 
 /* ******************************************************************** */

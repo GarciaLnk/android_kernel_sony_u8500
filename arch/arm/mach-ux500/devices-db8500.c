@@ -10,10 +10,10 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/gpio.h>
-#include <linux/gpio/nomadik.h>
 #include <linux/amba/bus.h>
 #include <linux/amba/pl022.h>
 #include <plat/pincfg.h>
+#include <plat/gpio-nomadik.h>
 
 #include <plat/ste_dma40.h>
 
@@ -22,9 +22,11 @@
 #include <mach/setup.h>
 #include <mach/pm.h>
 #include <video/mcde.h>
+#include <video/nova_dsilink.h>
 #include <linux/mfd/dbx500-prcmu.h>
 #include <mach/hsi.h>
 #include <mach/ste-dma40-db8500.h>
+#include <video/b2r2_blt.h>
 
 #include "pins-db8500.h"
 
@@ -58,9 +60,9 @@
 
 #define GPIO_DEVICE(block)						\
 	{								\
-		.name 		= "gpio",				\
+		.name		= "gpio",				\
 		.id		= block,				\
-		.num_resources 	= 3,					\
+		.num_resources	= 3,					\
 		.resource	= &u8500_gpio_resources[block * 3],	\
 		.dev = {						\
 			.platform_data = &u8500_gpio_data[block],	\
@@ -154,6 +156,48 @@ struct platform_device u8500_shrm_device = {
 	.resource = u8500_shrm_resources
 };
 
+static struct resource u8500_dsilink_resources[] = {
+	[0] = {
+		.name  = DSI_IO_AREA,
+		.start = U8500_DSI_LINK1_BASE,
+		.end   = U8500_DSI_LINK1_BASE + U8500_DSI_LINK_SIZE - 1,
+		.flags = IORESOURCE_MEM,
+	},
+	[1] = {
+		.name  = DSI_IO_AREA,
+		.start = U8500_DSI_LINK2_BASE,
+		.end   = U8500_DSI_LINK2_BASE + U8500_DSI_LINK_SIZE - 1,
+		.flags = IORESOURCE_MEM,
+	},
+	[2] = {
+		.name  = DSI_IO_AREA,
+		.start = U8500_DSI_LINK3_BASE,
+		.end   = U8500_DSI_LINK3_BASE + U8500_DSI_LINK_SIZE - 1,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
+struct platform_device u8500_dsilink_device[] = {
+	[0] = {
+		.name = "dsilink",
+		.id = 0,
+		.num_resources = 1,
+		.resource = &u8500_dsilink_resources[0],
+	},
+	[1] = {
+		.name = "dsilink",
+		.id = 1,
+		.num_resources = 1,
+		.resource = &u8500_dsilink_resources[1],
+	},
+	[2] = {
+		.name = "dsilink",
+		.id = 2,
+		.num_resources = 1,
+		.resource = &u8500_dsilink_resources[2],
+	},
+};
+
 static struct resource mcde_resources[] = {
 	[0] = {
 		.name  = MCDE_IO_AREA,
@@ -202,8 +246,7 @@ static int mcde_platform_set_display_clocks(void)
 	return prcmu_set_display_clocks();
 }
 
-static struct mcde_platform_data mcde_u8500_pdata = {
-	.num_dsilinks = 3,
+static struct mcde_platform_data mcde_pdata = {
 	/*
 	 * [0] = 3: 24 bits DPI: connect LSB Ch B to D[0:7]
 	 * [3] = 4: 24 bits DPI: connect MID Ch B to D[24:31]
@@ -215,8 +258,6 @@ static struct mcde_platform_data mcde_u8500_pdata = {
 	.outmux = { 3, 3, DONT_CARE, 4, 5 },
 #undef DONT_CARE
 	.syncmux = 0x00,  /* DPI channel A and B on output pins A and B resp */
-	.num_channels = 4,
-	.num_overlays = 6,
 #ifdef CONFIG_MCDE_DISPLAY_DSI
 	.regulator_vana_id = "vdddsi1v2",
 #endif
@@ -231,16 +272,40 @@ static struct mcde_platform_data mcde_u8500_pdata = {
 	.platform_set_clocks = mcde_platform_set_display_clocks,
 	.platform_enable_dsipll = mcde_platform_enable_dsipll,
 	.platform_disable_dsipll = mcde_platform_disable_dsipll,
+	/* TODO: Remove rotation buffers once ESRAM driver is completed */
+	.rotbuf1 = U8500_ESRAM_BASE + 0x20000 * 4 + 0x2000,
+	.rotbuf2 = U8500_ESRAM_BASE + 0x20000 * 4 + 0x11000,
+	.rotbufsize = 0xF000,
+	.pixelfetchwtrmrk = {MCDE_PIXFETCH_WTRMRKLVL_OVL0,
+				MCDE_PIXFETCH_WTRMRKLVL_OVL1,
+				MCDE_PIXFETCH_WTRMRKLVL_OVL2,
+				MCDE_PIXFETCH_WTRMRKLVL_OVL3,
+				MCDE_PIXFETCH_WTRMRKLVL_OVL4,
+				MCDE_PIXFETCH_WTRMRKLVL_OVL5},
 };
 
-struct platform_device u8500_mcde_device = {
+struct platform_device ux500_mcde_device = {
 	.name = "mcde",
 	.id = -1,
 	.dev = {
-		.platform_data = &mcde_u8500_pdata,
+		.platform_data = &mcde_pdata,
 	},
 	.num_resources = ARRAY_SIZE(mcde_resources),
 	.resource = mcde_resources,
+};
+
+struct platform_device ux500_b2r2_blt_device = {
+	.name	= "b2r2_blt",
+	.id	= 0,
+	.dev	= {
+		.init_name = "b2r2_blt_init",
+		.coherent_dma_mask = ~0,
+	},
+};
+
+static struct b2r2_platform_data b2r2_platform_data = {
+	.regulator_id = "vsupply",
+	.clock_id = "b2r2",
 };
 
 static struct resource b2r2_resources[] = {
@@ -258,49 +323,36 @@ static struct resource b2r2_resources[] = {
 	},
 };
 
-struct platform_device u8500_b2r2_device = {
+struct platform_device ux500_b2r2_device = {
 	.name	= "b2r2",
 	.id	= 0,
 	.dev	= {
-		.init_name = "b2r2_bus",
+		.init_name = "b2r2_core",
+		.platform_data = &b2r2_platform_data,
 		.coherent_dma_mask = ~0,
 	},
 	.num_resources	= ARRAY_SIZE(b2r2_resources),
 	.resource	= b2r2_resources,
 };
 
-/*
- * WATCHDOG
- */
-
-static struct resource u8500_wdt_resources[] = {
-	[0] = {
-		.start  = U8500_TWD_BASE,
-		.end    = U8500_TWD_BASE+0x37,
-		.flags  = IORESOURCE_MEM,
-	},
-	[1] = {
-		.start  = IRQ_LOCALWDOG,
-		.end  = IRQ_LOCALWDOG,
-		.flags  = IORESOURCE_IRQ,
-	}
-};
-
-struct platform_device u8500_wdt_device = {
-	.name           = "mpcore_wdt",
-	.id             = -1,
-	.resource       = u8500_wdt_resources,
-	.num_resources  = ARRAY_SIZE(u8500_wdt_resources),
-};
-
-struct platform_device u8500_prcmu_wdt_device = {
-	.name		= "ux500_wdt",
-	.id		= -1,
-};
 
 /*
  * HSI
  */
+#define HSI0_CAWAKE { \
+	.start = IRQ_PRCMU_HSI0, \
+	.end   = IRQ_PRCMU_HSI0, \
+	.flags = IORESOURCE_IRQ, \
+	.name = "hsi0_cawake" \
+}
+
+#define HSI0_ACWAKE { \
+	.start = 226, \
+	.end   = 226, \
+	.flags = IORESOURCE_IO, \
+	.name = "hsi0_acwake" \
+}
+
 #define HSIR_OVERRUN(num) {			    \
 	.start  = IRQ_DB8500_HSIR_CH##num##_OVRRUN, \
 	.end    = IRQ_DB8500_HSIR_CH##num##_OVRRUN, \
@@ -309,61 +361,61 @@ struct platform_device u8500_prcmu_wdt_device = {
 }
 
 #define STE_HSI_PORT0_TX_CHANNEL_CFG(n) { \
-       .dir = STEDMA40_MEM_TO_PERIPH, \
-       .high_priority = true, \
-       .mode = STEDMA40_MODE_LOGICAL, \
-       .mode_opt = STEDMA40_LCHAN_SRC_LOG_DST_LOG, \
-       .src_dev_type = STEDMA40_DEV_SRC_MEMORY, \
-       .dst_dev_type = n,\
-       .src_info.big_endian = false,\
-       .src_info.data_width = STEDMA40_WORD_WIDTH,\
-       .dst_info.big_endian = false,\
-       .dst_info.data_width = STEDMA40_WORD_WIDTH,\
+	.dir = STEDMA40_MEM_TO_PERIPH,	\
+	.high_priority = true,	\
+	.mode = STEDMA40_MODE_LOGICAL, \
+	.mode_opt = STEDMA40_LCHAN_SRC_LOG_DST_LOG, \
+	.src_dev_type = STEDMA40_DEV_SRC_MEMORY, \
+	.dst_dev_type = n,\
+	.src_info.big_endian = false,\
+	.src_info.data_width = STEDMA40_WORD_WIDTH,\
+	.dst_info.big_endian = false,\
+	.dst_info.data_width = STEDMA40_WORD_WIDTH,\
 },
 
 #define STE_HSI_PORT0_RX_CHANNEL_CFG(n) { \
-       .dir = STEDMA40_PERIPH_TO_MEM, \
-       .high_priority = true, \
-       .mode = STEDMA40_MODE_LOGICAL, \
-       .mode_opt = STEDMA40_LCHAN_SRC_LOG_DST_LOG, \
-       .src_dev_type = n,\
-       .dst_dev_type = STEDMA40_DEV_DST_MEMORY, \
-       .src_info.big_endian = false,\
-       .src_info.data_width = STEDMA40_WORD_WIDTH,\
-       .dst_info.big_endian = false,\
-       .dst_info.data_width = STEDMA40_WORD_WIDTH,\
+	.dir = STEDMA40_PERIPH_TO_MEM, \
+	.high_priority = true, \
+	.mode = STEDMA40_MODE_LOGICAL, \
+	.mode_opt = STEDMA40_LCHAN_SRC_LOG_DST_LOG, \
+	.src_dev_type = n,\
+	.dst_dev_type = STEDMA40_DEV_DST_MEMORY, \
+	.src_info.big_endian = false,\
+	.src_info.data_width = STEDMA40_WORD_WIDTH,\
+	.dst_info.big_endian = false,\
+	.dst_info.data_width = STEDMA40_WORD_WIDTH,\
 },
 
 static struct resource u8500_hsi_resources[] = {
        {
-	       .start  = U8500_HSIR_BASE,
-	       .end    = U8500_HSIR_BASE + SZ_4K - 1,
-	       .flags  = IORESOURCE_MEM,
-	       .name   = "hsi_rx_base"
+		.start  = U8500_HSIR_BASE,
+		.end    = U8500_HSIR_BASE + SZ_4K - 1,
+		.flags  = IORESOURCE_MEM,
+		.name   = "hsi_rx_base"
        },
        {
-	       .start  = U8500_HSIT_BASE,
-	       .end    = U8500_HSIT_BASE + SZ_4K - 1,
-	       .flags  = IORESOURCE_MEM,
-	       .name   = "hsi_tx_base"
+		.start  = U8500_HSIT_BASE,
+		.end    = U8500_HSIT_BASE + SZ_4K - 1,
+		.flags  = IORESOURCE_MEM,
+		.name   = "hsi_tx_base"
        },
        {
-	       .start  = IRQ_DB8500_HSIRD0,
-	       .end    = IRQ_DB8500_HSIRD0,
-	       .flags  = IORESOURCE_IRQ,
-	       .name   = "hsi_rx_irq0"
+		.start  = IRQ_DB8500_HSIRD0,
+		.end    = IRQ_DB8500_HSIRD0,
+		.flags  = IORESOURCE_IRQ,
+		.name   = "hsi_rx_irq0"
        },
        {
-	       .start  = IRQ_DB8500_HSITD0,
-	       .end    = IRQ_DB8500_HSITD0,
-	       .flags  = IORESOURCE_IRQ,
-	       .name   = "hsi_tx_irq0"
+		.start  = IRQ_DB8500_HSITD0,
+		.end    = IRQ_DB8500_HSITD0,
+		.flags  = IORESOURCE_IRQ,
+		.name   = "hsi_tx_irq0"
        },
        {
-	       .start  = IRQ_DB8500_HSIR_EXCEP,
-	       .end    = IRQ_DB8500_HSIR_EXCEP,
-	       .flags  = IORESOURCE_IRQ,
-	       .name   = "hsi_rx_excep0"
+		.start  = IRQ_DB8500_HSIR_EXCEP,
+		.end    = IRQ_DB8500_HSIR_EXCEP,
+		.flags  = IORESOURCE_IRQ,
+		.name   = "hsi_rx_excep0"
        },
        HSIR_OVERRUN(0),
        HSIR_OVERRUN(1),
@@ -373,6 +425,8 @@ static struct resource u8500_hsi_resources[] = {
        HSIR_OVERRUN(5),
        HSIR_OVERRUN(6),
        HSIR_OVERRUN(7),
+       HSI0_CAWAKE,
+       HSI0_ACWAKE,
 };
 
 #ifdef CONFIG_STE_DMA40
@@ -393,52 +447,39 @@ static struct stedma40_chan_cfg ste_hsi_port0_dma_rx_cfg[] = {
 
 static struct ste_hsi_port_cfg ste_hsi_port0_cfg = {
 #ifdef CONFIG_STE_DMA40
-       .dma_filter = stedma40_filter,
-       .dma_tx_cfg = ste_hsi_port0_dma_tx_cfg,
-       .dma_rx_cfg = ste_hsi_port0_dma_rx_cfg
+	.dma_filter = stedma40_filter,
+	.dma_tx_cfg = ste_hsi_port0_dma_tx_cfg,
+	.dma_rx_cfg = ste_hsi_port0_dma_rx_cfg
 #endif
 };
 
 struct ste_hsi_platform_data u8500_hsi_platform_data = {
-       .num_ports = 1,
-       .use_dma = 1,
-       .port_cfg = &ste_hsi_port0_cfg,
+	.num_ports = 1,
+	.use_dma = 1,
+	.port_cfg = &ste_hsi_port0_cfg,
 };
 
 struct platform_device u8500_hsi_device = {
-       .dev = {
+	.dev = {
 		.platform_data = &u8500_hsi_platform_data,
-       },
-       .name = "ste_hsi",
-       .id = 0,
-       .resource = u8500_hsi_resources,
-       .num_resources = ARRAY_SIZE(u8500_hsi_resources)
+	},
+	.name = "ste_hsi",
+	.id = 0,
+	.resource = u8500_hsi_resources,
+	.num_resources = ARRAY_SIZE(u8500_hsi_resources)
 };
 
 /*
  * Thermal Sensor
  */
 
-static struct resource u8500_thsens_resources[] = {
-	{
-		.name = "IRQ_HOTMON_LOW",
-		.start  = IRQ_PRCMU_HOTMON_LOW,
-		.end    = IRQ_PRCMU_HOTMON_LOW,
-		.flags  = IORESOURCE_IRQ,
-	},
-	{
-		.name = "IRQ_HOTMON_HIGH",
-		.start  = IRQ_PRCMU_HOTMON_HIGH,
-		.end    = IRQ_PRCMU_HOTMON_HIGH,
-		.flags  = IORESOURCE_IRQ,
-	},
+
+/* Mali GPU platform device */
+struct platform_device db8500_mali_gpu_device = {
+	.name = "mali",
+	.id = 0,
 };
 
-struct platform_device u8500_thsens_device = {
-	.name           = "dbx500_temp",
-	.resource       = u8500_thsens_resources,
-	.num_resources  = ARRAY_SIZE(u8500_thsens_resources),
-};
 
 struct resource keypad_resources[] = {
 	[0] = {

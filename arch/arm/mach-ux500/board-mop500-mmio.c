@@ -14,12 +14,12 @@
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/gpio.h>
-#include <linux/gpio/nomadik.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/regulator/consumer.h>
 #include <linux/vmalloc.h>
 #include <asm/mach-types.h>
+#include <plat/gpio-nomadik.h>
 #include <plat/pincfg.h>
 #include <mach/gpio.h>
 #include <mach/devices.h>
@@ -28,7 +28,7 @@
 #include "pins-db8500.h"
 #include "pins.h"
 #include "board-mop500.h"
-#include "../drivers/staging/mmio/mmio.h"
+#include <linux/mmio.h>
 
 static pin_cfg_t i2c2_pins[] = {
 	GPIO8_I2C2_SDA,
@@ -189,7 +189,7 @@ static int mmio_pin_cfg_init(struct mmio_platform_data *pdata)
 	extra->xshutdown_pins[SECONDARY_CAMERA].udelay = 500;
 
 	/* Update GPIO mappings according to board */
-	if (machine_is_hrefv60()) {
+	if (machine_is_hrefv60() || machine_is_u8520() || machine_is_u9540()) {
 		extra->xenon_charge = HREFV60_MMIO_XENON_CHARGE;
 		xshutdown_host[SECONDARY_CAMERA] = GPIO140_GPIO;
 		xshutdown_fw[SECONDARY_CAMERA] = GPIO140_IP_GPIO7;

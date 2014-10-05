@@ -62,8 +62,6 @@
 #define SERIAL_AMBA_MINOR	64
 #define SERIAL_AMBA_NR		UART_NR
 
-#define AMBA_ISR_PASS_LIMIT	256
-
 #define UART_DR_ERROR	(UART011_DR_OE | UART011_DR_BE | \
 						UART011_DR_PE | UART011_DR_FE)
 #define UART_DUMMY_DR_RX	(1 << 16)
@@ -100,29 +98,6 @@ static const u32 backup_regs[] = {
 	UART011_IMSC,
 };
 
-#define UART_WA_SAVE_NR 14
-
-static void pl011_lockup_wa(unsigned long data);
-static const u32 uart_wa_reg[UART_WA_SAVE_NR] = {
-	ST_UART011_DMAWM,
-	ST_UART011_TIMEOUT,
-	ST_UART011_LCRH_RX,
-	UART011_IBRD,
-	UART011_FBRD,
-	ST_UART011_LCRH_TX,
-	UART011_IFLS,
-	ST_UART011_XFCR,
-	ST_UART011_XON1,
-	ST_UART011_XON2,
-	ST_UART011_XOFF1,
-	ST_UART011_XOFF2,
-	UART011_CR,
-	UART011_IMSC
-};
-
-static u32 uart_wa_regdata[UART_WA_SAVE_NR];
-static DECLARE_TASKLET(pl011_lockup_tlet, pl011_lockup_wa, 0);
-
 /* There is by now at least one vendor with differing details, so handle it */
 struct vendor_data {
 	unsigned int		ifls;
@@ -132,6 +107,7 @@ struct vendor_data {
 	bool			oversampling;
 	bool			interrupt_may_hang;   /* vendor-specific */
 	bool			dma_threshold;
+	bool			cts_event_workaround;
 };
 
 static struct vendor_data vendor_arm = {
@@ -141,6 +117,7 @@ static struct vendor_data vendor_arm = {
 	.lcrh_rx		= UART011_LCRH,
 	.oversampling		= false,
 	.dma_threshold		= false,
+	.cts_event_workaround = false,
 };
 
 static struct vendor_data vendor_st = {
@@ -151,6 +128,7 @@ static struct vendor_data vendor_st = {
 	.oversampling		= true,
 	.interrupt_may_hang	= true,
 	.dma_threshold		= true,
+	.cts_event_workaround = true,
 };
 
 static struct uart_amba_port *amba_ports[UART_NR];
@@ -193,6 +171,7 @@ struct uart_amba_port {
 	unsigned int		ifls;		/* vendor-specific */
 	unsigned int		lcrh_tx;	/* vendor-specific */
 	unsigned int		lcrh_rx;	/* vendor-specific */
+	unsigned int		old_cr;		/* state during shutdown */
 	bool			autorts;
 #ifdef CONFIG_SERIAL_AMBA_PL011_CLOCK_CONTROL
 	enum pl011_clk_states	clk_state;	/* actual clock state */
@@ -1084,69 +1063,6 @@ static inline bool pl011_dma_rx_running(struct uart_amba_port *uap)
 #define pl011_dma_flush_buffer	NULL
 #endif
 
-
-/*
- * pl011_lockup_wa
- * This workaround aims to break the deadlock situation
- * when after long transfer over uart in hardware flow
- * control, uart interrupt registers cannot be cleared.
- * Hence uart transfer gets blocked.
- *
- * It is seen that during such deadlock condition ICR
- * don't get cleared even on multiple write. This leads
- * pass_counter to decrease and finally reach zero. This
- * can be taken as trigger point to run this UART_BT_WA.
- *
- */
-static void pl011_lockup_wa(unsigned long data)
-{
-	struct uart_amba_port *uap = amba_ports[0];
-	void __iomem *base = uap->port.membase;
-	struct circ_buf *xmit = &uap->port.state->xmit;
-	struct tty_struct *tty = uap->port.state->port.tty;
-	int buf_empty_retries = 200;
-	int loop;
-
-	/* Stop HCI layer from submitting data for tx */
-	tty->hw_stopped = 1;
-	while (!uart_circ_empty(xmit)) {
-		if (buf_empty_retries-- == 0)
-			break;
-		udelay(100);
-	}
-
-	/* Backup registers */
-	for (loop = 0; loop < UART_WA_SAVE_NR; loop++)
-		uart_wa_regdata[loop] = readl(base + uart_wa_reg[loop]);
-
-	/* Disable UART so that FIFO data is flushed out */
-	writew(0x00, uap->port.membase + UART011_CR);
-
-	/* Soft reset UART module */
-	if (uap->port.dev->platform_data) {
-		struct amba_pl011_data *plat;
-
-		plat = uap->port.dev->platform_data;
-		if (plat->reset)
-			plat->reset();
-	}
-
-	/* Restore registers */
-	for (loop = 0; loop < UART_WA_SAVE_NR; loop++)
-		writew(uart_wa_regdata[loop] ,
-				uap->port.membase + uart_wa_reg[loop]);
-
-	/* Initialise the old status of the modem signals */
-	uap->old_status = readw(uap->port.membase + UART01x_FR) &
-		UART01x_FR_MODEM_ANY;
-
-	if (readl(base + UART011_MIS) & 0x2)
-		printk(KERN_EMERG "UART_BT_WA: ***FAILED***\n");
-
-	/* Start Tx/Rx */
-	tty->hw_stopped = 0;
-}
-
 static void __pl011_startup(struct uart_amba_port *uap)
 {
 	unsigned int cr;
@@ -1275,7 +1191,9 @@ static void pl011_clock_on(struct uart_port *port)
 
 	switch (uap->clk_state) {
 	case PL011_CLK_OFF:
+		spin_unlock_irqrestore(&port->lock, flags);
 		clk_enable(uap->clk);
+		spin_lock_irqsave(&port->lock, flags);
 		if (!uart_console(&uap->port) && uap->regulator) {
 			spin_unlock_irqrestore(&port->lock, flags);
 			regulator_enable(uap->regulator);
@@ -1284,7 +1202,7 @@ static void pl011_clock_on(struct uart_port *port)
 		}
 		/* fallthrough */
 	case PL011_CLK_REQUEST_OFF:
-		cancel_delayed_work(&uap->clk_off_work);
+		__cancel_delayed_work(&uap->clk_off_work);
 		uap->clk_state = PL011_CLK_ON;
 		break;
 	default:
@@ -1299,7 +1217,7 @@ static void pl011_clock_check(struct uart_amba_port *uap)
 	/* Reshedule work during off request  */
 	if (uap->clk_state == PL011_CLK_REQUEST_OFF)
 		/* New TX - restart work */
-		if (cancel_delayed_work(&uap->clk_off_work))
+		if (__cancel_delayed_work(&uap->clk_off_work))
 			schedule_delayed_work(&uap->clk_off_work,
 						uap->clk_off_delay);
 }
@@ -1516,44 +1434,52 @@ static irqreturn_t pl011_int(int irq, void *dev_id)
 {
 	struct uart_amba_port *uap = dev_id;
 	unsigned long flags;
-	unsigned int status, pass_counter = AMBA_ISR_PASS_LIMIT;
-	int handled = 0;
+	unsigned int status;
+	unsigned int dummy_read;
 
 	spin_lock_irqsave(&uap->port.lock, flags);
 
 	status = readw(uap->port.membase + UART011_MIS);
-	if (status) {
-		do {
-			writew(status & ~(UART011_TXIS|UART011_RTIS|
-					  UART011_RXIS),
-				uap->port.membase + UART011_ICR);
 
-			if (status & (UART011_RTIS|UART011_RXIS)) {
-				if (pl011_dma_rx_running(uap))
-					pl011_dma_rx_irq(uap);
-				else
-					pl011_rx_chars(uap);
-			}
-			if (status & (UART011_DSRMIS|UART011_DCDMIS|
-				      UART011_CTSMIS|UART011_RIMIS))
-				pl011_modem_status(uap);
-			if (status & UART011_TXIS)
-				pl011_tx_chars(uap);
-
-			if (pass_counter-- == 0) {
-				if (uap->interrupt_may_hang)
-					tasklet_schedule(&pl011_lockup_tlet);
-				break;
-			}
-
-			status = readw(uap->port.membase + UART011_MIS);
-		} while (status != 0);
-		handled = 1;
+	if (status == 0) {
+		spin_unlock_irqrestore(&uap->port.lock, flags);
+		return IRQ_RETVAL(0);
 	}
+	do {
+		if (uap->vendor->cts_event_workaround) {
+			/* workaround to make sure that all bits are unlocked */
+			writew(0x00, uap->port.membase + UART011_ICR);
+			/*
+			 *  WA: introduce 26ns(1 uart clk) delay before W1C;
+			 * single apb access will incur 2 pclk(133.12Mhz) delay,
+			 * so add 2 dummy reads
+		     */
+			dummy_read = readw(uap->port.membase + UART011_ICR);
+			dummy_read = readw(uap->port.membase + UART011_ICR);
+		}
+		writew(status & ~(UART011_TXIS|UART011_RTIS|
+			UART011_RXIS), uap->port.membase + UART011_ICR);
+
+		if (status & (UART011_RTIS | UART011_RXIS)) {
+			if (pl011_dma_rx_running(uap))
+				pl011_dma_rx_irq(uap);
+			else
+				pl011_rx_chars(uap);
+		}
+
+		if (status & (UART011_DSRMIS | UART011_DCDMIS |
+			UART011_CTSMIS | UART011_RIMIS))
+			pl011_modem_status(uap);
+
+		if (status & UART011_TXIS)
+			pl011_tx_chars(uap);
+
+		status = readw(uap->port.membase + UART011_MIS);
+	} while (status != 0);
 
 	spin_unlock_irqrestore(&uap->port.lock, flags);
 
-	return IRQ_RETVAL(handled);
+	return IRQ_RETVAL(1);
 }
 
 static unsigned int pl01x_tx_empty(struct uart_port *port)
@@ -1669,6 +1595,15 @@ static int pl011_startup(struct uart_port *port)
 	uap->port.uartclk = clk_get_rate(uap->clk);
 
 	/*
+	 * Clear previous interrupts before installing interrupt handler
+	 */
+	spin_lock_irq(&uap->port.lock);
+	uap->im = 0;
+	writew(uap->im, uap->port.membase + UART011_IMSC);
+	writew(0xffff, uap->port.membase + UART011_ICR);
+	spin_unlock_irq(&uap->port.lock);
+
+	/*
 	 * Allocate the IRQ
 	 */
 	retval = request_irq(uap->port.irq, pl011_int, 0, "uart-pl011", uap);
@@ -1677,7 +1612,9 @@ static int pl011_startup(struct uart_port *port)
 
 	__pl011_startup(uap);
 
-	cr = UART01x_CR_UARTEN | UART011_CR_RXE | UART011_CR_TXE;
+	/* restore RTS and DTR */
+	cr = uap->old_cr & (UART011_CR_RTS | UART011_CR_DTR);
+	cr |= UART01x_CR_UARTEN | UART011_CR_RXE | UART011_CR_TXE;
 	writew(cr, uap->port.membase + UART011_CR);
 
 	/* Clear pending error interrupts */
@@ -1734,6 +1671,7 @@ static void pl011_shutdown_channel(struct uart_amba_port *uap,
 static void pl011_shutdown(struct uart_port *port)
 {
 	struct uart_amba_port *uap = (struct uart_amba_port *)port;
+	unsigned int cr;
 
 	/*
 	 * disable all interrupts
@@ -1752,11 +1690,16 @@ static void pl011_shutdown(struct uart_port *port)
 	free_irq(uap->port.irq, uap);
 
 	/*
-	 * disable the port
+	 * disable the port. It should not disable RTS and DTR.
+	 * Also RTS and DTR state should be preserved to restore
+	 * it during startup().
 	 */
 	uap->autorts = false;
-	writew(UART01x_CR_UARTEN | UART011_CR_TXE,
-		uap->port.membase + UART011_CR);
+	cr = readw(uap->port.membase + UART011_CR);
+	uap->old_cr = cr;
+	cr &= UART011_CR_RTS | UART011_CR_DTR;
+	cr |= UART01x_CR_UARTEN | UART011_CR_TXE;
+	writew(cr, uap->port.membase + UART011_CR);
 
 	/*
 	 * disable break condition and fifos
@@ -1823,6 +1766,15 @@ pl011_set_termios(struct uart_port *port, struct ktermios *termios,
 	unsigned int lcr_h, old_cr;
 	unsigned long flags;
 	unsigned int baud, quot, clkdiv;
+	int fbrd_offset = 0;
+
+	if ((port->line == 0) &&
+	    ((termios->c_ispeed == 4800000) ||
+		 (termios->c_ospeed == 4800000))) {
+		printk(KERN_WARNING
+		"this baud need 2 Stop Bit WA at both the ends, not handled here\n");
+		return;
+	}
 
 	if (uap->vendor->oversampling)
 		clkdiv = 8;
@@ -1834,16 +1786,29 @@ pl011_set_termios(struct uart_port *port, struct ktermios *termios,
 	 * B0 hangup !!!
 	 */
 	pl011_clock_control(port, termios, old);
-	/*
-	 * Ask the core to calculate the divisor for us.
-	 */
-	baud = uart_get_baud_rate(port, termios, old, 0,
-				  port->uartclk / clkdiv);
+	/* FIXME: arbitrary baud support */
+	if ((port->line == 0) &&
+		((termios->c_ispeed > 4000000) ||
+		 (termios->c_ospeed > 4000000)))
+		baud = termios->c_ispeed;
+	else
+	/* Ask the core to calculate the divisor for us. */
+		baud = uart_get_baud_rate(port, termios, old, 0,
+			port->uartclk / clkdiv);
 
 	if (baud > port->uartclk/16)
 		quot = DIV_ROUND_CLOSEST(port->uartclk * 8, baud);
 	else
 		quot = DIV_ROUND_CLOSEST(port->uartclk * 4, baud);
+
+	/* workaround to manipulate FBRD to avoid delayed sampling of start bit,
+	 * else causes data byte corruption
+	 */
+	if (baud == 3000000)
+		fbrd_offset = -1;
+	else if ((baud == 3250000) ||
+			 (baud == 4000000) || (baud == 4050000))
+			fbrd_offset = -2;
 
 	switch (termios->c_cflag & CSIZE) {
 	case CS5:
@@ -1930,12 +1895,13 @@ pl011_set_termios(struct uart_port *port, struct ktermios *termios,
 	}
 
 	/* Set baud rate */
-	writew(quot & 0x3f, port->membase + UART011_FBRD);
+	writew((quot + fbrd_offset) & 0x3f, port->membase + UART011_FBRD);
 	writew(quot >> 6, port->membase + UART011_IBRD);
 
 	/*
 	 * ----------v----------v----------v----------v-----
-	 * NOTE: MUST BE WRITTEN AFTER UARTLCR_M & UARTLCR_L
+	 * NOTE: lcrh_tx and lcrh_rx MUST BE WRITTEN AFTER
+	 * UARTLCR_M(IBRD)  & UARTLCR_L(FBRD).
 	 * ----------^----------^----------^----------^-----
 	 */
 	writew(lcr_h, port->membase + uap->lcrh_rx);
@@ -2044,8 +2010,18 @@ pl011_console_write(struct console *co, const char *s, unsigned int count)
 {
 	struct uart_amba_port *uap = amba_ports[co->index];
 	unsigned int status, old_cr, new_cr;
+	unsigned long flags;
+	int locked = 1;
 
 	clk_enable(uap->clk);
+
+	local_irq_save(flags);
+	if (uap->port.sysrq)
+		locked = 0;
+	else if (oops_in_progress)
+		locked = spin_trylock(&uap->port.lock);
+	else
+		spin_lock(&uap->port.lock);
 
 	/*
 	 *	First save the CR then disable the interrupts
@@ -2065,6 +2041,10 @@ pl011_console_write(struct console *co, const char *s, unsigned int count)
 		status = readw(uap->port.membase + UART01x_FR);
 	} while (status & UART01x_FR_BUSY);
 	writew(old_cr, uap->port.membase + UART011_CR);
+
+	if (locked)
+		spin_unlock(&uap->port.lock);
+	local_irq_restore(flags);
 
 	clk_disable(uap->clk);
 }
@@ -2152,6 +2132,13 @@ static struct console amba_console = {
 	.data		= &amba_reg,
 };
 
+static int __init pl011_console_init(void)
+{
+	register_console(&amba_console);
+	return 0;
+}
+console_initcall(pl011_console_init);
+
 #define AMBA_CONSOLE	(&amba_console)
 #else
 #define AMBA_CONSOLE	NULL
@@ -2210,6 +2197,7 @@ static int pl011_probe(struct amba_device *dev, const struct amba_id *id)
 	uap->ifls = vendor->ifls;
 	uap->lcrh_rx = vendor->lcrh_rx;
 	uap->lcrh_tx = vendor->lcrh_tx;
+	uap->old_cr = 0;
 	uap->fifosize = vendor->fifosize;
 	uap->interrupt_may_hang = vendor->interrupt_may_hang;
 	uap->port.dev = &dev->dev;

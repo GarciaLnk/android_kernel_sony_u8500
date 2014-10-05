@@ -456,6 +456,9 @@ not_relocated:	mov	r0, #0
 		mov	r3, r7
 		bl	decompress_kernel
 		bl	cache_clean_flush
+#ifdef CONFIG_OUTER_CACHE
+		bl      inv_outercache_all_ways
+#endif
 		bl	cache_off
 		mov	r0, #0			@ must be zero
 		mov	r1, r7			@ restore architecture number
@@ -480,6 +483,27 @@ params:		ldr	r0, =0x10000100		@ params_phys for RPC
 		mov	pc, lr
 		.ltorg
 		.align
+#endif
+
+#ifdef CONFIG_OUTER_CACHE
+#ifdef CONFIG_ARCH_U8500
+#define PL310_INV_ALL_WAYS 0xA04127FC
+/* Invalidate all ways of L2 cache PL310 */
+		.align  5
+inv_outercache_all_ways:
+		mov r2, #0xFF                   @ clean & invalidate L2 cache
+		ldr r1, =PL310_INV_ALL_WAYS
+		str r2, [r1]
+outer_cache_loop:
+		ldr r2, [r1]
+		teq r2, #0
+		bne outer_cache_loop
+		mov pc, lr
+#else
+		.align  5
+inv_outercache_all_ways:
+		mov pc, lr
+#endif
 #endif
 
 /*
@@ -763,6 +787,8 @@ proc_types:
 @		b	__arm6_mmu_cache_off
 @		b	__armv3_mmu_cache_flush
 
+#if !defined(CONFIG_CPU_V7)
+		/* This collides with some V7 IDs, preventing correct detection */
 		.word	0x00000000		@ old ARM ID
 		.word	0x0000f000
 		mov	pc, lr
@@ -771,6 +797,7 @@ proc_types:
  THUMB(		nop				)
 		mov	pc, lr
  THUMB(		nop				)
+#endif
 
 		.word	0x41007000		@ ARM7/710
 		.word	0xfff8fe00

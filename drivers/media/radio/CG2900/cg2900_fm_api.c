@@ -15,7 +15,14 @@
 #include <linux/kthread.h>
 #include <linux/kernel.h>
 #include <linux/mutex.h>
+#include "cg2900.h"
 #include "cg2900_fm_driver.h"
+
+#define CG2910_FM_LUT_INFO_FILE "FM_FW_CG2910_1_0_P1_4_lut_info.fw"
+#define CG2910_FM_PROG_INFO_FILE "FM_FW_CG2910_1_0_P1_4_prog_info.fw"
+#define CG2910_LUT_IDX		0
+#define CG2910_PROG_IDX		1
+#define CG2910_MAX_FILES_DL	2
 
 #define CG2900_FM_BT_SRC_COEFF_INFO_FILE "cg2900_fm_bt_src_coeff_info.fw"
 #define CG2900_FM_EXT_SRC_COEFF_INFO_FILE "cg2900_fm_ext_src_coeff_info.fw"
@@ -190,9 +197,131 @@ error:
 	return file_found;
 }
 
+
+/**
+ * cg2910_fm_load_firmware() - Loads the FM lut and
+ * Program firmware files for CG2910
+ *
+ * @device: Pointer to char device requesting the operation.
+ *
+ * Returns:
+ *  0, if firmware download is successful
+ *  -ENOENT, file not found.
+ *  -ENOMEM, out of memory
+ */
+static int cg2910_fm_load_firmware(
+			struct device *device
+			)
+{
+	int err;
+	bool file_found;
+	int result = 0;
+	const struct firmware *fm_fw_info[2];
+	const struct firmware *fm_firmware[2];
+	char *fm_fw_file_name = NULL;
+	int loopi = 0;
+
+	FM_INFO_REPORT("+cg2910_fm_load_firmware");
+	fm_fw_info[CG2910_LUT_IDX] = NULL;
+	fm_fw_info[CG2910_PROG_IDX] = NULL;
+	fm_firmware[CG2910_LUT_IDX] = NULL;
+	fm_firmware[CG2910_PROG_IDX] = NULL;
+
+	/* Open fm_fw_info lut file. */
+	err = request_firmware(&fm_fw_info[CG2910_LUT_IDX],
+			CG2910_FM_LUT_INFO_FILE, device);
+	if (err) {
+		FM_ERR_REPORT("cg2910_fm_load_firmware: "
+				"Couldn't get fm_fw_info lut file");
+		result = -ENOENT;
+		goto error;
+	}
+
+	/* Open fm_fw_info prog file. */
+	err = request_firmware(&fm_fw_info[CG2910_PROG_IDX],
+			CG2910_FM_PROG_INFO_FILE, device);
+	if (err) {
+		FM_ERR_REPORT("cg2910_fm_load_firmware: "
+				"Couldn't get fm_fw_info prog file");
+		result = -ENOENT;
+		goto error;
+	}
+
+	fm_fw_file_name = kmalloc(CG2900_FM_FILENAME_MAX,
+			GFP_KERNEL);
+	if (fm_fw_file_name == NULL) {
+		FM_ERR_REPORT("cg2910_fm_load_firmware: "
+				"Couldn't allocate memory for "
+				"fm_fw_file_name");
+		result = -ENOMEM;
+		goto error;
+	}
+
+	/* Put a loop for downloading lut and prog */
+	for (loopi = 0; loopi < CG2910_MAX_FILES_DL; loopi++) {
+		/*
+		 * Now we have the fm_fw_info file. See if we can
+		 * find the right fm_fw_file_name file as well
+		 */
+		file_found = cg2900_fm_get_file_to_load(fm_fw_info[loopi],
+				&fm_fw_file_name);
+
+		if (!file_found) {
+			FM_ERR_REPORT("cg2910_fm_load_firmware: "
+					"Couldn't find fm_fw_file_name file!! "
+					"Major error!!!");
+			result = -ENOENT;
+			goto error;
+		}
+
+		/*
+		 * OK. Now it is time to download the firmware
+		 * First download lut file & then prog
+		 */
+		err = request_firmware(&fm_firmware[loopi],
+				fm_fw_file_name, device);
+		if (err < 0) {
+			FM_ERR_REPORT("cg2910_fm_load_firmware: "
+					"Couldn't get fm_firmware"
+					" file, err = %d", err);
+			result = -ENOENT;
+			goto error;
+		}
+
+		FM_INFO_REPORT("cg2910_fm_load_firmware: "
+				"Downloading %s of %d bytes",
+				fm_fw_file_name, fm_firmware[loopi]->size);
+		if (fmd_send_fm_firmware((u8 *) fm_firmware[loopi]->data,
+				fm_firmware[loopi]->size)) {
+			FM_ERR_REPORT("cg2910_fm_load_firmware: Error in "
+					"downloading %s", fm_fw_file_name);
+			result = -ENOENT;
+			goto error;
+		}
+	}
+
+error:
+	/* Release fm_fw_info lut and prog file */
+	if (fm_fw_info[CG2910_LUT_IDX])
+		release_firmware(fm_fw_info[CG2910_LUT_IDX]);
+	if (fm_fw_info[CG2910_PROG_IDX])
+		release_firmware(fm_fw_info[CG2910_PROG_IDX]);
+
+	if (fm_firmware[CG2910_LUT_IDX])
+		release_firmware(fm_firmware[CG2910_LUT_IDX]);
+	if (fm_firmware[CG2910_PROG_IDX])
+		release_firmware(fm_firmware[CG2910_PROG_IDX]);
+
+	/* Free Allocated memory */
+	kfree(fm_fw_file_name);
+	FM_DEBUG_REPORT("-cg2910_fm_load_firmware: returning %d",
+			result);
+	return result;
+}
+
 /**
  * cg2900_fm_load_firmware() - Loads the FM Coeffecients and F/W file(s)
- *
+ * for CG2900
  * @device: Pointer to char device requesting the operation.
  *
  * Returns:
@@ -585,6 +714,24 @@ error:
 }
 
 /**
+ * cg2900_fm_check_rds_status()- Checks whether RDS was On previously
+ *
+ * This method is called on receiving interrupt for Seek Completion,
+ * Scan completion and Block Scan completion. It will check whether RDS
+ * was forcefully disabled before the above operations started and if the
+ * previous RDS state was true, then RDS will be enabled back
+ */
+static void cg2900_fm_check_rds_status(void)
+{
+	FM_INFO_REPORT("cg2900_fm_check_rds_status");
+	if (fm_prev_rds_status) {
+		/* Restart RDS if it was active previously */
+		cg2900_fm_rds_on();
+		fm_prev_rds_status = false;
+	}
+}
+
+/**
  * cg2900_fm_driver_callback()- Callback function indicating the event.
  *
  * This callback function is called on receiving irpt_CommandSucceeded,
@@ -631,6 +778,7 @@ static void cg2900_fm_driver_callback(
 		break;
 	case FMD_EVENT_SEEK_COMPLETED:
 		FM_DEBUG_REPORT("FMD_EVENT_SEEK_COMPLETED");
+		cg2900_fm_check_rds_status();
 		skb = alloc_skb(SKB_FM_INTERRUPT_DATA,
 			GFP_KERNEL);
 		if (!skb) {
@@ -645,6 +793,7 @@ static void cg2900_fm_driver_callback(
 		break;
 	case FMD_EVENT_SCAN_BAND_COMPLETED:
 		FM_DEBUG_REPORT("FMD_EVENT_SCAN_BAND_COMPLETED");
+		cg2900_fm_check_rds_status();
 		skb = alloc_skb(SKB_FM_INTERRUPT_DATA,
 			GFP_KERNEL);
 		if (!skb) {
@@ -659,6 +808,7 @@ static void cg2900_fm_driver_callback(
 		break;
 	case FMD_EVENT_BLOCK_SCAN_COMPLETED:
 		FM_DEBUG_REPORT("FMD_EVENT_BLOCK_SCAN_COMPLETED");
+		cg2900_fm_check_rds_status();
 		skb = alloc_skb(SKB_FM_INTERRUPT_DATA,
 			GFP_KERNEL);
 		if (!skb) {
@@ -830,6 +980,7 @@ int cg2900_fm_init(void)
 	fm_event = CG2900_EVENT_NO_EVENT;
 	fm_state = CG2900_FM_STATE_INITIALIZED;
 	fm_mode = CG2900_FM_IDLE_MODE;
+	fm_prev_rds_status = false;
 
 error:
 	FM_DEBUG_REPORT("cg2900_fm_init: returning %d",
@@ -884,10 +1035,31 @@ int cg2900_fm_switch_on(
 		goto error;
 	}
 
-	/* Now Download the Coefficient Files and FM Firmware */
-	if (cg2900_fm_load_firmware(device) != 0) {
+	if (version_info.revision == CG2910_PG1_REV
+			|| version_info.revision == CG2910_PG1_05_REV
+			|| version_info.revision == CG2910_PG2_REV
+			|| version_info.revision == CG2905_PG1_05_REV
+			|| version_info.revision == CG2905_PG2_REV) {
+		/* Now Download CG2910 lut and program Firmware files */
+		if (cg2910_fm_load_firmware(device) != 0) {
+			FM_ERR_REPORT("cg2900_fm_switch_on: "
+				"Error in downloading firmware for CG2910/05");
+			result = -EINVAL;
+			goto error;
+		}
+	} else if (version_info.revision == CG2900_PG1_REV
+			|| version_info.revision == CG2900_PG2_REV
+			|| version_info.revision == CG2900_PG1_SPECIAL_REV) {
+		/* Now Download the Coefficient Files and FM Firmware */
+		if (cg2900_fm_load_firmware(device) != 0) {
+			FM_ERR_REPORT("cg2900_fm_switch_on: "
+					"Error in downloading firmware for CG2900");
+			result = -EINVAL;
+			goto error;
+		}
+	} else {
 		FM_ERR_REPORT("cg2900_fm_switch_on: "
-			"Error in downloading firmware");
+				"Unsupported Chip revision");
 		result = -EINVAL;
 		goto error;
 	}
@@ -1162,6 +1334,30 @@ int cg2900_fm_set_rx_default_settings(
 		result = -EINVAL;
 		goto error;
 	}
+	if (enable_stereo) {
+		/* Set the Stereo Blending RSSI control */
+		result = fmd_rx_set_stereo_ctrl_blending_rssi(
+			STEREO_BLENDING_MIN_RSSI,
+			STEREO_BLENDING_MAX_RSSI);
+	}
+	if (0 != result) {
+		FM_ERR_REPORT("cg2900_fm_set_rx_default_settings: "
+			"fmd_rx_set_stereo_ctrl_blending_rssi "
+			"failed %d", (unsigned int)result);
+		result = -EINVAL;
+		goto error;
+	}
+
+	/* Set RDS Group rejection Off */
+	result = fmd_rx_set_rds_group_rejection(
+		FMD_RDS_GROUP_REJECTION_OFF);
+	if (0 != result) {
+		FM_ERR_REPORT("cg2900_fm_set_rx_default_settings: "
+			"fmd_rx_set_rds_group_rejection "
+			"failed %d", (unsigned int)result);
+		result = -EINVAL;
+		goto error;
+	}
 
 	/* Remove all Interrupt from the queue */
 	skb_queue_purge(&fm_interrupt_queue);
@@ -1185,17 +1381,22 @@ int cg2900_fm_set_rx_default_settings(
 		goto error;
 	}
 
-	/* Set the Analog Out Volume to Max */
-	vol_in_percentage = (u8)
-	    (((u16) (MAX_ANALOG_VOLUME) * 100)
-	     / MAX_ANALOG_VOLUME);
-	result = fmd_set_volume(vol_in_percentage);
-	if (0 != result) {
-		FM_ERR_REPORT("cg2900_fm_switch_on: "
-			      "FMRSetVolume failed %x",
-			      (unsigned int)result);
-		result = -EINVAL;
-		goto error;
+	/* Currently, not supported for CG2905/10 */
+	if (version_info.revision == CG2900_PG1_REV
+			|| version_info.revision == CG2900_PG2_REV
+			|| version_info.revision == CG2900_PG1_SPECIAL_REV) {
+		/* Set the Analog Out Volume to Max */
+		vol_in_percentage = (u8)
+			(((u16) (MAX_ANALOG_VOLUME) * 100)
+			/ MAX_ANALOG_VOLUME);
+		result = fmd_set_volume(vol_in_percentage);
+		if (0 != result) {
+			FM_ERR_REPORT("cg2900_fm_switch_on: "
+					"FMRSetVolume failed %x",
+					(unsigned int)result);
+			result = -EINVAL;
+			goto error;
+		}
 	}
 
 error:
@@ -1473,6 +1674,7 @@ int cg2900_fm_search_up_freq(void)
 	if (0 != result) {
 		FM_ERR_REPORT("cg2900_fm_search_up_freq: "
 			      "Error Code %d", (unsigned int)result);
+		cg2900_fm_check_rds_status();
 		result = -EINVAL;
 		goto error;
 	}
@@ -1513,6 +1715,7 @@ int cg2900_fm_search_down_freq(void)
 	if (0 != result) {
 		FM_ERR_REPORT("cg2900_fm_search_down_freq: "
 			      "Error Code %d", (unsigned int)result);
+		cg2900_fm_check_rds_status();
 		result = -EINVAL;
 		goto error;
 	}
@@ -1553,6 +1756,7 @@ int cg2900_fm_start_band_scan(void)
 	if (0 != result) {
 		FM_ERR_REPORT("cg2900_fm_start_band_scan: "
 			      "Error Code %d", (unsigned int)result);
+		cg2900_fm_check_rds_status();
 		result = -EINVAL;
 		goto error;
 	}
@@ -1685,11 +1889,6 @@ int cg2900_fm_get_scan_result(
 			}
 		}
 	}
-	if (fm_prev_rds_status) {
-		/* Restart RDS if it was active earlier */
-		result = cg2900_fm_rds_on();
-		fm_prev_rds_status = false;
-	}
 
 error:
 	FM_DEBUG_REPORT("cg2900_fm_get_scan_result: returning %d",
@@ -1739,6 +1938,7 @@ int cg2900_fm_start_block_scan(
 	if (0 != result) {
 		FM_ERR_REPORT("cg2900_fm_start_block_scan: "
 			"Error Code %d", (unsigned int)result);
+		cg2900_fm_check_rds_status();
 		result = -EINVAL;
 		goto error;
 	}
@@ -1791,13 +1991,7 @@ int cg2900_fm_get_block_scan_result(
 			    = rssi[5];
 		}
 	}
-	if (CG2900_FM_RX_MODE == fm_mode) {
-		if (fm_prev_rds_status) {
-			/* Restart RDS if it was active earlier*/
-			result = cg2900_fm_rds_on();
-			fm_prev_rds_status = false;
-		}
-	} else if (CG2900_FM_TX_MODE == fm_mode) {
+	if (CG2900_FM_TX_MODE == fm_mode) {
 		FM_DEBUG_REPORT("cg2900_fm_get_block_scan_result:"
 				" Sending Set fmd_tx_set_pa");
 
@@ -2441,7 +2635,12 @@ int cg2900_fm_rds_on(void)
 	int result;
 
 	FM_INFO_REPORT("cg2900_fm_rds_on");
-
+	if (fm_rds_status) {
+		result = 0;
+		FM_DEBUG_REPORT("cg2900_fm_rds_on: rds is on "
+			"return result = %d", result);
+		return result;
+	}
 	if (CG2900_FM_STATE_SWITCHED_ON != fm_state) {
 		FM_ERR_REPORT("cg2900_fm_rds_on: "
 			"Invalid state of FM Driver = %d", fm_state);
@@ -2635,11 +2834,6 @@ int cg2900_fm_get_frequency(
 	*freq = currentFreq * FREQUENCY_CONVERTOR_KHZ_HZ;
 	FM_DEBUG_REPORT("cg2900_fm_get_frequency: "
 			"Current Frequency = %d Hz", *freq);
-	if (fm_prev_rds_status) {
-		/* Restart RDS if it was active earlier */
-		cg2900_fm_rds_on();
-		fm_prev_rds_status = false;
-	}
 
 error:
 	FM_DEBUG_REPORT("cg2900_fm_get_frequency: returning %d",
@@ -2688,18 +2882,17 @@ int cg2900_fm_set_frequency(
 		result = fmd_tx_set_frequency(
 				new_freq / FREQUENCY_CONVERTOR_KHZ_HZ);
 	}
+	if (fm_prev_rds_status) {
+		/* Restart RDS if it was active earlier */
+		cg2900_fm_rds_on();
+		fm_prev_rds_status = false;
+	}
 	if (result != 0) {
 		FM_ERR_REPORT("cg2900_fm_set_frequency: "
 			      "fmd_rx_set_frequency failed %x",
 			      (unsigned int)result);
 		result = -EINVAL;
 		goto error;
-	} else {
-		if (fm_prev_rds_status) {
-			/* Restart RDS if it was active earlier */
-			cg2900_fm_rds_on();
-			fm_prev_rds_status = false;
-		}
 	}
 
 	if (CG2900_FM_TX_MODE == fm_mode) {

@@ -10,7 +10,7 @@
 #include <linux/io.h>
 #include <linux/string.h>
 
-#include <linux/gpio/nomadik.h>
+#include <plat/gpio-nomadik.h>
 #include <mach/hardware.h>
 
 #include "board-pins-sleep-force.h"
@@ -187,9 +187,11 @@ void sleep_pins_config_pm(pin_cfg_t *cfgs, int num)
 
 	/* Write the PDIS enable/disable */
 	writel(readl(bankaddr + NMK_GPIO_PDIS)
-		| (pdis_register_disable & ~w_imsc & ~imsc), bankaddr + NMK_GPIO_PDIS);
+		| (pdis_register_disable & ~w_imsc & ~imsc),
+	       bankaddr + NMK_GPIO_PDIS);
 	writel(readl(bankaddr + NMK_GPIO_PDIS)
-		& (~pdis_register_enabled & ~w_imsc & ~imsc), bankaddr + NMK_GPIO_PDIS);
+		& (~pdis_register_enabled & ~w_imsc & ~imsc),
+	       bankaddr + NMK_GPIO_PDIS);
 
 	/* Write the SLPM enable/disable */
 	writel(readl(bankaddr + NMK_GPIO_SLPC) | slpm_register_disabled,

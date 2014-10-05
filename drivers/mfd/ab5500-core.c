@@ -36,6 +36,7 @@
 #define AB5500_ID_FORMAT_STRING "AB5500 %s"
 #define AB5500_NUM_EVENT_V1_REG 23
 #define AB5500_IT_LATCH0_REG		0x40
+#define AB5500_IT_MASTER0_REG		0x00
 #define AB5500_IT_MASK0_REG		0x60
 /* These are the only registers inside AB5500 used in this main file */
 
@@ -54,8 +55,8 @@
 
 /* Turn On Status Event */
 #define RTC_ALARM		0x80
-#define POW_KEY_2_ON		0x20
-#define POW_KEY_1_ON		0x08
+#define POW_KEY_2_ON		0x40
+#define POW_KEY_1_ON		0x10
 #define POR_ON_VBAT		0x10
 #define VBUS_DET		0x20
 #define VBUS_CH_DROP_R		0x08
@@ -862,6 +863,11 @@ static struct mfd_cell ab5500_devs[AB5500_NUM_DEVICES] = {
 	},
 };
 
+int ab5500_get_turn_on_status()
+{
+	return turn_on_stat;
+}
+
 static ssize_t show_chip_id(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -1067,35 +1073,41 @@ static struct abx500_ops ab5500_ops = {
 static irqreturn_t ab5500_irq(int irq, void *data)
 {
 	struct ab5500 *ab = data;
-	u8 i;
-	u8 *pvalue;
+	u8 cnt;
 	u8 value;
+	s8 status, mval;
 
-	prcmu_get_abb_event_buffer((void **)&pvalue);
-	if (unlikely(pvalue == NULL)) {
-		dev_err(ab->dev, "PRCMU not enabled!!!\n");
-		goto error_irq;
-	}
-	for (i = 0; i < ab->num_event_reg; i++) {
-		value = readb(pvalue);
-		if (value == 0) {
-			pvalue++;
+	for (cnt = 0; cnt < ab->num_master_reg; cnt++) {
+		status = get_register_interruptible(ab, AB5500_BANK_IT,
+				AB5500_IT_MASTER0_REG + cnt, &mval);
+		if (status < 0 || mval == 0)
 			continue;
-		}
-
+serve_int:
 		do {
-			int bit = __ffs(value);
-			int line = i * 8 + bit;
+			int mbit = __ffs(mval);
+			int reg = cnt * 8 + mbit;
 
-			handle_nested_irq(ab->irq_base + line);
-			value &= ~(1 << bit);
-		} while (value);
-		pvalue++;
+			status = get_register_interruptible(ab, AB5500_BANK_IT,
+				AB5500_IT_LATCH0_REG + reg, &value);
+			do {
+				int bit = __ffs(value);
+				int line = reg * 8 + bit;
+
+				handle_nested_irq(ab->irq_base + line);
+				value &= ~(1 << bit);
+			} while (value);
+			mval &= ~(1 << mbit);
+		} while (mval);
 	}
-
+	for (cnt = 0; cnt < ab->num_master_reg; cnt++) {
+		status = get_register_interruptible(ab, AB5500_BANK_IT,
+				AB5500_IT_MASTER0_REG + cnt, &mval);
+		if (status < 0 || mval == 0)
+			continue;
+		else
+			goto serve_int;
+	}
 	return IRQ_HANDLED;
-error_irq:
-	return IRQ_NONE;
 }
 
 #ifdef CONFIG_DEBUG_FS
@@ -1991,7 +2003,7 @@ static int ab5500_registers_print(struct seq_file *s, void *p)
 	u8 bank = (u8)ab->debug_bank;
 	struct ab5500_i2c_ranges *ab5500_reg_ranges;
 
-	if (ab->chip_id == AB5500_2_0)
+	if (ab->chip_id >= AB5500_2_0)
 		ab5500_reg_ranges = ab5500v2_reg_ranges;
 	else
 		ab5500_reg_ranges = ab5500v1_reg_ranges;
@@ -2399,6 +2411,10 @@ static const struct ab_family_id ids[] __initdata = {
 		.id = AB5500_2_0,
 		.name = "2.0"
 	},
+	{
+		.id = AB5500_2_1,
+		.name = "2.1"
+	},
 	/* Terminator */
 	{
 		.id = 0x00,
@@ -2506,10 +2522,11 @@ static int __init ab5500_probe(struct platform_device *pdev)
 	}
 	ab->ab5500_irq = res->start;
 
-	if (ab->chip_id == AB5500_2_0)
+	if (ab->chip_id >= AB5500_2_0)
 		ab->num_event_reg = AB5500_NUM_IRQ_REGS;
 	else
 		ab->num_event_reg = AB5500_NUM_EVENT_V1_REG;
+	ab->num_master_reg = AB5500_NUM_MASTER_REGS;
 	/* Read the latch regs to know the reason for turn on */
 	err = get_register_interruptible(ab, AB5500_BANK_IT,
 			AB5500_IT_LATCH0_REG + 1, &val);
@@ -2517,9 +2534,9 @@ static int __init ab5500_probe(struct platform_device *pdev)
 		goto exit_no_detect;
 	if (val & RTC_ALARM) /* RTCAlarm */
 		turn_on_stat = RTC_ALARM_EVENT;
-	if (val & POW_KEY_2_ON) /* PonKey2dbR */
+	if (val & POW_KEY_2_ON) /* PonKey2dbF */
 		turn_on_stat |= P_ON_KEY2_EVENT;
-	if (val & POW_KEY_1_ON) /* PonKey1dbR */
+	if (val & POW_KEY_1_ON) /* PonKey1dbF */
 		turn_on_stat |= P_ON_KEY1_EVENT;
 
 	err = get_register_interruptible(ab, AB5500_BANK_IT,
@@ -2580,7 +2597,6 @@ static int __init ab5500_probe(struct platform_device *pdev)
 			goto exit_remove_irq;
 
 	}
-	prcmu_config_abb_event_readout(AB5500_INTERRUPTS);
 	/* This real unpredictable IRQ is of course sampled for entropy */
 	rand_initialize_irq(res->start);
 

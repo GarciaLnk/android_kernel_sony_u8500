@@ -10,14 +10,7 @@
 #define PM_COMMON_H
 
 #ifdef CONFIG_PM
-enum prcmu_idle_stat {
-	SLEEP_OK		= 0xf3,
-	DEEP_SLEEP_OK		= 0xf6,
-	IDLE_OK			= 0xf0,
-	DEEPIDLE_OK		= 0xe3,
-	PRCMU2ARMPENDINGIT_ER	= 0x91,
-	ARMPENDINGIT_ER		= 0x93,
-};
+#include <linux/mfd/dbx500-prcmu.h>
 
 /**
  * ux500_pm_gic_decouple()
@@ -90,13 +83,6 @@ u32 ux500_pm_gpio_read_wake_up_status(unsigned int bank_number);
  */
 bool ux500_pm_other_cpu_wfi(void);
 
-/**
- * ux500_pm_prcmu_idle_stat()
- *
- * Returns the status of the last prcmu idle/sleep
- */
-enum prcmu_idle_stat ux500_pm_prcmu_idle_stat(void);
-
 struct dev_power_domain;
 extern struct dev_power_domain ux500_dev_power_domain;
 extern struct dev_power_domain ux500_amba_dev_power_domain;
@@ -117,5 +103,7 @@ u32 ux500_pm_gpio_read_wake_up_status(unsigned int bank_number)
 static inline void ux500_pm_prcmu_set_ioforce(bool enable) { }
 
 #endif
+
+extern int ux500_console_uart_gpio_pin;
 
 #endif

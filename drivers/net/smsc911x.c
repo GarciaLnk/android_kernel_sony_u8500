@@ -52,8 +52,6 @@
 #include <linux/phy.h>
 #include <linux/smsc911x.h>
 #include <linux/device.h>
-#include <linux/regulator/consumer.h>
-
 #include "smsc911x.h"
 
 #define SMSC_CHIPNAME		"smsc911x"
@@ -134,10 +132,6 @@ struct smsc911x_data {
 
 	/* register access functions */
 	const struct smsc911x_ops *ops;
-
-	/* regulators */
-	struct regulator *regulator_vddvario;
-	struct regulator *regulator_vdd33a;
 };
 
 /* Easy access to information */
@@ -145,12 +139,15 @@ struct smsc911x_data {
 
 static inline u32 __smsc911x_reg_read(struct smsc911x_data *pdata, u32 reg)
 {
+	void __iomem *addr = pdata->ioaddr;
+	int shift = pdata->config.shift;
+
 	if (pdata->config.flags & SMSC911X_USE_32BIT)
-		return readl(pdata->ioaddr + reg);
+		return readl(addr + (reg << shift));
 
 	if (pdata->config.flags & SMSC911X_USE_16BIT)
-		return ((readw(pdata->ioaddr + reg) & 0xFFFF) |
-			((readw(pdata->ioaddr + reg + 2) & 0xFFFF) << 16));
+		return ((readw(addr + (reg << shift)) & 0xFFFF) |
+			((readw(addr + ((reg + 2) << shift)) & 0xFFFF) << 16));
 
 	BUG();
 	return 0;
@@ -187,14 +184,17 @@ static inline u32 smsc911x_reg_read(struct smsc911x_data *pdata, u32 reg)
 static inline void __smsc911x_reg_write(struct smsc911x_data *pdata, u32 reg,
 					u32 val)
 {
+	void __iomem *addr = pdata->ioaddr;
+	int shift = pdata->config.shift;
+
 	if (pdata->config.flags & SMSC911X_USE_32BIT) {
-		writel(val, pdata->ioaddr + reg);
+		writel(val, addr + (reg << shift));
 		return;
 	}
 
 	if (pdata->config.flags & SMSC911X_USE_16BIT) {
-		writew(val & 0xFFFF, pdata->ioaddr + reg);
-		writew((val >> 16) & 0xFFFF, pdata->ioaddr + reg + 2);
+		writew(val & 0xFFFF, addr + (reg << shift));
+		writew((val >> 16) & 0xFFFF, addr + ((reg + 2) << shift));
 		return;
 	}
 
@@ -247,7 +247,8 @@ smsc911x_tx_writefifo(struct smsc911x_data *pdata, unsigned int *buf,
 	}
 
 	if (pdata->config.flags & SMSC911X_USE_32BIT) {
-		writesl(pdata->ioaddr + TX_DATA_FIFO, buf, wordcount);
+		writesl(pdata->ioaddr + (TX_DATA_FIFO << pdata->config.shift),
+			buf, wordcount);
 		goto out;
 	}
 
@@ -313,7 +314,8 @@ smsc911x_rx_readfifo(struct smsc911x_data *pdata, unsigned int *buf,
 	}
 
 	if (pdata->config.flags & SMSC911X_USE_32BIT) {
-		readsl(pdata->ioaddr + RX_DATA_FIFO, buf, wordcount);
+		readsl(pdata->ioaddr + (RX_DATA_FIFO << pdata->config.shift),
+					buf, wordcount);
 		goto out;
 	}
 
@@ -360,81 +362,6 @@ smsc911x_rx_readfifo_shift(struct smsc911x_data *pdata, unsigned int *buf,
 	BUG();
 out:
 	spin_unlock_irqrestore(&pdata->dev_lock, flags);
-}
-
-/* Enable resources(clocks and regulators) */
-static int smsc911x_enable_resources(struct platform_device *pdev, bool enable)
-{
-	struct net_device *ndev = platform_get_drvdata(pdev);
-	struct smsc911x_data *pdata = netdev_priv(ndev);
-	int err = 0;
-
-	/* enable/diable regulator for vddvario */
-	if (pdata->regulator_vddvario) {
-		if (enable) {
-			err = regulator_enable(pdata->regulator_vddvario);
-			if (err < 0) {
-				netdev_err(ndev, "%s: regulator_enable failed '%s'\n",
-						__func__, "vddvario");
-			}
-		} else
-			err = regulator_disable(pdata->regulator_vdd33a);
-	}
-
-	/* enable/diableregulator for vdd33a */
-	if (pdata->regulator_vdd33a) {
-		if (enable) {
-			err = regulator_enable(pdata->regulator_vdd33a);
-			if (err < 0) {
-				netdev_err(ndev, "%s: regulator_enable failed '%s'\n",
-						__func__, "vdd33a");
-			}
-		} else
-			err = regulator_disable(pdata->regulator_vdd33a);
-	}
-	return err;
-}
-
-
-/* Request resources(clocks and regulators) */
-static int smsc911x_request_resources(struct platform_device *pdev,
-		bool request)
-{
-	struct net_device *ndev = platform_get_drvdata(pdev);
-	struct smsc911x_data *pdata = netdev_priv(ndev);
-	int err = 0;
-
-	/* Request regulator for vddvario */
-	if (request && !pdata->regulator_vddvario) {
-		pdata->regulator_vddvario = regulator_get(&pdev->dev,
-				"vddvario");
-		if (IS_ERR(pdata->regulator_vddvario)) {
-			netdev_warn(ndev,
-					"%s: Failed to get regulator '%s'\n",
-					__func__, "vddvario");
-			pdata->regulator_vddvario = NULL;
-		}
-	} else if (!request && pdata->regulator_vddvario) {
-		regulator_put(pdata->regulator_vddvario);
-		pdata->regulator_vddvario = NULL;
-	}
-
-	/* Request regulator for vdd33a */
-	if (request && !pdata->regulator_vddvario) {
-		pdata->regulator_vdd33a = regulator_get(&pdev->dev,
-				"vdd33a");
-		if (IS_ERR(pdata->regulator_vdd33a)) {
-			netdev_warn(ndev,
-					"%s: Failed to get regulator '%s'\n",
-					__func__, "vdd33a");
-			pdata->regulator_vdd33a = NULL;
-		}
-	} else if (!request && pdata->regulator_vdd33a) {
-		regulator_put(pdata->regulator_vdd33a);
-		pdata->regulator_vdd33a = NULL;
-	}
-
-	return err;
 }
 
 /* waits for MAC not busy, with timeout.  Only called by smsc911x_mac_read
@@ -2126,7 +2053,6 @@ static int __devexit smsc911x_drv_remove(struct platform_device *pdev)
 	struct net_device *dev;
 	struct smsc911x_data *pdata;
 	struct resource *res;
-	int retval;
 
 	dev = platform_get_drvdata(pdev);
 	BUG_ON(!dev);
@@ -2153,12 +2079,6 @@ static int __devexit smsc911x_drv_remove(struct platform_device *pdev)
 	release_mem_region(res->start, resource_size(res));
 
 	iounmap(pdata->ioaddr);
-
-	if (smsc911x_enable_resources(pdev, false))
-		pr_warn("Could not disable resource\n");
-
-	retval = smsc911x_request_resources(pdev, false);
-	/* ignore not all have regulators */
 
 	free_netdev(dev);
 
@@ -2190,7 +2110,6 @@ static int __devinit smsc911x_drv_probe(struct platform_device *pdev)
 	unsigned int intcfg = 0;
 	int res_size, irq_flags;
 	int retval;
-	int to = 100;
 
 	pr_info("Driver version %s\n", SMSC_DRV_VERSION);
 
@@ -2237,24 +2156,14 @@ static int __devinit smsc911x_drv_probe(struct platform_device *pdev)
 
 	dev->irq = irq_res->start;
 	irq_flags = irq_res->flags & IRQF_TRIGGER_MASK;
-	pdata->ioaddr = ioremap_nocache(res->start, res_size);
+	pdata->ioaddr = ioremap_nocache(res->start,
+					(res_size << config->shift));
 
 	/* copy config parameters across to pdata */
 	memcpy(&pdata->config, config, sizeof(pdata->config));
 
 	pdata->dev = dev;
 	pdata->msg_enable = ((1 << debug) - 1);
-
-	platform_set_drvdata(pdev, dev);
-
-	retval = smsc911x_request_resources(pdev, true);
-	/* ignore not all have regulators */
-
-	retval = smsc911x_enable_resources(pdev, true);
-	if (retval) {
-		pr_warn("Could not enable resource\n");
-		goto out_0;
-	}
 
 	if (pdata->ioaddr == NULL) {
 		SMSC_WARN(pdata, probe, "Error smsc911x base address invalid");
@@ -2267,18 +2176,6 @@ static int __devinit smsc911x_drv_probe(struct platform_device *pdev)
 	/* apply the right access if shifting is needed */
 	if (config->shift)
 		pdata->ops = &shifted_smsc911x_ops;
-
-	/* poll the READY bit in PMT_CTRL. Any other access to the device is
-	 * forbidden while this bit isn't set. Try for 100ms
-	 */
-	while (!(smsc911x_reg_read(pdata, PMT_CTRL) & PMT_CTRL_READY_) && --to)
-		udelay(1000);
-
-	if (to == 0) {
-		pr_err("Device not READY in 100ms aborting\n");
-		goto out_0;
-	}
-
 
 	retval = smsc911x_init(dev);
 	if (retval < 0)
@@ -2371,7 +2268,6 @@ out_release_io_1:
 out_0:
 	return retval;
 }
-
 
 #ifdef CONFIG_PM
 /* This implementation assumes the devices remains powered on its VDDVARIO

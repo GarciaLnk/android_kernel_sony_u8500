@@ -24,6 +24,8 @@
 #include <linux/regulator/db5500-prcmu.h>
 #include <linux/regulator/machine.h>
 #include <linux/interrupt.h>
+#include <linux/mfd/ux500_wdt.h>
+#include <linux/mfd/dbx500_temp.h>
 #include <linux/mfd/dbx500-prcmu.h>
 #include <mach/hardware.h>
 #include <mach/irqs.h>
@@ -119,6 +121,12 @@
 #define PRCM_ACK_MB2_CLK_STATUS  (PRCM_ACK_MB2 + 0x6)
 #define PRCM_ACK_MB2_PLL_STATUS  (PRCM_ACK_MB2 + 0xA)
 
+/*
+ * Communication timeout
+ */
+#define PRCMU_COMM_TOUT_MS 500
+#define PRCMU_COMM_TOUT msecs_to_jiffies(PRCMU_COMM_TOUT_MS)
+
 enum mb_return_code {
 	RC_SUCCESS,
 	RC_FAIL,
@@ -163,6 +171,10 @@ enum mb4_header {
 	MB4H_CFG_HOTDOG = 7,
 	MB4H_CFG_HOTMON = 8,
 	MB4H_CFG_HOTPERIOD = 10,
+	MB4H_CGF_MODEM_RESET = 13,
+	MB4H_CGF_A9WDOG_EN_PREBARK = 14,
+	MB4H_CGF_A9WDOG_EN_NOPREBARK = 15,
+	MB4H_CGF_A9WDOG_DIS = 16,
 };
 
 /* Mailbox 4 ACK headers */
@@ -170,6 +182,10 @@ enum mb4_ack_header {
 	MB4H_ACK_CFG_HOTDOG = 5,
 	MB4H_ACK_CFG_HOTMON = 6,
 	MB4H_ACK_CFG_HOTPERIOD = 8,
+	MB4H_ACK_CFG_MODEM_RESET = 11,
+	MB4H_ACK_CGF_A9WDOG_EN_PREBARK = 12,
+	MB4H_ACK_CGF_A9WDOG_EN_NOPREBARK = 13,
+	MB4H_ACK_CGF_A9WDOG_DIS = 14,
 };
 
 /* Mailbox 5 headers. */
@@ -261,11 +277,12 @@ enum db5500_ap_pwr_state {
 #define PRCMU_RESET_DSIPLL			0x00004000
 #define PRCMU_UNCLAMP_DSIPLL			0x00400800
 
-/* HDMI CLK MGT PLLSW=001 (PLLSOC0), PLLDIV=0x8, = 50 Mhz*/
-#define PRCMU_DSI_CLOCK_SETTING			0x00000128
+/* HDMI CLK MGT PLLSW=001 (PLLSOC0), PLLDIV=0xC, = 33.33 Mhz*/
+#define PRCMU_DSI_CLOCK_SETTING			0x0000012C
 /* TVCLK_MGT PLLSW=001 (PLLSOC0) PLLDIV=0x13, = 19.05 MHZ */
 #define PRCMU_DSI_LP_CLOCK_SETTING		0x00000135
-#define PRCMU_PLLDSI_FREQ_SETTING		0x00020121
+/* PRCM_PLLDSI_FREQ R=4, N=1, D= 0x65 */
+#define PRCMU_PLLDSI_FREQ_SETTING		0x00040165
 #define PRCMU_DSI_PLLOUT_SEL_SETTING		0x00000002
 #define PRCMU_ENABLE_ESCAPE_CLOCK_DIV		0x03000201
 #define PRCMU_DISABLE_ESCAPE_CLOCK_DIV		0x00000101
@@ -361,12 +378,14 @@ static u32 prcmu_wakeup_bit[NUM_PRCMU_WAKEUP_INDICES] = {
  * @lock                The transaction lock.
  * @dbb_irqs_lock       lock used for (un)masking DBB wakeup interrupts
  * @mask_work:          Work structure used for (un)masking wakeup interrupts.
+ * @ac_wake_lock:	mutex to lock modem_req and modem_rel
  * @req:                Request data that need to persist between requests.
  */
 static struct {
 	spinlock_t lock;
 	spinlock_t dbb_irqs_lock;
 	struct work_struct mask_work;
+	struct mutex ac_wake_lock;
 	struct {
 		u32 dbb_irqs;
 		u32 dbb_wakeups;
@@ -468,8 +487,11 @@ static struct {
 /* Spinlocks */
 static DEFINE_SPINLOCK(clkout_lock);
 
-/* PRCMU TCDM base IO address. */
+/* PRCMU TCDM base IO address */
 static __iomem void *tcdm_base;
+
+/* PRCMU MTIMER base IO address */
+static __iomem void *mtimer_base;
 
 struct clk_mgt {
 	unsigned int offset;
@@ -485,6 +507,11 @@ static struct {
 	u8 fw_version;
 	u8 api_version;
 } prcmu_version;
+
+static struct {
+	u32 timeout;
+	bool enabled;
+} a9wdog_timer;
 
 static DEFINE_SPINLOCK(clk_mgt_lock);
 
@@ -529,11 +556,101 @@ static struct clk_mgt clk_mgt[PRCMU_NUM_REG_CLOCKS] = {
 	CLK_MGT_ENTRY(RNGCLK, false),
 	CLK_MGT_ENTRY(SIACLK, false),
 	CLK_MGT_ENTRY(SVACLK, false),
+	CLK_MGT_ENTRY(ACLK, true),
 };
 
-bool db5500_prcmu_is_ac_wake_requested(void)
+static atomic_t modem_req_state = ATOMIC_INIT(0);
+
+bool db5500_prcmu_is_modem_requested(void)
 {
-	return false;
+	return (atomic_read(&modem_req_state) != 0);
+}
+
+/**
+ * prcmu_modem_req - APE requests Modem to wake up
+ *
+ * Whenever APE wants to send message to the modem, it will have to call this
+ * function to make sure that modem is awake.
+ */
+void prcmu_modem_req(void)
+{
+	u32 val;
+
+	mutex_lock(&mb0_transfer.ac_wake_lock);
+
+	val = readl(_PRCMU_BASE + PRCM_HOSTACCESS_REQ);
+	if (val & PRCM_HOSTACCESS_REQ_BIT)
+		goto unlock_and_return;
+
+	writel((val | PRCM_HOSTACCESS_REQ_BIT),
+		(_PRCMU_BASE + PRCM_HOSTACCESS_REQ));
+	atomic_set(&modem_req_state, 1);
+
+unlock_and_return:
+	mutex_unlock(&mb0_transfer.ac_wake_lock);
+
+}
+
+/**
+ * prcmu_modem_rel - APE has no more messages to send and hence releases modem.
+ *
+ * APE to Modem communication is initiated by modem_req and once the
+ * communication is completed, APE sends modem_rel to complete the protocol.
+ */
+void prcmu_modem_rel(void)
+{
+	u32 val;
+
+	mutex_lock(&mb0_transfer.ac_wake_lock);
+
+	val = readl(_PRCMU_BASE + PRCM_HOSTACCESS_REQ);
+	if (!(val & PRCM_HOSTACCESS_REQ_BIT))
+		goto unlock_and_return;
+
+	writel((val & ~PRCM_HOSTACCESS_REQ_BIT),
+		(_PRCMU_BASE + PRCM_HOSTACCESS_REQ));
+
+	atomic_set(&modem_req_state, 0);
+
+unlock_and_return:
+	mutex_unlock(&mb0_transfer.ac_wake_lock);
+}
+
+/**
+ * prcm_ape_ack - send an acknowledgement to modem
+ *
+ * On ape receiving ape_req, APE will have to acknowledge for the interrupt
+ * received. This function will send the acknowledgement by writing to the
+ * prcmu register and an interrupt is trigerred to modem.
+ */
+void prcmu_ape_ack(void)
+{
+	writel(PRCM_APE_ACK_BIT, (_PRCMU_BASE + PRCM_APE_ACK));
+}
+
+/**
+ * db5500_prcmu_modem_reset - Assert a Reset on modem
+ *
+ * This function will assert a reset request to the modem. Prior to that
+ * PRCM_HOSTACCESS_REQ must be '0'.
+ */
+void db5500_prcmu_modem_reset(void)
+{
+	mutex_lock(&mb4_transfer.lock);
+
+	/* PRCM_HOSTACCESS_REQ = 0, before asserting a reset */
+	prcmu_modem_rel();
+	while (readl(_PRCMU_BASE + PRCM_MBOX_CPU_VAL) & MBOX_BIT(4))
+		cpu_relax();
+
+	writeb(MB4H_CGF_MODEM_RESET, PRCM_REQ_MB4_HEADER);
+	writel(MBOX_BIT(4), _PRCMU_BASE + PRCM_MBOX_CPU_SET);
+	wait_for_completion(&mb4_transfer.work);
+	if (mb4_transfer.ack.status != RC_SUCCESS ||
+			mb4_transfer.ack.header != MB4H_CGF_MODEM_RESET)
+		printk(KERN_ERR,
+				"ACK not received for modem reset interrupt\n");
+	mutex_unlock(&mb4_transfer.lock);
 }
 
 /**
@@ -671,9 +788,10 @@ static int request_sysclk(bool enable)
 	 * SysClk, and it succeeds.
 	 */
 	if (!wait_for_completion_timeout(&mb3_transfer.sysclk_work,
-			msecs_to_jiffies(20000))) {
-		pr_err("prcmu: %s timed out (20 s) waiting for a reply.\n",
-			__func__);
+			PRCMU_COMM_TOUT)) {
+		pr_err("prcmu: %s timed out (%d ms) waiting for a reply.\n",
+			__func__, PRCMU_COMM_TOUT_MS);
+		BUG();
 		r = -EIO;
 		WARN(1, "Failed to set sysclk");
 		goto unlock_and_return;
@@ -720,8 +838,10 @@ static int request_clk(u8 clock, bool enable)
 
 	writel(MBOX_BIT(2), _PRCMU_BASE + PRCM_MBOX_CPU_SET);
 	if (!wait_for_completion_timeout(&mb2_transfer.work,
-		msecs_to_jiffies(500))) {
-		pr_err("prcmu: request_clk() failed.\n");
+		PRCMU_COMM_TOUT)) {
+		pr_err("prcmu: request_clk() failed. Timeout: %d ms\n",
+			PRCMU_COMM_TOUT_MS);
+		BUG();
 		r = -EIO;
 		WARN(1, "Failed in request_clk");
 		goto unlock_and_return;
@@ -793,9 +913,10 @@ static int request_pll(u8 pll, bool enable)
 
 	writel(MBOX_BIT(2), _PRCMU_BASE + PRCM_MBOX_CPU_SET);
 	if (!wait_for_completion_timeout(&mb2_transfer.work,
-		msecs_to_jiffies(500))) {
-		pr_err("prcmu: set_pll() failed.\n"
-			"prcmu: Please check your firmware version.\n");
+		PRCMU_COMM_TOUT)) {
+		pr_err("prcmu: set_pll() failed. Timeout: %d ms\n",
+			PRCMU_COMM_TOUT_MS);
+		BUG();
 		r = -EIO;
 		WARN(1, "Failed to set pll");
 		goto unlock_and_return;
@@ -825,6 +946,8 @@ int db5500_prcmu_request_clock(u8 clock, bool enable)
 		return request_clk(DB5500_MSP1CLK, enable);
 	else if (clock == PRCMU_CDCLK)
 		return request_clk(DB5500_CDCLK, enable);
+	else if (clock == PRCMU_IRDACLK)
+		return request_clk(DB5500_IRDACLK, enable);
 	else if (clock < PRCMU_NUM_REG_CLOCKS)
 		return request_reg_clock(clock, enable);
 	else if (clock == PRCMU_TIMCLK)
@@ -929,6 +1052,20 @@ unlock_return:
 	return r;
 }
 
+u8 db5500_prcmu_get_power_state_result(void)
+{
+	u8 status = readb_relaxed(PRCM_ACK_MB0_AP_PWRSTTR_STATUS);
+
+	/*
+	 * Callers expect all the status values to match 8500.  Adjust for
+	 * PendingReq_Er (0x2b).
+	 */
+	if (status == 0x2b)
+		status = PRCMU_PRCMU2ARMPENDINGIT_ER;
+
+	return status;
+}
+
 void db5500_prcmu_enable_wakeups(u32 wakeups)
 {
 	unsigned long flags;
@@ -983,8 +1120,10 @@ static int mailbox4_request(u8 mb4_request, u8 ack_request)
 	writel(MBOX_BIT(4), (_PRCMU_BASE + PRCM_MBOX_CPU_SET));
 
 	if (!wait_for_completion_timeout(&mb4_transfer.work,
-		msecs_to_jiffies(500))) {
-		pr_err("prcmu: MB4 request %d failed", mb4_request);
+		PRCMU_COMM_TOUT)) {
+		pr_err("prcmu: MB4 request %d failed. Timeout: %d ms",
+			PRCMU_COMM_TOUT_MS, mb4_request);
+		BUG();
 		ret = -EIO;
 		WARN(1, "prcmu: failed mb4 request");
 		goto failed;
@@ -1002,7 +1141,7 @@ int db5500_prcmu_get_hotdog(void)
 	return readw(PRCM_SHARE_INFO_HOTDOG);
 }
 
-int db5500_prcmu_config_hotdog(u8 threshold)
+static int config_hotdog(u8 threshold)
 {
 	int r = 0;
 
@@ -1019,7 +1158,7 @@ int db5500_prcmu_config_hotdog(u8 threshold)
 	return r;
 }
 
-int db5500_prcmu_config_hotmon(u8 low, u8 high)
+static int config_hotmon(u8 low, u8 high)
 {
 	int r = 0;
 
@@ -1058,7 +1197,7 @@ static int config_hot_period(u16 val)
 /*
  * period in milli seconds
  */
-int db5500_prcmu_start_temp_sense(u16 period)
+static int start_temp_sense(u16 period)
 {
 	if (period == 0xFFFF)
 		return -EINVAL;
@@ -1066,9 +1205,109 @@ int db5500_prcmu_start_temp_sense(u16 period)
 	return config_hot_period(period);
 }
 
-int db5500_prcmu_stop_temp_sense(void)
+static int stop_temp_sense(void)
 {
 	return config_hot_period(0xFFFF);
+}
+
+static int prcmu_a9wdog(u8 req, u8 ack)
+{
+	int r = 0;
+
+	mutex_lock(&mb4_transfer.lock);
+
+	while (readl(_PRCMU_BASE + PRCM_MBOX_CPU_VAL) & MBOX_BIT(4))
+		cpu_relax();
+
+	r = mailbox4_request(req, ack);
+
+	mutex_unlock(&mb4_transfer.lock);
+
+	return r;
+}
+
+static void prcmu_a9wdog_set_interrupt(bool enable)
+{
+	if (enable) {
+		writel(PRCM_TIMER0_IRQ_RTOS1_SET,
+			(mtimer_base + PRCM_TIMER0_IRQ_EN_SET_OFFSET));
+	} else {
+		writel(PRCM_TIMER0_IRQ_RTOS1_CLR,
+			(mtimer_base + PRCM_TIMER0_IRQ_EN_CLR_OFFSET));
+	}
+}
+
+static void prcmu_a9wdog_set_timeout(u32 timeout)
+{
+	u32 comp_timeout;
+
+	comp_timeout = readl(mtimer_base + PRCM_TIMER0_RTOS_COUNTER_OFFSET) +
+			timeout;
+	writel(comp_timeout, mtimer_base + PRCM_TIMER0_RTOS_COMP1_OFFSET);
+}
+
+static int config_a9wdog(u8 num, bool sleep_auto_off)
+{
+	/*
+	 * Sleep auto off feature is not supported. Resume and
+	 * suspend will be handled by watchdog driver.
+         */
+	return 0;
+}
+
+static int enable_a9wdog(u8 id)
+{
+	int r = 0;
+
+	if (a9wdog_timer.enabled)
+		return -EPERM;
+
+	prcmu_a9wdog_set_interrupt(true);
+
+	r = prcmu_a9wdog(MB4H_CGF_A9WDOG_EN_PREBARK,
+			MB4H_ACK_CGF_A9WDOG_EN_PREBARK);
+	if (!r)
+		a9wdog_timer.enabled = true;
+	else
+		prcmu_a9wdog_set_interrupt(false);
+
+	return r;
+}
+
+static int disable_a9wdog(u8 id)
+{
+	if (!a9wdog_timer.enabled)
+		return -EPERM;
+
+	prcmu_a9wdog_set_interrupt(false);
+
+	a9wdog_timer.enabled = false;
+
+	return prcmu_a9wdog(MB4H_CGF_A9WDOG_DIS,
+			MB4H_ACK_CGF_A9WDOG_DIS);
+}
+
+static int kick_a9wdog(u8 id)
+{
+	int r = 0;
+
+	if (a9wdog_timer.enabled)
+		prcmu_a9wdog_set_timeout(a9wdog_timer.timeout);
+	else
+		r = -EPERM;
+
+	return r;
+}
+
+static int load_a9wdog(u8 id, u32 timeout)
+{
+	if (a9wdog_timer.enabled)
+		return -EPERM;
+
+	prcmu_a9wdog_set_timeout(timeout);
+	a9wdog_timer.timeout = timeout;
+
+	return 0;
 }
 
 /**
@@ -1195,9 +1434,11 @@ int db5500_prcmu_set_arm_opp(u8 opp)
 	writel(MBOX_BIT(1), _PRCMU_BASE + PRCM_MBOX_CPU_SET);
 
 	if (!wait_for_completion_timeout(&mb1_transfer.work,
-		msecs_to_jiffies(500))) {
+		PRCMU_COMM_TOUT)) {
 		r = -EIO;
-		WARN(1, "prcmu: failed to set arm opp");
+		WARN(1, "prcmu: failed to set arm opp. Timeout: %d ms",
+			PRCMU_COMM_TOUT_MS);
+		BUG();
 		goto unlock_and_return;
 	}
 
@@ -1302,23 +1543,64 @@ static void prcmu_ape_clocks_scale(u8 opp)
 
 	spin_unlock_irqrestore(&clk_mgt_lock, irqflags);
 }
+/* Divide the frequency of certain clocks by 2 for APE_50_PARTLY_25_OPP. */
+static void request_even_slower_clocks(bool enable)
+{
+	void __iomem *clock_reg[] = {
+		(_PRCMU_BASE + DB5500_PRCM_ACLK_MGT),
+		(_PRCMU_BASE + DB5500_PRCM_DMACLK_MGT)
+	};
+	unsigned long flags;
+	unsigned int i;
 
+	spin_lock_irqsave(&clk_mgt_lock, flags);
+
+	/* Grab the HW semaphore. */
+	while ((readl(_PRCMU_BASE + PRCM_SEM) & PRCM_SEM_PRCM_SEM) != 0)
+		cpu_relax();
+
+	for (i = 0; i < ARRAY_SIZE(clock_reg); i++) {
+		u32 val;
+		u32 div;
+
+		val = readl(clock_reg[i]);
+		div = (val & PRCM_CLK_MGT_CLKPLLDIV_MASK);
+		if (enable) {
+			if ((div <= 1) || (div > 15)) {
+				pr_err("prcmu: Bad clock divider %d in %s\n",
+					div, __func__);
+				goto unlock_and_return;
+			}
+			div <<= 1;
+		} else {
+			if (div <= 2)
+				goto unlock_and_return;
+			div >>= 1;
+		}
+		val = ((val & ~PRCM_CLK_MGT_CLKPLLDIV_MASK) |
+			(div & PRCM_CLK_MGT_CLKPLLDIV_MASK));
+		writel(val, clock_reg[i]);
+	}
+
+unlock_and_return:
+	/* Release the HW semaphore. */
+	writel(0, _PRCMU_BASE + PRCM_SEM);
+
+	spin_unlock_irqrestore(&clk_mgt_lock, flags);
+}
 int db5500_prcmu_set_ape_opp(u8 opp)
 {
 	int ret = 0;
 	u8 db5500_opp;
-
-	if (opp == db5500_prcmu_get_ape_opp())
-		return ret;
-
-	if (cpu_is_u5500v1())
-		return -EINVAL;
+	if (opp == mb1_transfer.req_ape_opp)
+		return 0;
 
 	switch (opp) {
 	case APE_100_OPP:
 		db5500_opp = DB5500_APE_100_OPP;
 		break;
 	case APE_50_OPP:
+	case APE_50_PARTLY_25_OPP:
 		db5500_opp = DB5500_APE_50_OPP;
 		break;
 	default:
@@ -1329,6 +1611,10 @@ int db5500_prcmu_set_ape_opp(u8 opp)
 	}
 
 	mutex_lock(&mb1_transfer.lock);
+	if (mb1_transfer.req_ape_opp == APE_50_PARTLY_25_OPP)
+		request_even_slower_clocks(false);
+	if ((opp != APE_100_OPP) && (mb1_transfer.req_ape_opp != APE_100_OPP))
+		goto skip_message;
 
 	prcmu_ape_clocks_scale(db5500_opp);
 
@@ -1340,9 +1626,11 @@ int db5500_prcmu_set_ape_opp(u8 opp)
 	writel(MBOX_BIT(1), (_PRCMU_BASE + PRCM_MBOX_CPU_SET));
 
 	if (!wait_for_completion_timeout(&mb1_transfer.work,
-		msecs_to_jiffies(500))) {
+		PRCMU_COMM_TOUT)) {
 		ret = -EIO;
-		WARN(1, "prcmu: failed to set ape opp to %u", opp);
+		WARN(1, "prcmu: failed to set ape opp to %u. Timeout: %d ms",
+			opp, PRCMU_COMM_TOUT_MS);
+		BUG();
 		goto unlock_and_return;
 	}
 
@@ -1351,6 +1639,12 @@ int db5500_prcmu_set_ape_opp(u8 opp)
 		(mb1_transfer.ack.arm_voltage_st != RC_SUCCESS))
 		ret = -EIO;
 
+skip_message:
+	if ((!ret && (opp == APE_50_PARTLY_25_OPP)) ||
+		(ret && (mb1_transfer.req_ape_opp == APE_50_PARTLY_25_OPP)))
+			request_even_slower_clocks(true);
+	if (!ret)
+		mb1_transfer.req_ape_opp = opp;
 unlock_and_return:
 	mutex_unlock(&mb1_transfer.lock);
 bailout:
@@ -1380,9 +1674,6 @@ int db5500_prcmu_get_ddr_opp(void)
 
 int db5500_prcmu_set_ddr_opp(u8 opp)
 {
-	if (cpu_is_u5500v1())
-		return -EINVAL;
-
 	if (opp != DDR_100_OPP && opp != DDR_50_OPP)
 		return -EINVAL;
 
@@ -1497,6 +1788,25 @@ int db5500_prcmu_set_display_clocks(void)
 	return 0;
 }
 
+u32 db5500_prcmu_read(unsigned int reg)
+{
+	return readl_relaxed(_PRCMU_BASE + reg);
+}
+
+void db5500_prcmu_write(unsigned int reg, u32 value)
+{
+	writel_relaxed(value, _PRCMU_BASE + reg);
+}
+
+void db5500_prcmu_write_masked(unsigned int reg, u32 mask, u32 value)
+{
+	u32 val;
+
+	val = readl_relaxed(_PRCMU_BASE + reg);
+	val = (val & ~mask) | (value & mask);
+	writel_relaxed(val, _PRCMU_BASE + reg);
+}
+
 /**
  * db5500_prcmu_system_reset - System reset
  *
@@ -1535,7 +1845,7 @@ static void ack_dbb_wakeup(void)
 	spin_unlock_irqrestore(&mb0_transfer.lock, flags);
 }
 
-int db5500_prcmu_set_epod(u16 epod, u8 epod_state)
+static int set_epod(u16 epod, u8 epod_state)
 {
 	int r = 0;
 	bool ram_retention = false;
@@ -1600,9 +1910,10 @@ int db5500_prcmu_set_epod(u16 epod, u8 epod_state)
 	writel(MBOX_BIT(2), _PRCMU_BASE + PRCM_MBOX_CPU_SET);
 
 	if (!wait_for_completion_timeout(&mb2_transfer.work,
-		msecs_to_jiffies(500))) {
-		pr_err("prcmu: set_epod() failed.\n"
-			"prcmu: Please check your firmware version.\n");
+		PRCMU_COMM_TOUT)) {
+		pr_err("prcmu: set_epod() failed. Timeout: %d ms\n",
+			PRCMU_COMM_TOUT_MS);
+		BUG();
 		r = -EIO;
 		WARN(1, "Failed to set epod");
 		goto unlock_and_return;
@@ -1639,11 +1950,17 @@ static bool read_mailbox_0(void)
 		else
 			ev = readl(PRCM_ACK_MB0_WAKEUP_0_DBB);
 
+		prcmu_debug_register_mbox0_event(ev,
+						 (mb0_transfer.req.dbb_irqs |
+						  mb0_transfer.req.dbb_wakeups));
+
 		ev &= mb0_transfer.req.dbb_irqs;
 
 		for (n = 0; n < NUM_DB5500_PRCMU_WAKEUPS; n++) {
-			if (ev & prcmu_irq_bit[n])
-				generic_handle_irq(IRQ_DB5500_PRCMU_BASE + n);
+			if (ev & prcmu_irq_bit[n]) {
+				if (n != IRQ_INDEX(ABB))
+					generic_handle_irq(IRQ_DB5500_PRCMU_BASE + n);
+			}
 		}
 		r = true;
 		break;
@@ -1752,6 +2069,10 @@ static bool read_mailbox_4(void)
 	case MB4H_ACK_CFG_HOTDOG:
 	case MB4H_ACK_CFG_HOTMON:
 	case MB4H_ACK_CFG_HOTPERIOD:
+	case MB4H_ACK_CFG_MODEM_RESET:
+	case MB4H_ACK_CGF_A9WDOG_EN_PREBARK:
+	case MB4H_ACK_CGF_A9WDOG_EN_NOPREBARK:
+	case MB4H_ACK_CGF_A9WDOG_DIS:
 		mb4_transfer.ack.status = readb(PRCM_ACK_MB4_REQUESTS);
 		break;
 	default:
@@ -1828,6 +2149,7 @@ static irqreturn_t prcmu_irq_handler(int irq, void *data)
 			bits -= MBOX_BIT(n);
 			if (read_mailbox[n]())
 				r = IRQ_WAKE_THREAD;
+			prcmu_debug_register_interrupt(n);
 		}
 	}
 	return r;
@@ -1835,7 +2157,24 @@ static irqreturn_t prcmu_irq_handler(int irq, void *data)
 
 static irqreturn_t prcmu_irq_thread_fn(int irq, void *data)
 {
+	u32 ev;
+
+	/*
+	 * ABB needs to be handled before the wakeup because
+	 * the ping/pong buffers for ABB events could change
+	 * after we acknowledge the wakeup.
+	 */
+	if (readb(PRCM_ACK_MB0_READ_POINTER) & 1)
+		ev = readl(PRCM_ACK_MB0_WAKEUP_1_DBB);
+	else
+		ev = readl(PRCM_ACK_MB0_WAKEUP_0_DBB);
+
+	ev &= mb0_transfer.req.dbb_irqs;
+	if (ev & WAKEUP_BIT_ABB)
+		handle_nested_irq(IRQ_DB5500_PRCMU_ABB);
+
 	ack_dbb_wakeup();
+
 	return IRQ_HANDLED;
 }
 
@@ -1909,8 +2248,10 @@ void __init db5500_prcmu_early_init(void)
 	}
 
 	tcdm_base = __io_address(U5500_PRCMU_TCDM_BASE);
+	mtimer_base = __io_address(U5500_MTIMER_BASE);
 	spin_lock_init(&mb0_transfer.lock);
 	spin_lock_init(&mb0_transfer.dbb_irqs_lock);
+	mutex_init(&mb0_transfer.ac_wake_lock);
 	mutex_init(&mb1_transfer.lock);
 	init_completion(&mb1_transfer.work);
 	mutex_init(&mb2_transfer.lock);
@@ -1931,6 +2272,8 @@ void __init db5500_prcmu_early_init(void)
 		irq = IRQ_DB5500_PRCMU_BASE + i;
 		irq_set_chip_and_handler(irq, &prcmu_irq_chip,
 					 handle_simple_irq);
+		if (irq == IRQ_DB5500_PRCMU_ABB)
+			irq_set_nested_thread(irq, true);
 		set_irq_flags(irq, IRQF_VALID);
 	}
 	prcmu_ape_clocks_init();
@@ -1976,6 +2319,8 @@ static struct regulator_consumer_supply db5500_disp_consumers[] = {
 	REGULATOR_SUPPLY("debug", "reg-virt-consumer.3"),
 	REGULATOR_SUPPLY("vsupply", "b2r2_bus"),
 	REGULATOR_SUPPLY("vsupply", "mcde"),
+	REGULATOR_SUPPLY("vsupply", "dsilink.0"),
+	REGULATOR_SUPPLY("vsupply", "dsilink.1"),
 };
 
 static struct regulator_consumer_supply db5500_esram12_consumers[] = {
@@ -1993,6 +2338,16 @@ static struct regulator_consumer_supply db5500_esram12_consumers[] = {
 	.num_consumer_supplies  = ARRAY_SIZE(db5500_##lower##_consumers),\
 }
 
+#define DB5500_REGULATOR_SWITCH_VAPE(lower, upper)			\
+[DB5500_REGULATOR_SWITCH_##upper] = {					\
+	.supply_regulator = "db5500-vape",				\
+	.constraints = {						\
+		.valid_ops_mask = REGULATOR_CHANGE_STATUS,		\
+	},								\
+	.consumer_supplies      = db5500_##lower##_consumers,		\
+	.num_consumer_supplies  = ARRAY_SIZE(db5500_##lower##_consumers),\
+}									\
+
 static struct regulator_init_data db5500_regulators[DB5500_NUM_REGULATORS] = {
 	[DB5500_REGULATOR_VAPE] = {
 		.constraints = {
@@ -2001,18 +2356,74 @@ static struct regulator_init_data db5500_regulators[DB5500_NUM_REGULATORS] = {
 		.consumer_supplies	= db5500_vape_consumers,
 		.num_consumer_supplies	= ARRAY_SIZE(db5500_vape_consumers),
 	},
-	DB5500_REGULATOR_SWITCH(sga, SGA),
-	DB5500_REGULATOR_SWITCH(hva, HVA),
-	DB5500_REGULATOR_SWITCH(sia, SIA),
-	DB5500_REGULATOR_SWITCH(disp, DISP),
+	DB5500_REGULATOR_SWITCH_VAPE(sga, SGA),
+	DB5500_REGULATOR_SWITCH_VAPE(hva, HVA),
+	DB5500_REGULATOR_SWITCH_VAPE(sia, SIA),
+	DB5500_REGULATOR_SWITCH_VAPE(disp, DISP),
+	/*
+	 * ESRAM12 is put in retention by the firmware when VAPE is
+	 * turned off so there's no need to hold VAPE.
+	 */
 	DB5500_REGULATOR_SWITCH(esram12, ESRAM12),
+};
+static struct db5500_regulator_init_data db5500_regulators_pdata = {
+	.set_epod = set_epod,
+	.regulators = db5500_regulators,
+	.reg_num = DB5500_NUM_REGULATORS
+};
+
+static struct ux500_wdt_ops db5500_wdt_ops = {
+	.enable = enable_a9wdog,
+	.disable = disable_a9wdog,
+	.kick = kick_a9wdog,
+	.load = load_a9wdog,
+	.config = config_a9wdog,
+};
+
+/*
+ * Thermal Sensor
+ */
+static struct dbx500_temp_ops db5500_temp_ops = {
+	.config_hotdog = config_hotdog,
+	.config_hotmon = config_hotmon,
+	.start_temp_sense = start_temp_sense,
+	.stop_temp_sense = stop_temp_sense,
+};
+
+static struct resource u5500_thsens_resources[] = {
+	[0] = {
+		.name	= "IRQ_HOTMON_LOW",
+		.start  = IRQ_DB5500_PRCMU_TEMP_SENSOR_LOW,
+		.end    = IRQ_DB5500_PRCMU_TEMP_SENSOR_LOW,
+		.flags  = IORESOURCE_IRQ,
+	},
+	[1] = {
+		.name	= "IRQ_HOTMON_HIGH",
+		.start  = IRQ_DB5500_PRCMU_TEMP_SENSOR_HIGH,
+		.end    = IRQ_DB5500_PRCMU_TEMP_SENSOR_HIGH,
+		.flags  = IORESOURCE_IRQ,
+	},
 };
 
 static struct mfd_cell db5500_prcmu_devs[] = {
 	{
 		.name = "db5500-prcmu-regulators",
-		.platform_data = &db5500_regulators,
-		.pdata_size = sizeof(db5500_regulators),
+		.platform_data = &db5500_regulators_pdata,
+		.pdata_size = sizeof(db5500_regulators_pdata),
+	},
+	{
+		.name = "ux500_wdt",
+		.id = -1,
+		.platform_data = &db5500_wdt_ops,
+		.pdata_size = sizeof(db5500_wdt_ops),
+	},
+	{
+		.name = "dbx500_temp",
+		.platform_data = &db5500_temp_ops,
+		.pdata_size = sizeof(db5500_temp_ops),
+		.resources       = u5500_thsens_resources,
+		.num_resources  = ARRAY_SIZE(u8500_thsens_resources),
+
 	},
 	{
 		.name = "cpufreq-u5500",

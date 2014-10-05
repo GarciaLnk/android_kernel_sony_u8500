@@ -4,6 +4,7 @@
  * Copyright 2005 Mentor Graphics Corporation
  * Copyright (C) 2005-2006 by Texas Instruments
  * Copyright (C) 2006-2007 Nokia Corporation
+ * Copyright (C) 2012 Sony Mobile Communications AB
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -99,6 +100,12 @@
 #include <linux/prefetch.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
+
+#ifdef CONFIG_USB_HOST_EXTRA_NOTIFICATION
+#include <linux/usb/host_ext_event.h>
+static void vbus_drop_host_send_uevent(struct work_struct *);
+static DECLARE_WORK(vbus_drop_uevent_work, vbus_drop_host_send_uevent);
+#endif
 
 #include "musb_core.h"
 
@@ -403,6 +410,13 @@ void musb_hnp_stop(struct musb *musb)
 
 #endif
 
+#ifdef CONFIG_USB_HOST_EXTRA_NOTIFICATION
+static void vbus_drop_host_send_uevent(struct work_struct *ignored)
+{
+	host_send_uevent(USB_HOST_EXT_EVENT_VBUS_DROP);
+}
+#endif
+
 /*
  * Interrupt Service Routine to record USB "global" interrupts.
  * Since these do not happen often and signify things of
@@ -513,9 +527,8 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 	/* see manual for the order of the tests */
 	if (int_usb & MUSB_INTR_SESSREQ) {
 		void __iomem *mbase = musb->mregs;
-
 		if ((devctl & MUSB_DEVCTL_VBUS) == MUSB_DEVCTL_VBUS
-				&& (devctl & MUSB_DEVCTL_BDEVICE)) {
+				|| (devctl & MUSB_DEVCTL_BDEVICE)) {
 			dev_dbg(musb->controller, "SessReq while on B state\n");
 			return IRQ_HANDLED;
 		}
@@ -568,6 +581,7 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 			 */
 		case OTG_STATE_A_WAIT_BCON:
 		case OTG_STATE_A_WAIT_VRISE:
+		case OTG_STATE_A_IDLE:
 			if (musb->vbuserr_retry) {
 				void __iomem *mbase = musb->mregs;
 
@@ -604,8 +618,24 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 				musb->port1_status);
 
 		/* go through A_WAIT_VFALL then start a new session */
-		if (!ignore)
+		if (!ignore) {
 			musb_platform_set_vbus(musb, 0);
+#ifdef CONFIG_USB_HOST_EXTRA_NOTIFICATION
+			switch (musb->xceiv->state) {
+			case OTG_STATE_A_IDLE:
+			case OTG_STATE_A_WAIT_VRISE:
+			case OTG_STATE_A_WAIT_BCON:
+			case OTG_STATE_A_HOST:
+			case OTG_STATE_A_SUSPEND:
+			case OTG_STATE_A_PERIPHERAL:
+				schedule_work(&vbus_drop_uevent_work);
+				break;
+			default:
+				break;
+			}
+#endif
+
+		}
 		handled = IRQ_HANDLED;
 	}
 
@@ -645,9 +675,24 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 #ifdef	CONFIG_USB_MUSB_OTG
 				musb->xceiv->state = OTG_STATE_B_WAIT_ACON;
 				dev_dbg(musb->controller, "HNP: Setting timer for b_ase0_brst\n");
+#ifndef CONFIG_USB_OTG_20
+				/*
+				 * OTG 2.0 Compliance:
+				 * A small delay observed when device
+				 * transition to B_WAIT_ACON state and the
+				 * time PET sends a CONNECT interrupt. This
+				 * timer expires before the connect IRQ
+				 * is handled and hence puts back the state to
+				 * B_PERIPH mode. When the CONNECT interrupt
+				 * arrives, OTG state machine is not at the
+				 * right place to cater that. May be increase
+				 * delay to an acceptable allowance than to
+				 * switch off completely?
+				 */
 				mod_timer(&musb->otg_timer, jiffies
 					+ msecs_to_jiffies(
-							OTG_TIME_B_ASE0_BRST));
+						OTG_TIME_B_ASE0_BRST));
+#endif
 #endif
 			}
 			break;
@@ -664,6 +709,16 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 		case OTG_STATE_B_HOST:
 			/* Transition to B_PERIPHERAL, see 6.8.2.6 p 44 */
 			dev_dbg(musb->controller, "REVISIT: SUSPEND as B_HOST\n");
+#ifdef CONFIG_USB_OTG_20
+			/*
+			 * May be stop HNP before we transition back to the
+			 * peripheral role? We are suspending the bus to
+			 * handback the session to the A device.
+			 */
+			musb_hnp_stop(musb);
+			musb->xceiv->state = OTG_STATE_B_PERIPHERAL;
+#endif
+
 			break;
 		default:
 			/* "should not happen" */
@@ -675,7 +730,6 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 #ifdef CONFIG_USB_MUSB_HDRC_HCD
 	if (int_usb & MUSB_INTR_CONNECT) {
 		struct usb_hcd *hcd = musb_to_hcd(musb);
-
 		handled = IRQ_HANDLED;
 		musb->is_active = 1;
 		set_bit(HCD_FLAG_SAW_IRQ, &hcd->flags);
@@ -713,13 +767,41 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 				dev_dbg(musb->controller, "CONNECT as b_peripheral???\n");
 			break;
 		case OTG_STATE_B_WAIT_ACON:
+			{
+#ifdef CONFIG_USB_OTG_20
+			u8 power = musb_readb(musb->mregs, MUSB_POWER);
 			dev_dbg(musb->controller, "HNP: CONNECT, now b_host\n");
+
+			/*
+			 * OTG 2.0 Compliance
+			 * During the B-UUT_HNP case, when device takes role
+			 * of the host for the first time everything is fine,
+			 * init the root hub and ports etc. But during the
+			 * second pass of the test, without a physical
+			 * disconnect/connect it looks like the reset
+			 * signalling is not cleared from the power register.
+			 * By clearing it manually here helps to proceed
+			 * further in enumerating the attached A-device as a
+			 * peripheral multiple times without physical
+			 * connect/disconnect.
+			 */
+			if (is_host_enabled(musb) &&
+					(power & MUSB_POWER_RESET))
+				musb_writeb(musb->mregs,
+					MUSB_POWER,
+					(power & ~MUSB_POWER_RESET));
+#endif
+
 b_host:
 			musb->xceiv->state = OTG_STATE_B_HOST;
 			hcd->self.is_b_host = 1;
+#ifdef CONFIG_USB_OTG_20
+			musb->g.otg_hnp_reqd = 0;
+#endif
 			musb->ignore_disconnect = 0;
 			del_timer(&musb->otg_timer);
 			break;
+			}
 		default:
 			if ((devctl & MUSB_DEVCTL_VBUS)
 					== (3 << MUSB_DEVCTL_VBUS_SHIFT)) {
@@ -765,18 +847,46 @@ b_host:
 			 * from B_HOST act right too.  The B_HOST code
 			 * in hnp_stop() is currently not used...
 			 */
+#ifdef CONFIG_USB_OTG_20
 			musb_root_disconnect(musb);
-			musb_to_hcd(musb)->self.is_b_host = 0;
+			musb_hnp_stop(musb);
 			musb->xceiv->state = OTG_STATE_B_PERIPHERAL;
+			/*
+			 * OTG 2.0 Compliance
+			 * we are still in host mode. So a musb_g_disconnect
+			 * is improper here?
+			 * State transitions are handled by the musb_hnp_stop
+			 * routine
+			 */
+#else
+			musb_root_disconnect(musb);
+			musb->xceiv->state = OTG_STATE_B_PERIPHERAL;
+			musb_to_hcd(musb)->self.is_b_host = 0;
 			MUSB_DEV_MODE(musb);
 			musb_g_disconnect(musb);
+#endif
 			break;
 		case OTG_STATE_A_PERIPHERAL:
+		case OTG_STATE_A_IDLE:
 			musb_hnp_stop(musb);
 			musb_root_disconnect(musb);
 			/* FALLTHROUGH */
 		case OTG_STATE_B_WAIT_ACON:
+		case OTG_STATE_A_WAIT_VRISE:
 			/* FALLTHROUGH */
+#ifdef CONFIG_USB_OTG_20
+			/* OTG 2.0 Compliance */
+			if (musb->g.otg_hnp_reqd)
+				musb->g.otg_hnp_reqd = 0;
+
+			if (is_host_active(musb)) {
+				musb_hnp_stop(musb);
+				musb_root_disconnect(musb);
+				/* move back to peripheral mode */
+				musb->xceiv->state = OTG_STATE_B_PERIPHERAL;
+			}
+			break;
+#endif
 #endif	/* OTG */
 #ifdef CONFIG_USB_GADGET_MUSB_HDRC
 		case OTG_STATE_B_PERIPHERAL:
@@ -1041,9 +1151,6 @@ static void musb_shutdown(struct platform_device *pdev)
 #if defined(CONFIG_USB_MUSB_TUSB6010) || defined(CONFIG_USB_MUSB_OMAP2PLUS) \
 	|| defined(CONFIG_USB_MUSB_AM35X)
 static ushort __initdata fifo_mode = 4;
-#elif defined(CONFIG_USB_MUSB_UX500) \
-	|| defined(CONFIG_USB_MUSB_UX500_MODULE)
-static ushort __initdata fifo_mode = 5;
 #else
 static ushort __initdata fifo_mode = 2;
 #endif
@@ -1779,7 +1886,9 @@ musb_srp_store(struct device *dev, struct device_attribute *attr,
 {
 	struct musb	*musb = dev_to_musb(dev);
 	unsigned short	srp;
-
+#ifdef CONFIG_USB_OTG_20
+	musb->xceiv->start_srp(musb->xceiv);
+#endif
 	if (sscanf(buf, "%hu", &srp) != 1
 			|| (srp != 1)) {
 		dev_err(dev, "SRP: Value must be 1\n");
@@ -2214,7 +2323,16 @@ static void musb_save_context(struct musb *musb)
 	musb->context.devctl = musb_readb(musb_base, MUSB_DEVCTL);
 
 	for (i = 0; i < musb->config->num_eps; ++i) {
-		epio = musb->endpoints[i].regs;
+		struct musb_hw_ep       *hw_ep;
+
+		musb_writeb(musb_base, MUSB_INDEX, i);
+		hw_ep = &musb->endpoints[i];
+		if (!hw_ep)
+			continue;
+		epio = hw_ep->regs;
+		if (!epio)
+			continue;
+
 		musb->context.index_regs[i].txmaxp =
 			musb_readw(epio, MUSB_TXMAXP);
 		musb->context.index_regs[i].txcsr =
@@ -2280,7 +2398,16 @@ static void musb_restore_context(struct musb *musb)
 	musb_writeb(musb_base, MUSB_DEVCTL, musb->context.devctl);
 
 	for (i = 0; i < musb->config->num_eps; ++i) {
-		epio = musb->endpoints[i].regs;
+		struct musb_hw_ep       *hw_ep;
+
+		musb_writeb(musb_base, MUSB_INDEX, i);
+		hw_ep = &musb->endpoints[i];
+		if (!hw_ep)
+			continue;
+		epio = hw_ep->regs;
+		if (!epio)
+			continue;
+
 		musb_writew(epio, MUSB_TXMAXP,
 			musb->context.index_regs[i].txmaxp);
 		musb_writew(epio, MUSB_TXCSR,
@@ -2334,9 +2461,8 @@ static void musb_restore_context(struct musb *musb)
 
 static int musb_suspend(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
+	struct musb     *musb = dev_to_musb(dev);
 	unsigned long	flags;
-	struct musb	*musb = dev_to_musb(&pdev->dev);
 
 	spin_lock_irqsave(&musb->lock, flags);
 
@@ -2350,19 +2476,12 @@ static int musb_suspend(struct device *dev)
 		 */
 	}
 
-	musb_save_context(musb);
-
 	spin_unlock_irqrestore(&musb->lock, flags);
 	return 0;
 }
 
 static int musb_resume(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct musb	*musb = dev_to_musb(&pdev->dev);
-
-	musb_restore_context(musb);
-
 	/* for static cmos like DaVinci, register values were preserved
 	 * unless for some reason the whole soc powered down or the USB
 	 * module got reset through the PSC (vs just being disabled).
@@ -2406,8 +2525,12 @@ static const struct dev_pm_ops musb_dev_pm_ops = {
 	.runtime_suspend = musb_runtime_suspend,
 	.runtime_resume = musb_runtime_resume,
 };
-
+#ifdef CONFIG_UX500_SOC_DB8500
 #define MUSB_DEV_PM_OPS (&musb_dev_pm_ops)
+#else
+#define MUSB_DEV_PM_OPS NULL
+#endif
+
 #else
 #define	MUSB_DEV_PM_OPS	NULL
 #endif

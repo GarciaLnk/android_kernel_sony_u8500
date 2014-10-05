@@ -46,6 +46,25 @@ config INPUT_AB8500_PONKEY
 	  To compile this driver as a module, choose M here: the module
 	  will be called ab8500-ponkey.
 
+config INPUT_AB8500_FORCECRASH
+	boolean "AB8500 power key forcecrash support"
+	default n
+	depends on INPUT_AB8500_PONKEY && MAGIC_SYSRQ
+	help
+	  Say Y here if you want support forcecrash functionality through
+	  AB8500 power key. Triggers panic if power key is hold then
+	  released for more than 4.5secs.
+
+config INPUT_AB8505_MICRO_USB_DETECT
+	bool "AB8505/AB9540 Micro USB device detection support"
+	depends on AB8500_CORE && (MACH_U8520 || MACH_U9540)
+	help
+	  Say Y here to enable Micro USB cable detection driver. This Driver
+	  detects the accessory devices connected to the micro usb connector,
+	  like micro usb headset, uart, carkit etc.
+
+	  If unsure, say N.
+
 config INPUT_AD714X
 	tristate "Analog Devices AD714x Capacitance Touch Sensor"
 	help
@@ -207,6 +226,17 @@ config INPUT_ATI_REMOTE2
 	  To compile this driver as a module, choose M here: the module will be
 	  called ati_remote2.
 
+config INPUT_KEYCHORD
+	tristate "Key chord input driver support"
+	help
+	  Say Y here if you want to enable the key chord driver
+	  accessible at /dev/keychord.  This driver can be used
+	  for receiving notifications when client specified key
+	  combinations are pressed.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called keychord.
+
 config INPUT_KEYSPAN_REMOTE
 	tristate "Keyspan DMR USB remote control (EXPERIMENTAL)"
 	depends on EXPERIMENTAL
@@ -229,6 +259,33 @@ config INPUT_LPS001WP
 	help
 	  This is a pressure sensor connected to I2C, mounted on the
 	  snowball and other ST-E boards
+
+config LPS001WP_INPUT_DEVICE
+	bool "ST LPS001WP INPUT DEVICE"
+	depends on INPUT_LPS001WP
+	default n
+	help
+	   This driver allows device to be used as an input device
+	   need to be enabled only when input device support
+	   is required.
+
+config INPUT_LPS331AP
+	tristate "LPS331AP pressure sensor from ST Micro"
+	depends on I2C
+	help
+	  Say Y here if you want to support a pressure sensor connetced via I2C
+	  with a LPS331AP, mounted on the U9540 and other ST-E boards.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called lps331ap.
+
+config LPS331AP_INPUT_DEVICE
+	bool "ST LPS331AP INPUT DEVICE"
+	depends on INPUT_LPS331AP
+	default n
+	help
+	  Say Y here if LPS331AP device is required, when enable here, the driver
+	  allows LPS331AP device to be used as an input device.
 
 config INPUT_POWERMATE
 	tristate "Griffin PowerMate and Contour Jog support"
@@ -314,6 +371,11 @@ config INPUT_SGI_BTNS
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called sgi_btns.
+
+config INPUT_GPIO
+	tristate "GPIO driver support"
+	help
+	  Say Y here if you want to support gpio based keys, wheels etc...
 
 config HP_SDC_RTC
 	tristate "HP SDC Real Time Clock"
@@ -509,4 +571,90 @@ config INPUT_STE_FF_VIBRA
 
 	  To compile this driver as a module, choose M here. The module will
 	  be called ste_ff_vibra.
+
+config INPUT_LSM303DLH_ACCELEROMETER
+        tristate "LSM303DLH combo chip accelerometer driver"
+        depends on I2C
+        default n
+        help
+          LSM303DLH combo chip accelerometer driver.
+
+config INPUT_LSM303DLH_MAGNETOMETER
+        tristate "LSM303DLH combo chip magnetometer driver"
+        depends on I2C
+        default n
+        help
+          LSM303DLH combo chip magnetometer driver.
+
+config INPUT_LSM303DLHC_ACCELEROMETER
+        tristate "LSM303DLHC combo chip accelerometer driver"
+        depends on I2C
+        default n
+        help
+          LSM303DLHC combo chip accelerometer driver.
+
+config INPUT_LSM303DLHC_ACCELEROMETER_LT
+        tristate "LSM303DLHC combo chip light accelerometer driver"
+        depends on I2C
+        default n
+        help
+          LSM303DLHC combo chip light accelerometer driver. It uses runtime
+          power management to save current instead of irq. It supports
+          polling intervals down to 10 ms and up to 10000 ms. Runtime power
+          management operates either with regulator or chip power-down mode.
+
+config INPUT_SIMPLE_REMOTE
+        bool "Simple Remote detection driver"
+        default n
+        select SIMPLE_REMOTE_PLATFORM
+        help
+           Provides support for detecting 3.5mm audio jack, such as wired
+           headset. Requires the hardware specific driver
+           config SIMPLE_REMOTE_PLATFORM
+
+config INPUT_L3G4200D
+        bool "L3G4200D gyroscope sensor driver"
+        depends on I2C
+        default n
+        help
+          If you say yes here you get support L3G4200D gyroscope sensor.
+
+config INPUT_NOA3402
+        bool "NOA3402 proximity and light sensor driver"
+        depends on I2C
+        default n
+        help
+          If you say yes here you get support for the NOA3402 chip.
+          This is used as a proximity and light sensor.
+
+config INPUT_BMP180
+        tristate "Bosch BMP180 pressure sensor"
+        default n
+        depends on I2C
+        help
+          Say Y here if you want support for the BMP180 pressure
+          device. This driver only supports I2C communication.
+
+config INPUT_APDS9702
+        tristate "APDS9702 proximity driver"
+        depends on I2C
+        default n
+        help
+          If you say yes here you get support for the APDS9702 chip.
+          This is used as a proximity sensor.
+
+config INPUT_LPS331AP
+        bool "LPS331AP pressure sensor driver"
+        depends on I2C
+        default n
+        help
+          If you say yes here you get support LPS331AP pressure sensor.
+
+config INPUT_SO340010_TOUCH_KEY
+        tristate "SO340010-16qnf configurable capacitive sensing IC driver"
+        depends on I2C
+        default n
+        help
+          SO340010-16qnf configurable capacitive sensing IC driver.
+
 endif

@@ -102,6 +102,8 @@ static enum power_supply_property ab5500_btemp_props[] = {
 
 static LIST_HEAD(ab5500_btemp_list);
 
+static int ab5500_btemp_bat_temp_trig(int mux);
+
 struct ab5500_btemp *ab5500_btemp_get(void)
 {
 	struct ab5500_btemp *di;
@@ -122,31 +124,32 @@ int ab5500_btemp_get_batctrl_temp(struct ab5500_btemp *di)
 }
 
 /**
- * ab5500_btemp_batctrl_volt_to_res() - convert batctrl voltage to resistance
+ * ab5500_btemp_volt_to_res() - convert batctrl voltage to resistance
  * @di:		pointer to the ab5500_btemp structure
- * @v_batctrl:	measured batctrl voltage
+ * @volt:	measured batctrl/btemp_ball voltage
+ * @batcrtl:	batctrl/btemp_ball node
  *
  * This function returns the battery resistance that is
- * derived from the BATCTRL voltage.
+ * derived from the BATCTRL/BTEMP_BALL voltage.
  * Returns value in Ohms.
  */
-static int ab5500_btemp_batctrl_volt_to_res(struct ab5500_btemp *di,
-	int v_batctrl)
+static int ab5500_btemp_volt_to_res(struct ab5500_btemp *di,
+	int volt, bool batctrl)
 {
 	int rbs;
 
-	if (di->bat->adc_therm == ABx500_ADC_THERM_BATCTRL) {
+	if (batctrl) {
 		/*
 		 * If the battery has internal NTC, we use the current
 		 * source to calculate the resistance, 7uA or 20uA
 		 */
-		rbs = v_batctrl * 1000 / di->curr_source;
+		rbs = volt * 1000 / di->curr_source;
 	} else {
 		/*
-		 * BAT_CTRL is internally
+		 * BTEMP_BALL is internally
 		 * connected to 1.8V through a 10k resistor
 		 */
-		rbs = (10000 * (v_batctrl)) / (1800 - v_batctrl);
+		rbs = (10000 * volt) / (1800 - volt);
 	}
 	return rbs;
 }
@@ -257,14 +260,14 @@ static int ab5500_btemp_get_batctrl_res(struct ab5500_btemp *di)
 
 	ret = ab5500_btemp_curr_source_enable(di, true);
 	/* TODO: This delay has to be optimised */
-	mdelay(1000);
+	msleep(100);
 	if (ret) {
 		dev_err(di->dev, "%s curr source enable failed\n", __func__);
 		return ret;
 	}
 
 	batctrl = ab5500_btemp_read_batctrl_voltage(di);
-	res = ab5500_btemp_batctrl_volt_to_res(di, batctrl);
+	res = ab5500_btemp_volt_to_res(di, batctrl, true);
 
 	ret = ab5500_btemp_curr_source_enable(di, false);
 	if (ret) {
@@ -276,6 +279,96 @@ static int ab5500_btemp_get_batctrl_res(struct ab5500_btemp *di)
 		__func__, batctrl, res);
 
 	return res;
+}
+
+/**
+ * ab5500_btemp_get_btemp_ball_res() - get battery resistance
+ * @di:		pointer to the ab5500_btemp structure
+ *
+ * This function returns the battery pack identification
+ * resistance using resistor pull-up mode. Returns value in Ohms.
+ */
+static int ab5500_btemp_get_btemp_ball_res(struct ab5500_btemp *di)
+{
+	int ret, vntc;
+
+	ret = abx500_mask_and_set_register_interruptible(di->dev,
+		AB5500_BANK_FG_BATTCOM_ACC, AB5500_UART,
+		UART_MODE, ADOUT_10K_PULL_UP);
+	if (ret) {
+		dev_err(di->dev,
+			"failed to enable 10k pull up to Vadout\n");
+			return ret;
+	}
+
+	vntc = ab5500_gpadc_convert(di->gpadc, BTEMP_BALL);
+	if (vntc < 0) {
+		dev_err(di->dev, "%s gpadc conversion failed,"
+				" using previous value\n", __func__);
+		return vntc;
+	}
+
+	return ab5500_btemp_volt_to_res(di, vntc, false);
+}
+
+/**
+ * ab5500_btemp_temp_to_res() - temperature to resistance
+ * @di:		pointer to the ab5500_btemp structure
+ * @tbl:	pointer to the resiatance to temperature table
+ * @tbl_size:	size of the resistance to temperature table
+ * @temp:	temperature to calculate the resistance from
+ *
+ * This function returns the battery resistance in ohms
+ * based on temperature.
+ */
+static int ab5500_btemp_temp_to_res(struct ab5500_btemp *di,
+	const struct abx500_res_to_temp *tbl, int tbl_size, int temp)
+{
+	int i, res;
+	/*
+	 * Calculate the formula for the straight line
+	 * Simple interpolation if we are within
+	 * the resistance table limits, extrapolate
+	 * if resistance is outside the limits.
+	 */
+	if (temp < tbl[0].temp)
+		i = 0;
+	else if (temp >= tbl[tbl_size - 1].temp)
+		i = tbl_size - 2;
+	else {
+		i = 0;
+		while (!(temp >= tbl[i].temp &&
+			temp < tbl[i + 1].temp))
+			i++;
+	}
+
+	res = tbl[i].resist + ((tbl[i + 1].resist - tbl[i].resist) *
+		(temp - tbl[i].temp)) / (tbl[i + 1].temp - tbl[i].temp);
+	return res;
+}
+
+/**
+ * ab5500_btemp_temp_to_volt() - temperature to adc voltage
+ * @di:		pointer to the ab5500_btemp structure
+ * @temp:	temperature to calculate the voltage from
+ *
+ * This function returns the adc voltage in millivolts
+ * based on temperature.
+ */
+static int ab5500_btemp_temp_to_volt(struct ab5500_btemp *di, int temp)
+{
+	int res, id;
+
+	id = di->bat->batt_id;
+	res = ab5500_btemp_temp_to_res(di,
+		di->bat->bat_type[id].r_to_t_tbl,
+                di->bat->bat_type[id].n_temp_tbl_elements,
+		temp);
+	/*
+	 * BTEMP_BALL is internally connected to 1.8V
+	 * through a 10k resistor
+	 */
+	return((1800 * res) / (10000 + res));
 }
 
 /**
@@ -322,56 +415,30 @@ static int ab5500_btemp_res_to_temp(struct ab5500_btemp *di,
  */
 static int ab5500_btemp_measure_temp(struct ab5500_btemp *di)
 {
-	int temp, ret;
-	static int prev;
-	int rbat, vntc;
-	int rntc = 0;
+	int temp, rbat;
 	u8 id;
 
 	id = di->bat->batt_id;
 	if (di->bat->adc_therm == ABx500_ADC_THERM_BATCTRL &&
-			id != BATTERY_UNKNOWN) {
+			id != BATTERY_UNKNOWN && !di->bat->auto_trig)
 		rbat = ab5500_btemp_get_batctrl_res(di);
-		if (rbat < 0) {
-			dev_err(di->dev, "%s get batctrl res failed\n",
-				__func__);
-			/*
-			 * Return out-of-range temperature so that
-			 * charging is stopped
-			 */
-			return BTEMP_THERMAL_LOW_LIMIT;
-		}
+	else
+		rbat = ab5500_btemp_get_btemp_ball_res(di);
 
-		temp = ab5500_btemp_res_to_temp(di,
-			di->bat->bat_type[id].r_to_t_tbl,
-			di->bat->bat_type[id].n_temp_tbl_elements, rbat);
-	} else {
-		ret = abx500_mask_and_set_register_interruptible(di->dev,
-			AB5500_BANK_FG_BATTCOM_ACC, AB5500_UART,
-			UART_MODE, ADOUT_10K_PULL_UP);
-		if (ret) {
-			dev_err(di->dev,
-				"failed to enable 10k pull up to Vadout\n");
-		}
-		vntc = ab5500_gpadc_convert(di->gpadc, BTEMP_BALL);
-		if (vntc < 0) {
-			dev_err(di->dev,
-				"%s gpadc conversion failed,"
-				" using previous value\n", __func__);
-			return prev;
-		}
+	if (rbat < 0) {
+		dev_err(di->dev, "%s failed to get resistance\n", __func__);
 		/*
-		 * The PCB NTC is sourced from 2.75v via a 10kOhm
-		 * resistor.
+		 * Return out-of-range temperature so that
+		 * charging is stopped
 		 */
-		rntc = 10000 * vntc / (27500 - vntc);
-
-		temp = ab5500_btemp_res_to_temp(di,
-			di->bat->bat_type[id].r_to_t_tbl,
-			di->bat->bat_type[id].n_temp_tbl_elements, rntc);
-		prev = temp;
+		return BTEMP_THERMAL_LOW_LIMIT;
 	}
+
+	temp = ab5500_btemp_res_to_temp(di,
+		di->bat->bat_type[id].r_to_t_tbl,
+		di->bat->bat_type[id].n_temp_tbl_elements, rbat);
 	dev_dbg(di->dev, "Battery temperature is %d\n", temp);
+
 	return temp;
 }
 
@@ -452,10 +519,33 @@ static void ab5500_btemp_periodic_work(struct work_struct *work)
 	}
 	di->bat->temp_now = di->bat_temp;
 
-	/* Schedule a new measurement */
-	queue_delayed_work(di->btemp_wq,
-		&di->btemp_periodic_work,
-		round_jiffies(20 * HZ));
+	if (!di->bat->auto_trig) {
+		/* Check for temperature limits */
+		if (di->bat_temp <= BTEMP_THERMAL_LOW_LIMIT) {
+			dev_err(di->dev,
+				"battery temp less than lower threshold\n");
+			power_supply_changed(&di->btemp_psy);
+		} else if (di->bat_temp >= BTEMP_THERMAL_HIGH_LIMIT_62) {
+			dev_err(di->dev,
+				"battery temp greater them max threshold\n");
+			power_supply_changed(&di->btemp_psy);
+		}
+
+		/* Schedule a new measurement */
+		if (di->events.usb_conn)
+			queue_delayed_work(di->btemp_wq,
+				&di->btemp_periodic_work,
+				round_jiffies(di->bat->interval_charging * HZ));
+		else
+			queue_delayed_work(di->btemp_wq,
+				&di->btemp_periodic_work,
+				round_jiffies(di->bat->interval_not_charging * HZ));
+	} else {
+		/* Schedule a new measurement */
+		queue_delayed_work(di->btemp_wq,
+			&di->btemp_periodic_work,
+			round_jiffies(di->bat->interval_charging * HZ));
+	}
 }
 
 /**
@@ -604,12 +694,14 @@ static int ab5500_btemp_get_ext_psy_data(struct device *dev, void *data)
 				/* USB disconnected */
 				if (!ret.intval && di->events.usb_conn) {
 					di->events.usb_conn = false;
+					if (di->bat->auto_trig)
 						ab5500_btemp_periodic(di,
 							false);
 				}
 				/* USB connected */
 				else if (ret.intval && !di->events.usb_conn) {
 					di->events.usb_conn = true;
+					if (di->bat->auto_trig)
 						ab5500_btemp_periodic(di, true);
 				}
 				break;
@@ -646,19 +738,22 @@ static struct ab5500_btemp_interrupts ab5500_btemp_irq[] = {
 	{"BATT_REMOVAL", ab5500_btemp_batt_removal_handler},
 	{"BATT_ATTACH", ab5500_btemp_batt_attach_handler},
 };
+
 static int ab5500_btemp_bat_temp_trig(int mux)
 {
 	struct ab5500_btemp *di = ab5500_btemp_get();
+	int temp = ab5500_btemp_measure_temp(di);
 
-	if (di->bat_temp < BTEMP_THERMAL_LOW_LIMIT) {
+	if (temp < (BTEMP_THERMAL_LOW_LIMIT+1)) {
 		dev_err(di->dev,
 			"battery temp less than lower threshold (-10 deg cel)\n");
 		power_supply_changed(&di->btemp_psy);
-	} else if (di->bat_temp > BTEMP_THERMAL_HIGH_LIMIT_62) {
+	} else if (temp > (BTEMP_THERMAL_HIGH_LIMIT_62-1)) {
 		dev_err(di->dev, "battery temp greater them max threshold\n");
 		power_supply_changed(&di->btemp_psy);
 	}
-	return 0;;
+
+	return 0;
 }
 
 static int ab5500_btemp_auto_temp(struct ab5500_btemp *di)
@@ -674,8 +769,10 @@ static int ab5500_btemp_auto_temp(struct ab5500_btemp *di)
 
 	auto_ip->mux = BTEMP_BALL;
 	auto_ip->freq = MS500;
-	auto_ip->min = BTEMP_THERMAL_LOW_LIMIT;
-	auto_ip->max = BTEMP_THERMAL_HIGH_LIMIT_62;
+	auto_ip->min = ab5500_btemp_temp_to_volt(di,
+				BTEMP_THERMAL_HIGH_LIMIT_62);
+	auto_ip->max = ab5500_btemp_temp_to_volt(di,
+				BTEMP_THERMAL_LOW_LIMIT);
 	auto_ip->auto_adc_callback = ab5500_btemp_bat_temp_trig;
 	di->gpadc_auto = auto_ip;
 	ret = ab5500_gpadc_convert_auto(di->gpadc, di->gpadc_auto);
@@ -831,14 +928,22 @@ static int __devinit ab5500_btemp_probe(struct platform_device *pdev)
 		dev_dbg(di->dev, "Requested %s IRQ %d: %d\n",
 			ab5500_btemp_irq[i].name, irq, ret);
 	}
-	ret = ab5500_btemp_auto_temp(di);
-	if (ret) {
-		dev_err(di->dev,
-			"failed to register auto trigger for battery temp\n");
-		goto free_irq;
+
+	if (!di->bat->auto_trig) {
+		/* Schedule monitoring work only if battery type is known */
+		if (di->bat->batt_id != BATTERY_UNKNOWN)
+			queue_delayed_work(di->btemp_wq, &di->btemp_periodic_work, 0);
+	} else {
+		ret = ab5500_btemp_auto_temp(di);
+		if (ret) {
+			dev_err(di->dev,
+				"failed to register auto trigger for battery temp\n");
+			goto free_irq;
+		}
 	}
 
 	platform_set_drvdata(pdev, di);
+	list_add_tail(&di->node, &ab5500_btemp_list);
 
 	dev_info(di->dev, "probe success\n");
 	return ret;

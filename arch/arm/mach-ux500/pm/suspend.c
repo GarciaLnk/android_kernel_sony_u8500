@@ -11,18 +11,24 @@
 
 #include <linux/suspend.h>
 #include <linux/mfd/dbx500-prcmu.h>
-#include <linux/gpio/nomadik.h>
+#include <linux/regulator/machine.h>
 #include <linux/regulator/ab8500-debug.h>
 #include <linux/regulator/dbx500-prcmu.h>
 #include <linux/mfd/dbx500-prcmu.h>
+#include <linux/wakelock.h>
+
+#include <plat/gpio-nomadik.h>
 
 #include <mach/context.h>
 #include <mach/pm.h>
+#include <mach/id.h>
 
 #include "suspend_dbg.h"
 
 static void (*pins_suspend_force)(void);
 static void (*pins_suspend_force_mux)(void);
+
+static suspend_state_t suspend_state = PM_SUSPEND_ON;
 
 void suspend_set_pins_force_fn(void (*force)(void), void (*force_mux)(void))
 {
@@ -42,7 +48,7 @@ void suspend_unblock_sleep(void)
 	atomic_dec(&block_sleep);
 }
 
-static bool sleep_is_blocked(void)
+bool suspend_sleep_is_blocked(void)
 {
 	return (atomic_read(&block_sleep) != 0);
 }
@@ -52,8 +58,13 @@ static int suspend(bool do_deepsleep)
 	bool pins_force = pins_suspend_force_mux && pins_suspend_force;
 	int ret = 0;
 
-	if (sleep_is_blocked()) {
+	if (suspend_sleep_is_blocked()) {
 		pr_info("suspend/resume: interrupted by modem.\n");
+		return -EBUSY;
+	}
+
+	if (has_wake_lock(WAKE_LOCK_SUSPEND)) {
+		pr_info("suspend/resume: aborted. wakelock has been taken.\n");
 		return -EBUSY;
 	}
 
@@ -64,7 +75,16 @@ static int suspend(bool do_deepsleep)
 	nmk_gpio_wakeups_suspend();
 
 	/* configure the prcm for a sleep wakeup */
-	prcmu_enable_wakeups(PRCMU_WAKEUP(ABB));
+	if (cpu_is_u9500())
+		prcmu_enable_wakeups(PRCMU_WAKEUP(ABB) | PRCMU_WAKEUP(HSI0));
+	else
+#if defined(CONFIG_RTC_DRV_PL031)
+		prcmu_enable_wakeups(PRCMU_WAKEUP(ABB) | PRCMU_WAKEUP(RTC));
+#else
+		prcmu_enable_wakeups(PRCMU_WAKEUP(ABB));
+#endif
+
+	ux500_suspend_dbg_test_set_wakeup();
 
 	context_vape_save();
 
@@ -86,8 +106,21 @@ static int suspend(bool do_deepsleep)
 
 	ux500_pm_gic_decouple();
 
+	/* Copy GIC interrupt settings to PRCMU interrupt settings */
+	ux500_pm_prcmu_copy_gic_settings();
+
 	if (ux500_pm_gic_pending_interrupt()) {
-		pr_info("suspend/resume: pending interrupt\n");
+		pr_info("suspend/resume: pending interrupt gic\n");
+
+		/* Recouple GIC with the interrupt bus */
+		ux500_pm_gic_recouple();
+		ret = -EBUSY;
+
+		goto exit;
+	}
+
+	if (ux500_pm_prcmu_pending_interrupt()) {
+		pr_info("suspend/resume: pending interrupt prcmu\n");
 
 		/* Recouple GIC with the interrupt bus */
 		ux500_pm_gic_recouple();
@@ -148,8 +181,12 @@ exit:
 	}
 
 	/* This is what cpuidle wants */
-	prcmu_enable_wakeups(PRCMU_WAKEUP(ARM) | PRCMU_WAKEUP(RTC) |
-			     PRCMU_WAKEUP(ABB));
+	if (cpu_is_u9500())
+		prcmu_enable_wakeups(PRCMU_WAKEUP(ARM) | PRCMU_WAKEUP(RTC) |
+				     PRCMU_WAKEUP(ABB) | PRCMU_WAKEUP(HSI0));
+	else
+		prcmu_enable_wakeups(PRCMU_WAKEUP(ARM) | PRCMU_WAKEUP(RTC) |
+				     PRCMU_WAKEUP(ABB));
 
 	nmk_gpio_wakeups_resume();
 
@@ -194,10 +231,22 @@ static int ux500_suspend_valid(suspend_state_t state)
 	return state == PM_SUSPEND_MEM || state == PM_SUSPEND_STANDBY;
 }
 
+static int ux500_suspend_prepare(void)
+{
+	int ret;
+
+	ret = regulator_suspend_prepare(suspend_state);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
 static int ux500_suspend_prepare_late(void)
 {
 	/* ESRAM to retention instead of OFF until ROM is fixed */
 	(void) prcmu_config_esram0_deep_sleep(ESRAM0_DEEP_SLEEP_STATE_RET);
+
 	ab8500_regulator_debug_force();
 	ux500_regulator_suspend_debug();
 	return 0;
@@ -210,24 +259,37 @@ static void ux500_suspend_wake(void)
 	(void) prcmu_config_esram0_deep_sleep(ESRAM0_DEEP_SLEEP_STATE_RET);
 }
 
+static void ux500_suspend_finish(void)
+{
+	(void)regulator_suspend_finish();
+}
+
 static int ux500_suspend_begin(suspend_state_t state)
 {
-	(void) prcmu_qos_update_requirement(PRCMU_QOS_ARM_OPP,
-					    "suspend", 100);
+	(void) prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
+					    "suspend",
+					    PRCMU_QOS_ARM_KHZ_MAX);
+	suspend_state = state;
 	return ux500_suspend_dbg_begin(state);
 }
 
 static void ux500_suspend_end(void)
 {
-	(void) prcmu_qos_update_requirement(PRCMU_QOS_ARM_OPP,
-					    "suspend", 25);
+	(void) prcmu_qos_update_requirement(PRCMU_QOS_ARM_KHZ,
+					    "suspend",
+					    PRCMU_QOS_DEFAULT_VALUE);
+	suspend_state = PM_SUSPEND_ON;
+
+	ux500_suspend_dbg_end();
 }
 
 static struct platform_suspend_ops ux500_suspend_ops = {
 	.enter	      = ux500_suspend_enter,
 	.valid	      = ux500_suspend_valid,
+	.prepare      = ux500_suspend_prepare,
 	.prepare_late = ux500_suspend_prepare_late,
 	.wake	      = ux500_suspend_wake,
+	.finish       = ux500_suspend_finish,
 	.begin	      = ux500_suspend_begin,
 	.end	      = ux500_suspend_end,
 };
@@ -235,7 +297,9 @@ static struct platform_suspend_ops ux500_suspend_ops = {
 static __init int ux500_suspend_init(void)
 {
 	ux500_suspend_dbg_init();
-	prcmu_qos_add_requirement(PRCMU_QOS_ARM_OPP, "suspend", 25);
+	prcmu_qos_add_requirement(PRCMU_QOS_ARM_KHZ,
+				  "suspend",
+				  PRCMU_QOS_DEFAULT_VALUE);
 	suspend_set_ops(&ux500_suspend_ops);
 	return 0;
 }

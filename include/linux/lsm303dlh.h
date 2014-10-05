@@ -31,8 +31,6 @@
 #ifdef __KERNEL__
 /**
  * struct lsm303dlh_platform_data - platform datastructure for lsm303dlh
- * @name_a: accelerometer name
- * @name_m: magnetometer name
  * @irq_a1: interrupt line 1 of accelerometer
  * @irq_a2: interrupt line 2 of accelerometer
  * @irq_m: interrupt line of magnetometer
@@ -42,10 +40,9 @@
  * @negative_x: x axis is orientation, 0 or 1
  * @negative_y: y axis is orientation, 0 or 1
  * @negative_z: z axis is orientation, 0 or 1
+ * @chip_id: to store ID of the LSM chip
  */
 struct lsm303dlh_platform_data {
-	const char *name_a;
-	const char *name_m;
 	u32  irq_a1;
 	u32  irq_a2;
 	u32  irq_m;
@@ -55,6 +52,7 @@ struct lsm303dlh_platform_data {
 	u8  negative_x;
 	u8  negative_y;
 	u8  negative_z;
+	u32 chip_id;
 };
 #endif /* __KERNEL__ */
 

@@ -19,6 +19,8 @@
 #include <linux/regulator/db8500-prcmu.h>
 #include "dbx500-prcmu.h"
 
+static	int (*prcmu_set_epod) (u16 epod_id, u8 epod_state);
+
 static int db8500_regulator_enable(struct regulator_dev *rdev)
 {
 	struct dbx500_regulator_info *info = rdev_get_drvdata(rdev);
@@ -29,9 +31,11 @@ static int db8500_regulator_enable(struct regulator_dev *rdev)
 	dev_vdbg(rdev_get_dev(rdev), "regulator-%s-enable\n",
 		info->desc.name);
 
-	info->is_enabled = true;
-	if (!info->exclude_from_power_state)
-		power_state_active_enable();
+	if (!info->is_enabled) {
+		info->is_enabled = true;
+		if (!info->exclude_from_power_state)
+			power_state_active_enable();
+	}
 
 	return 0;
 }
@@ -47,9 +51,11 @@ static int db8500_regulator_disable(struct regulator_dev *rdev)
 	dev_vdbg(rdev_get_dev(rdev), "regulator-%s-disable\n",
 		info->desc.name);
 
-	info->is_enabled = false;
-	if (!info->exclude_from_power_state)
-		ret = power_state_active_disable();
+	if (info->is_enabled) {
+		info->is_enabled = false;
+		if (!info->exclude_from_power_state)
+			ret = power_state_active_disable();
+	}
 
 	return ret;
 }
@@ -407,10 +413,13 @@ dbx500_regulator_info[DB8500_NUM_REGULATORS] = {
 
 static int __devinit db8500_regulator_probe(struct platform_device *pdev)
 {
-	struct regulator_init_data *db8500_init_data =
+	struct db8500_regulator_init_data *db8500_init_pdata =
 					dev_get_platdata(&pdev->dev);
+	struct regulator_init_data *db8500_init_data =
+		(struct regulator_init_data *) db8500_init_pdata->regulators;
 	int i, err;
 
+	prcmu_set_epod = db8500_init_pdata->set_epod;
 	/* register all regulators */
 	for (i = 0; i < ARRAY_SIZE(dbx500_regulator_info); i++) {
 		struct dbx500_regulator_info *info;

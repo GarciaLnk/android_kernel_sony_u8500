@@ -2,7 +2,10 @@
  * Cypress TrueTouch(TM) Standard Product I2C touchscreen driver.
  * include/linux/cyttsp.h
  *
- * Copyright (C) 2009-2011 Cypress Semiconductor, Inc.
+ * Copyright (C) 2009, 2010 Cypress Semiconductor, Inc.
+ *
+ * Portions created by Sony Mobile are Copyright (C) 2012 Sony Mobile
+ * Communications AB.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -34,14 +37,12 @@
 
 #define CY_SPI_NAME "cyttsp-spi"
 #define CY_I2C_NAME "cyttsp-i2c"
-/* Scan Type selection for finger and/or stylus activation */
-#define CY_SCN_TYP_DFLT 0x01 /* finger only mutual scan */
 /* Active Power state scanning/processing refresh interval */
-#define CY_ACT_INTRVL_DFLT 0x00 /* ms */
+#define CY_ACT_INTRVL_DFLT 0x00
 /* touch timeout for the Active power */
-#define CY_TCH_TMOUT_DFLT 0x64 /* ms */
+#define CY_TCH_TMOUT_DFLT 0xFF
 /* Low Power state scanning/processing refresh interval */
-#define CY_LP_INTRVL_DFLT 0x32 /* ms */
+#define CY_LP_INTRVL_DFLT 0x0A
 /*
  *defines for Gen2 (Txx2xx); Gen3 (Txx3xx)
  * use these defines to set cyttsp_platform_data.gen in board config file
@@ -55,13 +56,32 @@ enum cyttsp_gen {
  * if set to 0, then all gesture movements are reported
  * Valid range is 0 - 15
  */
-#define CY_ACT_DIST_DFLT 8
-#define CY_ACT_DIST CY_ACT_DIST_DFLT
-#define CY_ACT_DIST_BITS 0x0F
-/* max retries for read/write ops */
-#define CY_NUM_RETRY 6
+enum cyttsp_act_dist {
+	CY_ACT_DIST_KEEP_ASIS = -1,
+	CY_ACT_DIST_CLR = 0xf0,
+	CY_ACT_DIST_00 = 0,
+	CY_ACT_DIST_01 = 1,
+	CY_ACT_DIST_02 = 2,
+	CY_ACT_DIST_03 = 3,
+	CY_ACT_DIST_04 = 4,
+	CY_ACT_DIST_05 = 5,
+	CY_ACT_DIST_06 = 6,
+	CY_ACT_DIST_07 = 7,
+	CY_ACT_DIST_08 = 8,
+	CY_ACT_DIST_09 = 9,
+	CY_ACT_DIST_10 = 10,
+	CY_ACT_DIST_11 = 11,
+	CY_ACT_DIST_12 = 12,
+	CY_ACT_DIST_13 = 13,
+	CY_ACT_DIST_14 = 14,
+	CY_ACT_DIST_15 = 15,
+	CY_ACT_DIST_DFLT = CY_ACT_DIST_08,
+	CY_ACT_DIST = CY_ACT_DIST_DFLT,
+};
 
 enum cyttsp_gest {
+	CY_GEST_KEEP_ASIS = -1,
+	CY_GEST_GRP_CLR = 0x0f,
 	CY_GEST_GRP_NONE = 0,
 	CY_GEST_GRP1 =	0x10,
 	CY_GEST_GRP2 = 0x20,
@@ -70,20 +90,23 @@ enum cyttsp_gest {
 };
 
 enum cyttsp_powerstate {
-	CY_IDLE_STATE,		/* IC cannot be reached */
-	CY_READY_STATE,		/* pre-operational; ready to go to ACTIVE */
-	CY_ACTIVE_STATE,	/* app is running, IC is scanning */
-	CY_LOW_PWR_STATE,	/* not currently used  */
-	CY_SLEEP_STATE,		/* app is running, IC is idle */
-	CY_BL_STATE,		/* bootloader is running */
-	CY_LDR_STATE,		/* loader is running */
-	CY_SYSINFO_STATE,	/* Switching to SysInfo mode */
-	CY_INVALID_STATE	/* always last in the list */
+	CY_IDLE_STATE,
+	CY_ACTIVE_STATE,
+	CY_LOW_PWR_STATE,
+	CY_SLEEP_STATE,
+	CY_UNSURE_STATE,
+};
+
+enum {
+	FLIP_DATA_FLAG = 0x01,
+	REVERSE_X_FLAG = 0x02,
+	REVERSE_Y_FLAG = 0x04,
 };
 
 struct cyttsp_platform_data {
 	u32 maxx;
 	u32 maxy;
+	u32 maxz;
 	u32 flags;
 	enum cyttsp_gen gen;
 	unsigned use_st:1;
@@ -96,19 +119,25 @@ struct cyttsp_platform_data {
 	unsigned use_load_file:1;
 	unsigned use_force_fw_update:1;
 	unsigned use_virtual_keys:1;
+	unsigned use_airtouch:1;
+	unsigned use_charger_mode:1;
+	unsigned use_configure_sensitivity:1;
 	enum cyttsp_powerstate power_state;
-	u8 gest_set;
-	u8 scn_typ;     /* finger and/or stylus scanning */
+	enum cyttsp_gest gest_set;
+	enum cyttsp_act_dist act_dist;
 	u8 act_intrvl;  /* Active refresh interval; ms */
 	u8 tch_tmout;   /* Active touch timeout; ms */
 	u8 lp_intrvl;   /* Low power refresh interval; ms */
-	int (*wakeup)(void);
-	int (*init)(int on_off);
+	int (*wakeup)(struct device *);
+	int (*init)(int on_off, struct device *);
+	int (*reset)(void);
 	void (*mt_sync)(struct input_dev *);
+	int (*cust_spec)(u8 data[], int size);
 	char *name;
 	s16 irq_gpio;
-	s16 rst_gpio;
 	bool invert;
+	bool disable_w_rejection;
+	char *virtual_key_settings;
 };
 
 #endif /* _CYTTSP_H_ */

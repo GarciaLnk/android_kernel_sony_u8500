@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2011 ARM Limited. All rights reserved.
+ * Copyright (C) 2010-2012 ARM Limited. All rights reserved.
  * 
  * This program is free software and is provided to you under the terms of the GNU General Public License version 2
  * as published by the Free Software Foundation, and any use by you of this program is subject to the terms of such GNU licence.
@@ -26,6 +26,7 @@
 #include <linux/slab.h>
 
 #include <asm/memory.h>
+#include <asm/uaccess.h>			/* to verify pointers from user space */
 #include <asm/cacheflush.h>
 #include <linux/dma-mapping.h>
 
@@ -139,7 +140,11 @@ _mali_osk_errcode_t _ump_osk_mem_mapregion_init( ump_memory_allocation * descrip
 	}
 
 	vma = (struct vm_area_struct*)descriptor->process_mapping_info;
-	if (NULL == vma ) return _MALI_OSK_ERR_FAULT;
+	if (NULL == vma )
+	{
+		kfree(vma_usage_tracker);
+		return _MALI_OSK_ERR_FAULT;
+	}
 
 	vma->vm_private_data = vma_usage_tracker;
 	vma->vm_flags |= VM_IO;
@@ -205,39 +210,137 @@ _mali_osk_errcode_t _ump_osk_mem_mapregion_map( ump_memory_allocation * descript
 	return retval;
 }
 
+static void level1_cache_flush_all(void)
+{
+	DBG_MSG(4, ("UMP[xx] Flushing complete L1 cache\n"));
+	__cpuc_flush_kern_all();
+}
 
-void _ump_osk_msync( ump_dd_mem * mem, ump_uk_msync_op op )
+void _ump_osk_msync( ump_dd_mem * mem, void * virt, u32 offset, u32 size, ump_uk_msync_op op, ump_session_data * session_data )
 {
 	int i;
-	DBG_MSG(3, ("Flushing nr of blocks: %u. First: paddr: 0x%08x vaddr: 0x%08x size:%dB\n", mem->nr_blocks, mem->block_array[0].addr, phys_to_virt(mem->block_array[0].addr), mem->block_array[0].size));
+	const void *start_v, *end_v;
 
-	/* TODO: Use args->size and args->address to select a subrange of this allocation to flush */
-	for (i=0 ; i<mem->nr_blocks; i++)
+	/* Flush L1 using virtual address, the entire range in one go.
+	 * Only flush if user space process has a valid write mapping on given address. */
+	if( (mem) && (virt!=NULL) && (access_ok(VERIFY_WRITE, virt, size)) )
 	{
-		/* TODO: Find out which flush method is best of 1)Dma OR  2)Normal flush functions */
-		/* TODO: Use args->op to select the flushing method: CLEAN_AND_INVALIDATE or CLEAN */
-		/*#define USING_DMA_FLUSH*/
-		#ifdef  USING_DMA_FLUSH
-			DEBUG_ASSERT( (PAGE_SIZE==mem->block_array[i].size));
-			dma_map_page(NULL, pfn_to_page(mem->block_array[i].addr >> PAGE_SHIFT), 0, PAGE_SIZE, DMA_BIDIRECTIONAL );
-			/*dma_unmap_page(NULL, mem->block_array[i].addr, PAGE_SIZE, DMA_BIDIRECTIONAL);*/
-		#else
-			/* Normal style flush */
-			ump_dd_physical_block *block;
-			u32 start_p, end_p;
-			const void *start_v, *end_v;
-			block = &mem->block_array[i];
-
-			start_p   = (u32)block->addr;
-			start_v = phys_to_virt( start_p ) ;
-
-			end_p   = start_p + block->size-1;
-			end_v   = phys_to_virt( end_p ) ;
-
-			dmac_flush_range(start_v, end_v);
-			outer_flush_range(start_p, end_p);
-		#endif
+		start_v = (void *)virt;
+		end_v   = (void *)(start_v + size - 1);
+		/*  There is no dmac_clean_range, so the L1 is always flushed,
+		 *  also for UMP_MSYNC_CLEAN. */
+		dmac_flush_range(start_v, end_v);
+		DBG_MSG(3, ("UMP[%02u] Flushing CPU L1 Cache. Cpu address: %x-%x\n", mem->secure_id, start_v,end_v));
+	}
+	else
+	{
+		if (session_data)
+		{
+			if (op == _UMP_UK_MSYNC_FLUSH_L1  )
+			{
+				DBG_MSG(4, ("UMP Pending L1 cache flushes: %d\n", session_data->has_pending_level1_cache_flush));
+				session_data->has_pending_level1_cache_flush = 0;
+				level1_cache_flush_all();
+				return;
+			}
+			else
+			{
+				if (session_data->cache_operations_ongoing)
+				{
+					session_data->has_pending_level1_cache_flush++;
+					DBG_MSG(4, ("UMP[%02u] Defering the L1 flush. Nr pending:%d\n", mem->secure_id, session_data->has_pending_level1_cache_flush) );
+				}
+				else
+				{
+					/* Flushing the L1 cache for each switch_user() if ump_cache_operations_control(START) is not called */
+					level1_cache_flush_all();
+				}
+			}
+		}
+		else
+		{
+			DBG_MSG(4, ("Unkown state %s %d\n", __FUNCTION__, __LINE__));
+			level1_cache_flush_all();
+		}
 	}
 
-	return ;
+	if ( NULL == mem ) return;
+
+	if ( mem->size_bytes==size)
+	{
+		DBG_MSG(3, ("UMP[%02u] Flushing CPU L2 Cache\n",mem->secure_id));
+	}
+	else
+	{
+		DBG_MSG(3, ("UMP[%02u] Flushing CPU L2 Cache. Blocks:%u, TotalSize:%u. FlushSize:%u Offset:0x%x FirstPaddr:0x%08x\n",
+	            mem->secure_id, mem->nr_blocks, mem->size_bytes, size, offset, mem->block_array[0].addr));
+	}
+
+
+	/* Flush L2 using physical addresses, block for block. */
+	for (i=0 ; i < mem->nr_blocks; i++)
+	{
+		u32 start_p, end_p;
+		ump_dd_physical_block *block;
+		block = &mem->block_array[i];
+
+		if(offset >= block->size)
+		{
+			offset -= block->size;
+			continue;
+		}
+
+		if(offset)
+		{
+			start_p = (u32)block->addr + offset;
+			/* We'll zero the offset later, after using it to calculate end_p. */
+		}
+		else
+		{
+			start_p = (u32)block->addr;
+		}
+
+		if(size < block->size - offset)
+		{
+			end_p = start_p + size - 1;
+			size = 0;
+		}
+		else
+		{
+			if(offset)
+			{
+				end_p = start_p + (block->size - offset - 1);
+				size -= block->size - offset;
+				offset = 0;
+			}
+			else
+			{
+				end_p = start_p + block->size - 1;
+				size -= block->size;
+			}
+		}
+
+		switch(op)
+		{
+				case _UMP_UK_MSYNC_CLEAN:
+						outer_clean_range(start_p, end_p);
+						break;
+				case _UMP_UK_MSYNC_CLEAN_AND_INVALIDATE:
+						outer_flush_range(start_p, end_p);
+						break;
+				case _UMP_UK_MSYNC_INVALIDATE:
+						outer_inv_range(start_p, end_p);
+						break;
+				default:
+						break;
+		}
+
+		if(0 == size)
+		{
+			/* Nothing left to flush. */
+			break;
+		}
+	}
+
+	return;
 }

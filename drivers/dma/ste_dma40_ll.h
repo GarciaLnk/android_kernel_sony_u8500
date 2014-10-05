@@ -62,8 +62,6 @@
 #define D40_SREG_ELEM_LOG_LIDX_MASK	(0xFF << D40_SREG_ELEM_LOG_LIDX_POS)
 
 /* Link register */
-#define D40_DEACTIVATE_EVENTLINE	0x0
-#define D40_ACTIVATE_EVENTLINE		0x1
 #define D40_EVENTLINE_POS(i)		(2 * i)
 #define D40_EVENTLINE_MASK(i)		(0x3 << D40_EVENTLINE_POS(i))
 
@@ -308,6 +306,11 @@ struct d40_def_lcsp {
 
 /* Physical channels */
 
+enum d40_lli_flags {
+	LLI_ADDR_INC	= 1 << 0,
+	LLI_TERM_INT	= 1 << 1,
+};
+
 void d40_phy_cfg(struct stedma40_chan_cfg *cfg,
 		 u32 *src_cfg,
 		 u32 *dst_cfg,
@@ -323,25 +326,17 @@ int d40_phy_sg_to_lli(struct scatterlist *sg,
 		      struct d40_phy_lli *lli,
 		      dma_addr_t lli_phys,
 		      u32 reg_cfg,
-		      u32 data_width,
-		      int psize,
 		      bool cyclic,
-		      bool cyclic_int);
+		      bool cyclic_int,
+		      struct stedma40_half_channel_info *info);
 
 int d40_phy_fill_lli(struct d40_phy_lli *lli,
 		     dma_addr_t data,
 		     u32 data_size,
-		     int psize,
 		     dma_addr_t next_lli,
 		     u32 reg_cfg,
-		     bool term_int,
-		     u32 data_width,
-		     bool is_device);
-
-void d40_phy_lli_write(void __iomem *virtbase,
-		       u32 phy_chan_num,
-		       struct d40_phy_lli *lli_dst,
-		       struct d40_phy_lli *lli_src);
+		     struct stedma40_half_channel_info *info,
+		     unsigned int flags);
 
 /* Logical channels */
 
@@ -350,19 +345,11 @@ void d40_log_fill_lli(struct d40_log_lli *lli,
 		      u32 data_size,
 		      u32 reg_cfg,
 		      u32 data_width,
-		      bool addr_inc);
-
-int d40_log_sg_to_dev(struct scatterlist *sg,
-		      int sg_len,
-		      struct d40_log_lli_bidir *lli,
-		      struct d40_def_lcsp *lcsp,
-		      u32 src_data_width,
-		      u32 dst_data_width,
-		      enum dma_data_direction direction,
-		      dma_addr_t dev_addr);
+		      unsigned int flags);
 
 int d40_log_sg_to_lli(struct scatterlist *sg,
 		      int sg_len,
+		      dma_addr_t dev_addr,
 		      struct d40_log_lli *lli_sg,
 		      u32 lcsp13, /* src or dst*/
 		      u32 data_width);

@@ -19,124 +19,193 @@
 #include <linux/workqueue.h>
 
 /**
- * enum b2r2_core_queue - Indicates the B2R2 queue that the job belongs to
- *
- * @B2R2_CORE_QUEUE_AQ1: Application queue 1
- * @B2R2_CORE_QUEUE_AQ2: Application queue 2
- * @B2R2_CORE_QUEUE_AQ3: Application queue 3
- * @B2R2_CORE_QUEUE_AQ4: Application queue 4
- * @B2R2_CORE_QUEUE_CQ1: Composition queue 1
- * @B2R2_CORE_QUEUE_CQ2: Composition queue 2
- * @B2R2_CORE_QUEUE_NO_OF: Number of queues
+ * B2R2_RESET_TIMEOUT_VALUE - The number of times to read the status register
+ *                             waiting for b2r2 to go idle after soft reset.
  */
-enum b2r2_core_queue {
-	B2R2_CORE_QUEUE_AQ1 = 0,
-	B2R2_CORE_QUEUE_AQ2,
-	B2R2_CORE_QUEUE_AQ3,
-	B2R2_CORE_QUEUE_AQ4,
-	B2R2_CORE_QUEUE_CQ1,
-	B2R2_CORE_QUEUE_CQ2,
-	B2R2_CORE_QUEUE_NO_OF,
-};
-
-#define B2R2_NUM_APPLICATIONS_QUEUES 4
+#define B2R2_RESET_TIMEOUT_VALUE (1500)
 
 /**
- * enum b2r2_core_job_state - Indicates the current state of the job
- *
- * @B2R2_CORE_JOB_IDLE: Never queued
- * @B2R2_CORE_JOB_QUEUED: In queue but not started yet
- * @B2R2_CORE_JOB_RUNNING: Running, executed by B2R2
- * @B2R2_CORE_JOB_DONE: Completed
- * @B2R2_CORE_JOB_CANCELED: Canceled
+ * B2R2_CLK_FLAG - Value to write into clock reg to turn clock on
  */
-enum b2r2_core_job_state {
-	B2R2_CORE_JOB_IDLE = 0,
-	B2R2_CORE_JOB_QUEUED,
-	B2R2_CORE_JOB_RUNNING,
-	B2R2_CORE_JOB_DONE,
-	B2R2_CORE_JOB_CANCELED,
-};
+#define B2R2_CLK_FLAG (0x125)
 
 /**
- * struct b2r2_core_job - Represents a B2R2 core job
- *
- * @start_sentinel: Memory overwrite guard
- *
- * @tag: Client value. Used by b2r2_core_job_find_first_with_tag().
- * @prio: Job priority, from -19 up to 20. Mapped to the
- *        B2R2 application queues. Filled in by the client.
- * @first_node_address: Physical address of the first node. Filled
- *                      in by the client.
- * @last_node_address: Physical address of the last node. Filled
- *                     in by the client.
- *
- * @callback: Function that will be called when the job is done.
- * @acquire_resources: Function that allocates the resources needed
- *                     to execute the job (i.e. SRAM alloc). Must not
- *                     sleep if atomic, should fail with negative error code
- *                     if resources not available.
- * @release_resources: Function that releases the resources previously
- *                     allocated by acquire_resources (i.e. SRAM alloc).
- * @release: Function that will be called when the reference count reaches
- *           zero.
- *
- * @job_id: Unique id for this job, assigned by B2R2 core
- * @job_state: The current state of the job
- * @jiffies: Number of jiffies needed for this request
- *
- * @list: List entry element for internal list management
- * @event: Wait queue event to wait for job done
- * @work: Work queue structure, for callback implementation
- *
- * @queue: The queue that this job shall be submitted to
- * @control: B2R2 Queue control
- * @pace_control: For composition queue only
- * @interrupt_context: Context for interrupt
- *
- * @end_sentinel: Memory overwrite guard
+ * DEBUG_CHECK_ADDREF_RELEASE - Define this to enable addref / release debug
  */
-struct b2r2_core_job {
-	u32 start_sentinel;
+#define DEBUG_CHECK_ADDREF_RELEASE 1
 
-	/* Data to be filled in by client */
-	int tag;
-	int prio;
-	u32 first_node_address;
-	u32 last_node_address;
-	void (*callback)(struct b2r2_core_job *);
-	int (*acquire_resources)(struct b2r2_core_job *,
-		bool atomic);
-	void (*release_resources)(struct b2r2_core_job *,
-		bool atomic);
-	void (*release)(struct b2r2_core_job *);
+#ifdef CONFIG_DEBUG_FS
+/**
+ * HANDLE_TIMEOUTED_JOBS - Define this to check jobs for timeout and cancel them
+ */
+#define HANDLE_TIMEOUTED_JOBS
+#define JOB_TIMEOUT (HZ/2)
+#endif
 
-	/* Output data, do not modify */
-	int  job_id;
-	enum b2r2_core_job_state job_state;
-	unsigned long jiffies;
+/**
+ * B2R2_CLOCK_ALWAYS_ON - Define this to disable power save clock turn off
+ */
+/* #define B2R2_CLOCK_ALWAYS_ON 1 */
 
-	/* Data below is internal to b2r2_core, do not modify */
+/**
+ * START_SENTINEL - Watch guard to detect job overwrites
+ */
+#define START_SENTINEL 0xBABEDEEA
 
-	/* Reference counting */
-	u32 ref_count;
+/**
+ * STOP_SENTINEL - Watch guard to detect job overwrites
+ */
+#define END_SENTINEL 0xDADBDCDD
 
-	/* Internal data */
-	struct list_head  list;
-	wait_queue_head_t event;
-	struct work_struct work;
+/**
+ * B2R2_CORE_LOWEST_PRIO - Lowest prio allowed
+ */
+#define B2R2_CORE_LOWEST_PRIO -19
+/**
+ * B2R2_CORE_HIGHEST_PRIO - Highest prio allowed
+ */
+#define B2R2_CORE_HIGHEST_PRIO 20
 
-	/* B2R2 HW data */
-	enum b2r2_core_queue queue;
-	u32 control;
-	u32 pace_control;
-	u32 interrupt_context;
+/**
+ * B2R2_DOMAIN_DISABLE -
+ */
+#define B2R2_DOMAIN_DISABLE_TIMEOUT (HZ/100)
 
-	/* Timing data */
-	u32 hw_start_time;
-	s32 nsec_active_in_hw;
+/**
+ * B2R2_REGULATOR_RETRY_COUNT -
+ */
+#define B2R2_REGULATOR_RETRY_COUNT 10
 
-	u32 end_sentinel;
+
+#ifdef DEBUG_CHECK_ADDREF_RELEASE
+
+/**
+ * struct addref_release - Represents one addref or release. Used
+ *                         to debug addref / release problems
+ *
+ * @addref: true if this represents an addref else it represents
+ *          a release.
+ * @job: The job that was referenced
+ * @caller: The caller of the addref or release
+ * @ref_count: The job reference count after addref / release
+ */
+struct addref_release {
+	bool addref;
+	struct b2r2_core_job *job;
+	const char *caller;
+	int ref_count;
+};
+
+#endif
+
+/**
+ * struct b2r2_core - Administration data for B2R2 core
+ *
+ * @lock: Spin lock protecting the b2r2_core structure and the B2R2 HW
+ * @hw: B2R2 registers memory mapped
+ * @pmu_b2r2_clock: Control of B2R2 clock
+ * @log_dev: Device used for logging via dev_... functions
+ *
+ * @prio_queue: Queue of jobs sorted in priority order
+ * @active_jobs: Array containing pointer to zero or one job per queue
+ * @n_active_jobs: Number of active jobs
+ * @jiffies_last_active: jiffie value when adding last active job
+ * @jiffies_last_irq: jiffie value when last irq occured
+ * @timeout_work: Work structure for timeout work
+ *
+ * @next_job_id: Contains the job id that will be assigned to the next
+ *               added job.
+ *
+ * @clock_request_count: When non-zero, clock is on
+ * @clock_off_timer: Kernel timer to handle delayed turn off of clock
+ *
+ * @work_queue: Work queue to handle done jobs (callbacks) and timeouts in
+ *              non-interrupt context.
+ *
+ * @stat_n_irq: Number of interrupts (statistics)
+ * @stat_n_jobs_added: Number of jobs added (statistics)
+ * @stat_n_jobs_removed: Number of jobs removed (statistics)
+ * @stat_n_jobs_in_prio_list: Number of jobs in prio list (statistics)
+ *
+ * @debugfs_root_dir: Root directory for B2R2 debugfs
+ *
+ * @ar: Circular array of addref / release debug structs
+ * @ar_write: Where next write will occur
+ * @ar_read: First valid place to read. When ar_read == ar_write then
+ *           the array is empty.
+ */
+struct b2r2_core {
+	spinlock_t       lock;
+
+	struct b2r2_memory_map *hw;
+
+	u8 op_size;
+	u8 ch_size;
+	u8 pg_size;
+	u8 mg_size;
+	u16 min_req_time;
+	int irq;
+
+	char name[16];
+	struct device *dev;
+
+	struct list_head prio_queue;
+
+	struct b2r2_core_job *active_jobs[B2R2_CORE_QUEUE_NO_OF];
+	unsigned long    n_active_jobs;
+
+	unsigned long    jiffies_last_active;
+	unsigned long    jiffies_last_irq;
+#ifdef HANDLE_TIMEOUTED_JOBS
+	struct delayed_work     timeout_work;
+#endif
+	int              next_job_id;
+
+	unsigned long    clock_request_count;
+	struct timer_list clock_off_timer;
+
+	struct workqueue_struct *work_queue;
+
+	/* Statistics */
+	unsigned long    stat_n_irq_exit;
+	unsigned long    stat_n_irq_skipped;
+	unsigned long    stat_n_irq;
+	unsigned long    stat_n_jobs_added;
+	unsigned long    stat_n_jobs_removed;
+
+	unsigned long    stat_n_jobs_in_prio_list;
+
+#ifdef CONFIG_DEBUG_FS
+	struct dentry *debugfs_root_dir;
+	struct dentry *debugfs_core_root_dir;
+	struct dentry *debugfs_regs_dir;
+#endif
+
+#ifdef DEBUG_CHECK_ADDREF_RELEASE
+	/* Tracking release bug...*/
+	struct addref_release ar[100];
+	int ar_write;
+	int ar_read;
+#endif
+
+	/* Power management variables */
+	struct mutex domain_lock;
+	struct delayed_work domain_disable_work;
+
+	/*
+	 * We need to keep track of both the number of domain_enable/disable()
+	 * calls and whether the power was actually turned off, since the
+	 * power off is done in a delayed job.
+	 */
+	bool domain_enabled;
+	volatile bool valid;
+	int domain_request_count;
+	bool lockdown;
+
+	struct clk *b2r2_clock;
+	struct regulator *b2r2_reg;
+
+	struct b2r2_control *control;
 };
 
 /**
@@ -147,12 +216,14 @@ struct b2r2_core_job {
  * release the reference. The job callback function will be always
  * be called after the job is done or cancelled.
  *
+ * @control: The b2r2 control entity
  * @job: Job to be added
  *
  * Returns 0 if OK else negative error code
  *
  */
-int b2r2_core_job_add(struct b2r2_core_job *job);
+int b2r2_core_job_add(struct b2r2_control *control,
+		struct b2r2_core_job *job);
 
 /**
  * b2r2_core_job_wait() - Waits for an added job to be done.
@@ -179,12 +250,14 @@ int b2r2_core_job_cancel(struct b2r2_core_job *job);
  *
  * Reference count will be increased for the found job
  *
+ * @control: The b2r2 control entity
  * @job_id: Job id to find
  *
  * Returns job if found, else NULL
  *
  */
-struct b2r2_core_job *b2r2_core_job_find(int job_id);
+struct b2r2_core_job *b2r2_core_job_find(struct b2r2_control *control,
+		int job_id);
 
 /**
  * b2r2_core_job_find_first_with_tag() - Finds first job with given tag
@@ -193,12 +266,14 @@ struct b2r2_core_job *b2r2_core_job_find(int job_id);
  * This function can be used to find all jobs for a client, i.e.
  * when cancelling all jobs for a client.
  *
+ * @control: The b2r2 control entity
  * @tag: Tag to find
  *
  * Returns job if found, else NULL
  *
  */
-struct b2r2_core_job *b2r2_core_job_find_first_with_tag(int tag);
+struct b2r2_core_job *b2r2_core_job_find_first_with_tag(
+		struct b2r2_control *control, int tag);
 
 /**
  * b2r2_core_job_addref() - Increase the job reference count.
@@ -218,5 +293,9 @@ void b2r2_core_job_addref(struct b2r2_core_job *job, const char *caller);
  * @caller: The function calling this function (for debug)
  */
 void b2r2_core_job_release(struct b2r2_core_job *job, const char *caller);
+
+void b2r2_core_print_stats(struct b2r2_core *core);
+
+void b2r2_core_release(struct kref *control_ref);
 
 #endif /* !defined(__B2R2_CORE_JOB_H__) */

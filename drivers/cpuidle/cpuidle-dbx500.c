@@ -50,6 +50,8 @@
 
 #define UL_PLL_START_UP_LATENCY 8000 /* us */
 
+#define MAX_STATE_DETERMINE_LOOP_TIME 100000 /* usec */
+
 static struct cstate cstates[] = {
 	{
 		.enter_latency = 0,
@@ -127,7 +129,7 @@ static struct cstate cstates[] = {
 		.state = CI_SLEEP,
 		.desc = "ApSleep, UL PLL off    ",
 	},
-#ifdef CONFIG_UX500_CPUIDLE_APDEEPIDLE
+#ifdef CONFIG_DBX500_CPUIDLE_APDEEPIDLE
 	{
 		.enter_latency = 400,
 		.exit_latency = DEEP_SLEEP_WAKE_UP_LATENCY + 400,
@@ -184,7 +186,7 @@ struct cstate *ux500_ci_get_cstates(int *len)
 	return cstates;
 }
 
-static void restore_sequence(struct cpu_state *state, ktime_t now)
+static void restore_sequence(struct cpu_state *state)
 {
 	spin_lock(&cpuidle_lock);
 
@@ -209,6 +211,8 @@ static void restore_sequence(struct cpu_state *state, ktime_t now)
 
 	smp_rmb();
 	if (restore_ape) {
+		ktime_t now;
+
 		restore_ape = false;
 		smp_wmb();
 
@@ -228,9 +232,15 @@ static void restore_sequence(struct cpu_state *state, ktime_t now)
 		ux500_rtcrtt_off();
 
 		/*
+		 * Restore prcmu interrupt to cpu0
+		 */
+		irq_set_affinity(IRQ_DB8500_PRCMU1, cpumask_of(0));
+
+		/*
 		 * If we're returning from ApSleep and the RTC timer
 		 * caused the wake up, program the MTU to trigger.
 		 */
+		now = ktime_get();
 		if ((ktime_to_us(now) >= ktime_to_us(time_next)))
 			time_next = ktime_add(now, ktime_set(0, 1000));
 		/* Make sure have an MTU interrupt waiting for us */
@@ -263,8 +273,13 @@ static u32 get_remaining_sleep_time(ktime_t *next, int *on_cpu)
 		t = per_cpu(cpu_state, cpu)->sched_wake_up;
 
 		delta = ktime_to_us(ktime_sub(t, now));
-		if ((delta < remaining_sleep_time) && (delta > 0)) {
-			remaining_sleep_time = (u32)delta;
+
+		if (delta < remaining_sleep_time) {
+			if (delta > 0)
+				remaining_sleep_time = (u32)delta;
+			else
+				remaining_sleep_time = 0;
+
 			if (next)
 				(*next) = t;
 			if (on_cpu)
@@ -282,36 +297,64 @@ static bool is_last_cpu_running(void)
 	return atomic_read(&idle_cpus_counter) == num_online_cpus();
 }
 
-static int determine_sleep_state(u32 *sleep_time)
+static int determine_sleep_state(u32 *sleep_time, int loc_idle_counter,
+				 bool gic_frozen, ktime_t entry_time,
+				 ktime_t *est_wake_time)
 {
 	int i;
 
 	int cpu;
 	int max_depth;
-	bool power_state_req;
+	bool uart, modem, ape;
+	s64 delta_us;
 
 	/* If first cpu to sleep, go to most shallow sleep state */
-	if (!is_last_cpu_running())
+	if (loc_idle_counter != num_online_cpus())
 		return CI_WFI;
+
+	/*
+	 * This loop continuously checks if there is an IRQ and exits
+	 * immediately if there is, so we shouldn't count the time spent
+	 * in there as "irqs off" time.
+	 */
+	stop_critical_timings();
 
 	/* If other CPU is going to WFI, but not yet there wait. */
 	while (1) {
 		if (ux500_pm_other_cpu_wfi())
 			break;
 
-		if (ux500_pm_gic_pending_interrupt())
+		/* Check for pending IRQ's */
+		if (ux500_pm_gic_pending_interrupt()) {
+			start_critical_timings();
 			return -1;
+		}
 
-		if (!is_last_cpu_running())
+		/* If GIC frozen check for pending IRQ's also via PRCMU */
+		if (gic_frozen && ux500_pm_prcmu_pending_interrupt()) {
+			start_critical_timings();
+			return -1;
+		}
+
+		if (!is_last_cpu_running()) {
+			start_critical_timings();
 			return CI_WFI;
+		}
+
+		delta_us = ktime_us_delta(ktime_get(), entry_time);
+		if (delta_us > MAX_STATE_DETERMINE_LOOP_TIME) {
+			start_critical_timings();
+			pr_warning("%s: CPU=%d stuck in loop for %lld usec\n",
+				__func__, smp_processor_id(), delta_us);
+			return -1;
+		}
 	}
 
-	power_state_req = power_state_active_is_enabled() ||
-		prcmu_is_ac_wake_requested();
+	start_critical_timings();
 
-	(*sleep_time) = get_remaining_sleep_time(NULL, NULL);
+	(*sleep_time) = get_remaining_sleep_time(est_wake_time, NULL);
 
-	if ((*sleep_time) == UINT_MAX)
+	if (((*sleep_time) == UINT_MAX) || ((*sleep_time) == 0))
 		return CI_WFI;
 	/*
 	 * Never go deeper than the governor recommends even though it might be
@@ -324,6 +367,10 @@ static int determine_sleep_state(u32 *sleep_time)
 			max_depth = per_cpu(cpu_state, cpu)->gov_cstate;
 	}
 
+	uart = ux500_ci_dbg_force_ape_on();
+	ape = power_state_active_is_enabled();
+	modem = prcmu_is_ac_wake_requested();
+
 	for (i = max_depth; i > 0; i--) {
 
 		if ((*sleep_time) <= cstates[i].threshold)
@@ -331,8 +378,7 @@ static int determine_sleep_state(u32 *sleep_time)
 
 		if (cstates[i].APE == APE_OFF) {
 			/* This state says APE should be off */
-			if (power_state_req ||
-			    ux500_ci_dbg_force_ape_on())
+			if (ape || modem || uart)
 				continue;
 		}
 
@@ -340,7 +386,7 @@ static int determine_sleep_state(u32 *sleep_time)
 		break;
 	}
 
-	ux500_ci_dbg_register_reason(i, power_state_req,
+	ux500_ci_dbg_register_reason(i, ape, modem, uart,
 				     (*sleep_time),
 				     max_depth);
 	return max(CI_WFI, i);
@@ -354,12 +400,15 @@ static int enter_sleep(struct cpuidle_device *dev,
 	int sleep_time = 0;
 	s64 diff;
 	int ret;
+	int rtcrtt_program_time = NO_SLEEP_PROGRAMMED;
 	int target;
 	struct cpu_state *state;
 	bool slept_well = false;
 	int this_cpu = smp_processor_id();
 	bool migrate_timer;
 	bool master = false;
+	int loc_idle_counter;
+	ktime_t est_wake_time;
 
 	local_irq_disable();
 
@@ -367,7 +416,8 @@ static int enter_sleep(struct cpuidle_device *dev,
 
 	state = per_cpu(cpu_state, smp_processor_id());
 
-	wake_up = ktime_add(time_enter, tick_nohz_get_sleep_length());
+	est_wake_time = wake_up = ktime_add(time_enter,
+					    tick_nohz_get_sleep_length());
 
 	spin_lock(&cpuidle_lock);
 
@@ -387,13 +437,14 @@ static int enter_sleep(struct cpuidle_device *dev,
 
 	spin_unlock(&cpuidle_lock);
 
-	atomic_inc(&idle_cpus_counter);
+	loc_idle_counter = atomic_inc_return(&idle_cpus_counter);
 
 	/*
 	 * Determine sleep state considering both CPUs and
 	 * shared resources like e.g. VAPE
 	 */
-	target = determine_sleep_state(&sleep_time);
+	target = determine_sleep_state(&sleep_time, loc_idle_counter, false,
+				       time_enter, &est_wake_time);
 
 	if (target < 0)
 		/* "target" will be last_state in the cpuidle framework */
@@ -413,21 +464,27 @@ static int enter_sleep(struct cpuidle_device *dev,
 		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ENTER,
 				   &this_cpu);
 
-
 	if (master && (cstates[target].ARM != ARM_ON)) {
 
 		ux500_pm_gic_decouple();
 
+		/* Copy GIC interrupt settings to PRCMU interrupt settings */
+		ux500_pm_prcmu_copy_gic_settings();
+
+		smp_rmb();
+		loc_idle_counter = atomic_read(&idle_cpus_counter);
+
 		/*
 		 * Check if sleep state has changed after GIC has been frozen
 		 */
-		if (target != determine_sleep_state(&sleep_time)) {
+		if (target != determine_sleep_state(&sleep_time,
+						    loc_idle_counter,
+						    true,
+						    time_enter,
+						    &est_wake_time)) {
 			atomic_dec(&master_counter);
 			goto exit;
 		}
-
-		/* Copy GIC interrupt settings to PRCMU interrupt settings */
-		ux500_pm_prcmu_copy_gic_settings();
 
 		if (ux500_pm_gic_pending_interrupt()) {
 			/* An interrupt found => abort */
@@ -448,7 +505,6 @@ static int enter_sleep(struct cpuidle_device *dev,
 	}
 
 	if (master && (cstates[target].APE == APE_OFF)) {
-		ktime_t est_wake_time;
 		int wake_cpu;
 
 		/* We are going to sleep or deep sleep => prepare for it */
@@ -458,7 +514,7 @@ static int enter_sleep(struct cpuidle_device *dev,
 		sleep_time = get_remaining_sleep_time(&est_wake_time,
 						      &wake_cpu);
 
-		if (sleep_time == UINT_MAX) {
+		if ((sleep_time == UINT_MAX) || (sleep_time == 0)) {
 			atomic_dec(&master_counter);
 			goto exit;
 		}
@@ -477,6 +533,7 @@ static int enter_sleep(struct cpuidle_device *dev,
 		sleep_time -= MIN_SLEEP_WAKE_UP_LATENCY;
 
 		ux500_rtcrtt_next(sleep_time);
+		rtcrtt_program_time = sleep_time;
 
 		/*
 		 * Make sure the cpu that is scheduled first gets
@@ -527,6 +584,13 @@ static int enter_sleep(struct cpuidle_device *dev,
 
 	ux500_ci_dbg_log(target, time_enter);
 
+	ux500_ci_dbg_log_post_mortem(target,
+				     time_enter,
+				     est_wake_time,
+				     state->sched_wake_up,
+				     rtcrtt_program_time,
+				     master);
+
 	if (master && cstates[target].ARM != ARM_ON)
 		prcmu_set_power_state(cstates[target].pwrst,
 				      cstates[target].UL_PLL,
@@ -535,6 +599,8 @@ static int enter_sleep(struct cpuidle_device *dev,
 
 	if (master)
 		atomic_dec(&master_counter);
+
+	stop_critical_timings();
 
 	/*
 	 * If deepsleep/deepidle, Save return address to SRAM and set
@@ -547,14 +613,18 @@ static int enter_sleep(struct cpuidle_device *dev,
 		__asm__ __volatile__
 			("dsb\n\t" "wfi\n\t" : : : "memory");
 
+	start_critical_timings();
+
 	if (is_last_cpu_running())
 		ux500_ci_dbg_wake_latency(target, sleep_time);
 
 	time_wake = ktime_get();
 
+	ux500_ci_dbg_wake_time(time_wake);
+
 	slept_well = true;
 
-	restore_sequence(state, time_wake);
+	restore_sequence(state);
 
 exit:
 	if (!slept_well)
@@ -653,9 +723,6 @@ static int __init cpuidle_driver_init(void)
 	int res = -ENODEV;
 	int cpu;
 
-	if (ux500_is_svp())
-		goto out;
-
 	/* Configure wake up reasons */
 	prcmu_enable_wakeups(PRCMU_WAKEUP(ARM) | PRCMU_WAKEUP(RTC) |
 			     PRCMU_WAKEUP(ABB));
@@ -673,17 +740,28 @@ static int __init cpuidle_driver_init(void)
 	for_each_possible_cpu(cpu) {
 		res = init_cstates(cpu, per_cpu(cpu_state, cpu));
 		if (res)
-			goto out;
+			goto out2;
 		pr_info("cpuidle: initiated for CPU%d.\n", cpu);
 	}
 	mtu_clkevt = nmdk_clkevt_get();
 	if (!mtu_clkevt) {
 		pr_err("cpuidle: Could not get MTU timer.\n");
-		goto out;
+		goto out3;
 	}
 
 	return 0;
+out3:
+	for_each_possible_cpu(cpu) {
+		cpuidle_unregister_device(&per_cpu(cpu_state, cpu)->dev);
+	}
+out2:
+	cpuidle_unregister_driver(&cpuidle_drv);
 out:
+	for_each_possible_cpu(cpu)
+		kfree(per_cpu(cpu_state, cpu));
+
+	ux500_ci_dbg_remove();
+
 	pr_err("cpuidle: initialization failed.\n");
 	return res;
 }

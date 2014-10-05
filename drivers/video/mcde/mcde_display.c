@@ -14,16 +14,27 @@
 
 #include <video/mcde_display.h>
 
-/*temp*/
-#include <linux/delay.h>
 
 static void mcde_display_get_native_resolution_default(
 	struct mcde_display_device *ddev, u16 *x_res, u16 *y_res)
 {
-	if (x_res)
-		*x_res = ddev->native_x_res;
-	if (y_res)
-		*y_res = ddev->native_y_res;
+	/*
+	 * If orientation is 90 or 270 then compensate the results
+	 * Caller does not know about the orientation of the display
+	 */
+	if (ddev->orientation == MCDE_DISPLAY_ROT_90_CCW ||
+				ddev->orientation == MCDE_DISPLAY_ROT_90_CW) {
+		if (x_res)
+			*x_res = ddev->native_y_res;
+		if (y_res)
+			*y_res = ddev->native_x_res;
+	} else {
+		if (x_res)
+			*x_res = ddev->native_x_res;
+		if (y_res)
+			*y_res = ddev->native_y_res;
+
+	}
 }
 
 static enum mcde_ovly_pix_fmt mcde_display_get_default_pixel_format_default(
@@ -57,7 +68,8 @@ static int mcde_display_set_power_mode_default(struct mcde_display_device *ddev,
 		ddev->power_mode = MCDE_DISPLAY_PM_STANDBY;
 		/* force register settings */
 		if (ddev->port->type == MCDE_PORTTYPE_DPI)
-			ddev->update_flags = UPDATE_FLAG_VIDEO_MODE | UPDATE_FLAG_PIXEL_FORMAT;
+			ddev->update_flags = UPDATE_FLAG_VIDEO_MODE |
+						UPDATE_FLAG_PIXEL_FORMAT;
 	}
 
 	if (ddev->port->type == MCDE_PORTTYPE_DSI) {
@@ -122,7 +134,28 @@ static inline int mcde_display_try_video_mode_default(
 	struct mcde_display_device *ddev,
 	struct mcde_video_mode *video_mode)
 {
-	/* TODO Check if inside native_xres and native_yres */
+	/*
+	 * DSI video mode:
+	 * This function is intended for configuring supported video mode(s).
+	 * Overload it into the panel driver file and set up blanking
+	 * intervals and pixel clock according to below recommendations.
+	 *
+	 * vertical blanking parameters vbp, vfp, vsw are given in lines
+	 * horizontal blanking parameters hbp, hfp, hsw are given in pixels
+	 *
+	 * video_mode->pixclock is the time between two pixels (in picoseconds)
+	 * The source of the pixel clock is DSI PLL and it shall be set to
+	 * meet the requirement
+	 *
+	 * non-burst mode:
+	 * pixel clock (Hz) = (VACT+VBP+VFP+VSA) * (HACT+HBP+HFP+HSA) *
+	 *                    framerate * bpp / num_data_lanes
+	 *
+	 * burst mode:
+	 * pixel clock (Hz) > (VACT+VBP+VFP+VSA) * (HACT+HBP+HFP+HSA) *
+	 *                    framerate * bpp / num_data_lanes * 1.1
+	 * (1.1 is a 10% margin needed for burst mode calculations)
+	 */
 	return 0;
 }
 
@@ -137,11 +170,18 @@ static int mcde_display_set_video_mode_default(struct mcde_display_device *ddev,
 
 	ddev->video_mode = *video_mode;
 	channel_video_mode = ddev->video_mode;
-	/* Dependant on if display should rotate or MCDE should rotate */
-	if (ddev->rotation == MCDE_DISPLAY_ROT_90_CCW ||
-				ddev->rotation == MCDE_DISPLAY_ROT_90_CW) {
-		channel_video_mode.xres = ddev->native_x_res;
-		channel_video_mode.yres = ddev->native_y_res;
+	/*
+	 * If orientation is 90 or 270 then rotate the x and y resolution
+	 * Channel video mode resolution is always the native display
+	 * resolution
+	 */
+	if (ddev->orientation == MCDE_DISPLAY_ROT_90_CCW ||
+				ddev->orientation == MCDE_DISPLAY_ROT_90_CW) {
+		u32 old_x_res;
+
+		old_x_res = channel_video_mode.xres;
+		channel_video_mode.xres = channel_video_mode.yres;
+		channel_video_mode.yres = old_x_res;
 	}
 	ret = mcde_chnl_set_video_mode(ddev->chnl_state, &channel_video_mode);
 	if (ret < 0) {
@@ -184,30 +224,40 @@ static inline enum mcde_ovly_pix_fmt mcde_display_get_pixel_format_default(
 	return ddev->pixel_format;
 }
 
-
 static int mcde_display_set_rotation_default(struct mcde_display_device *ddev,
 	enum mcde_display_rotation rotation)
 {
 	int ret;
+	u8 param = 0;
+	enum mcde_display_rotation final;
+	struct mcde_port *port = ddev->port;
+	bool use_default;
 
-	ret = mcde_chnl_set_rotation(ddev->chnl_state, rotation,
-		ddev->rotbuf1, ddev->rotbuf2);
-	if (ret < 0) {
-		dev_warn(&ddev->dev, "%s:Failed to set rotation = %d\n",
-							__func__, rotation);
+	final = (360 + rotation - ddev->orientation) % 360;
+	ret = mcde_chnl_set_rotation(ddev->chnl_state, final);
+	if (WARN_ON(ret))
 		return ret;
+
+	if (port->dcs_addr_mode.normal || port->dcs_addr_mode.hor_flip)
+		use_default = false; /* Use values set in disp driver */
+	else
+		use_default = true; /* Not set in disp driver; use default */
+
+	if (final == MCDE_DISPLAY_ROT_180_CW) {
+		if (use_default)
+			param = DSI_DCS_ADDR_MODE_HOR_FLIP_DEFAULT;
+		else
+			param = port->dcs_addr_mode.hor_flip;
+	} else {
+		if (use_default)
+			param = DSI_DCS_ADDR_MODE_NORMAL_DEFAULT;
+		else
+			param = port->dcs_addr_mode.normal;
 	}
 
-	if (rotation == MCDE_DISPLAY_ROT_180_CCW) {
-		u8 param = 0x40;
-		(void) mcde_dsi_dcs_write(ddev->chnl_state,
-				DCS_CMD_SET_ADDRESS_MODE, &param, 1);
-	} else if (ddev->rotation == MCDE_DISPLAY_ROT_180_CCW &&
-			rotation != MCDE_DISPLAY_ROT_180_CCW) {
-		u8 param = 0;
-		(void) mcde_dsi_dcs_write(ddev->chnl_state,
-				DCS_CMD_SET_ADDRESS_MODE, &param, 1);
-	}
+	/* Set normal or horizontal flip */
+	(void)mcde_dsi_dcs_write(ddev->chnl_state, DCS_CMD_SET_ADDRESS_MODE,
+								&param, 1);
 
 	ddev->rotation = rotation;
 	ddev->update_flags |= UPDATE_FLAG_ROTATION;
@@ -221,53 +271,21 @@ static inline enum mcde_display_rotation mcde_display_get_rotation_default(
 	return ddev->rotation;
 }
 
-static int mcde_display_set_synchronized_update_default(
-	struct mcde_display_device *ddev, bool enable)
+static int mcde_display_wait_for_vsync_default(
+	struct mcde_display_device *ddev, s64 *timestamp)
 {
-	if (ddev->port->type == MCDE_PORTTYPE_DSI && enable) {
-		int ret;
-		u8 m = 0;
-
-		if (ddev->port->sync_src == MCDE_SYNCSRC_OFF)
-			return -EINVAL;
-
-		ret = mcde_dsi_dcs_write(ddev->chnl_state,
-						DCS_CMD_SET_TEAR_ON, &m, 1);
-		if (ret < 0) {
-			dev_warn(&ddev->dev,
-				"%s:Failed to set synchornized update = %d\n",
-				__func__, enable);
-			return ret;
-		}
-	}
-	ddev->synchronized_update = enable;
-	return 0;
-}
-
-static inline bool mcde_display_get_synchronized_update_default(
-	struct mcde_display_device *ddev)
-{
-	return ddev->synchronized_update;
+	return mcde_chnl_wait_for_next_vsync(ddev->chnl_state, timestamp);
 }
 
 static int mcde_display_apply_config_default(struct mcde_display_device *ddev)
 {
 	int ret;
 
-	ret = mcde_chnl_enable_synchronized_update(ddev->chnl_state,
-		ddev->synchronized_update);
-
-	if (ret < 0) {
-		dev_warn(&ddev->dev,
-			"%s:Failed to enable synchronized update\n",
-			__func__);
-		return ret;
-	}
-
 	if (!ddev->update_flags)
 		return 0;
 
-	if (ddev->update_flags & UPDATE_FLAG_VIDEO_MODE)
+	if (ddev->update_flags &
+			(UPDATE_FLAG_VIDEO_MODE | UPDATE_FLAG_ROTATION))
 		mcde_chnl_stop_flow(ddev->chnl_state);
 
 	ret = mcde_chnl_apply(ddev->chnl_state);
@@ -282,59 +300,13 @@ static int mcde_display_apply_config_default(struct mcde_display_device *ddev)
 	return 0;
 }
 
-static int mcde_display_invalidate_area_default(
-					struct mcde_display_device *ddev,
-					struct mcde_rectangle *area)
-{
-	dev_vdbg(&ddev->dev, "%s\n", __func__);
-	if (area) {
-		/* take union of rects */
-		u16 t;
-		t = min(ddev->update_area.x, area->x);
-		/* note should be > 0 */
-		ddev->update_area.w = max(ddev->update_area.x +
-							ddev->update_area.w,
-							area->x + area->w) - t;
-		ddev->update_area.x = t;
-		t = min(ddev->update_area.y, area->y);
-		ddev->update_area.h = max(ddev->update_area.y +
-							ddev->update_area.h,
-							area->y + area->h) - t;
-		ddev->update_area.y = t;
-		/* TODO: Implement real clipping when partial refresh is
-		activated.*/
-		ddev->update_area.w = min((u16) ddev->video_mode.xres,
-					(u16) ddev->update_area.w);
-		ddev->update_area.h = min((u16) ddev->video_mode.yres,
-					(u16) ddev->update_area.h);
-	} else {
-		ddev->update_area.x = 0;
-		ddev->update_area.y = 0;
-		ddev->update_area.w = ddev->video_mode.xres;
-		ddev->update_area.h = ddev->video_mode.yres;
-		/* Invalidate_area(ddev, NULL) means reset area to empty
-		 * rectangle really. After that the rectangle should grow by
-		 * taking an union (above). This means that the code should
-		 * really look like below, however the code above is a temp fix
-		 * for rotation.
-		 * TODO: fix
-		 * ddev->update_area.x = ddev->video_mode.xres;
-		 * ddev->update_area.y = ddev->video_mode.yres;
-		 * ddev->update_area.w = 0;
-		 * ddev->update_area.h = 0;
-		 */
-	}
-
-	return 0;
-}
-
 static int mcde_display_update_default(struct mcde_display_device *ddev,
 							bool tripple_buffer)
 {
 	int ret = 0;
 
-	ret = mcde_chnl_update(ddev->chnl_state, &ddev->update_area,
-							tripple_buffer);
+	ret = mcde_chnl_update(ddev->chnl_state, tripple_buffer);
+
 	if (ret < 0) {
 		dev_warn(&ddev->dev, "%s:Failed to update channel\n", __func__);
 		return ret;
@@ -364,6 +336,11 @@ static inline int mcde_display_on_first_update_default(
 	return 0;
 }
 
+static inline bool mcde_display_secure_output_default(void)
+{
+	return true;
+}
+
 void mcde_display_init_device(struct mcde_display_device *ddev)
 {
 	/* Setup default callbacks */
@@ -381,15 +358,12 @@ void mcde_display_init_device(struct mcde_display_device *ddev)
 	ddev->get_pixel_format = mcde_display_get_pixel_format_default;
 	ddev->set_rotation = mcde_display_set_rotation_default;
 	ddev->get_rotation = mcde_display_get_rotation_default;
-	ddev->set_synchronized_update =
-				mcde_display_set_synchronized_update_default;
-	ddev->get_synchronized_update =
-				mcde_display_get_synchronized_update_default;
+	ddev->wait_for_vsync = mcde_display_wait_for_vsync_default;
 	ddev->apply_config = mcde_display_apply_config_default;
-	ddev->invalidate_area = mcde_display_invalidate_area_default;
 	ddev->update = mcde_display_update_default;
 	ddev->on_first_update = mcde_display_on_first_update_default;
+	ddev->secure_output = mcde_display_secure_output_default;
 
 	mutex_init(&ddev->display_lock);
+	mutex_init(&ddev->vsync_lock);
 }
-
