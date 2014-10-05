@@ -44,11 +44,11 @@ void __init ux500_init_devices(void)
 	 * instead of in l2x0_init since doing it there appears to cause the
 	 * second core boot to occasionaly fail.
 	 */
-	if (readl_relaxed(l2x0_base + L2X0_LOCKDOWN_WAY_D) & 0xFF)
-		writel_relaxed(0x0, l2x0_base + L2X0_LOCKDOWN_WAY_D);
+	if (readl_relaxed(l2x0_base + L2X0_LOCKDOWN_WAY_D_BASE) & 0xFF)
+		writel_relaxed(0x0, l2x0_base + L2X0_LOCKDOWN_WAY_D_BASE);
 
-	if (readl_relaxed(l2x0_base + L2X0_LOCKDOWN_WAY_I) & 0xFF)
-		writel_relaxed(0x0, l2x0_base + L2X0_LOCKDOWN_WAY_I);
+	if (readl_relaxed(l2x0_base + L2X0_LOCKDOWN_WAY_I_BASE) & 0xFF)
+		writel_relaxed(0x0, l2x0_base + L2X0_LOCKDOWN_WAY_I_BASE);
 #endif
 }
 
@@ -168,6 +168,26 @@ static void ux500_l2x0_inv_all(void)
 	ux500_cache_sync();
 }
 
+static int __init ux500_l2x0_unlock(void)
+{
+	int i;
+
+	/*
+	 * Unlock Data and Instruction Lock if locked. Ux500 U-Boot versions
+	 * apparently locks both caches before jumping to the kernel. The
+	 * l2x0 core will not touch the unlock registers if the l2x0 is
+	 * already enabled, so we do it right here instead. The PL310 has
+	 * 8 sets of registers, one per possible CPU.
+	 */
+	for (i = 0; i < 8; i++) {
+		writel_relaxed(0x0, l2x0_base + L2X0_LOCKDOWN_WAY_D_BASE +
+			       i * L2X0_LOCKDOWN_STRIDE);
+		writel_relaxed(0x0, l2x0_base + L2X0_LOCKDOWN_WAY_I_BASE +
+			       i * L2X0_LOCKDOWN_STRIDE);
+	}
+	return 0;
+}
+
 int __init ux500_l2x0_init(void)
 {
 	uint32_t aux_val = 0x3e000000;
@@ -178,6 +198,9 @@ int __init ux500_l2x0_init(void)
 		l2x0_base = __io_address(U8500_L2CC_BASE);
 	else
 		ux500_unknown_soc();
+
+        /* Unlock before init */
+        ux500_l2x0_unlock();
 
 	/* u9540's L2 has 128KB way size */
 	if (cpu_is_u9540())

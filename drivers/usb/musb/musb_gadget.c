@@ -595,9 +595,9 @@ void musb_g_tx(struct musb *musb, u8 epnum)
 			 * In the giveback function the MUSB lock is
 			 * released and acquired after sometime. During
 			 * this time period the INDEX register could get
-			 * changed by gadget_queue function. Reselect the
-			 * INDEX to be sure we are reading/modifying the
-			 * right registers
+			 * changed by the gadget_queue function especially
+			 * on SMP systems. Reselect the INDEX to be sure
+			 * we are reading/modifying the right registers
 			 */
 			musb_ep_select(mbase, epnum);
 			req = musb_ep->desc ? next_request(musb_ep) : NULL;
@@ -1011,13 +1011,13 @@ void musb_g_rx(struct musb *musb, u8 epnum)
 #endif
 		musb_g_giveback(musb_ep, request, 0);
 		/*
-		* In the giveback function the MUSB lock is
-		* released and acquired after sometime. During
-		* this time period the INDEX register could get
-		* changed by gadget_queue function. Reselect the
-		* INDEX to be sure we are reading/modifying the
-		* right registers
-		*/
+		 * In the giveback function the MUSB lock is
+		 * released and acquired after sometime. During
+		 * this time period the INDEX register could get
+		 * changed by the gadget_queue function especially
+		 * on SMP systems. Reselect the INDEX to be sure
+		 * we are reading/modifying the right registers
+		 */
 		musb_ep_select(mbase, epnum);
 
 		req = next_request(musb_ep);
