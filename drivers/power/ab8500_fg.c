@@ -13,10 +13,14 @@
  * Author: Johan Palsson <johan.palsson@stericsson.com>
  * Author: Karl Komierowski <karl.komierowski@stericsson.com>
  * Author: Imre Sunyi <imre.sunyi@sonymobile.com>
+ * 
+ * Modified: Huang Ji (cocafe@xda-developers.com)
+ * 
  */
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
@@ -31,6 +35,8 @@
 #include <linux/mfd/abx500.h>
 #include <linux/time.h>
 #include <linux/completion.h>
+#include <linux/sysfs.h>
+#include <linux/kobject.h>
 #include <linux/kernel.h>
 
 #define MILLI_TO_MICRO			1000
@@ -62,6 +68,42 @@
 	struct ab8500_fg, fg_psy);
 
 extern int sysfs_attr_on; /* flag, get_property called from sysfs */
+
+static bool debug_mask = 0;
+module_param(debug_mask, bool, 0644);
+
+/* 
+ * Voltage Threshold that decides when to power off.
+ */
+static unsigned int pwroff_threshold = 3200;
+
+/* Allow battery capacity goes up */
+static unsigned int battlvl_real = 1;
+
+/*
+ * cocafe: Cycle Charging Control - Similar to Battery Life Extender by Ezekeel
+ */
+
+/* Cycle charging control toggle */
+static bool cycle_charging = false;
+
+/* Count that fg calirated */
+static unsigned int count_calibrated = 0;
+
+/* Count that battery discharged */
+static unsigned int count_discharged = 0;
+
+/* Count that battery recharged */
+static unsigned int count_recharged = 0;
+
+/* Threshold to trigger refreshing */
+static unsigned int threshold_reinit = 20;
+
+/* Threshold that recharging starts in % */ 
+static unsigned int threshold_rechar = 30;
+
+/* Threshold that charging stops in % */
+static unsigned int threshold_dischar = 45;
 
 /**
  * struct ab8500_fg_interrupts - ab8500 fg interupts
@@ -277,6 +319,7 @@ struct ab8500_fg {
 static LIST_HEAD(ab8500_fg_list);
 
 static void ab8500_fg_update_capacity(struct ab8500_fg *di, int uah);
+struct ab8500_fg *static_fg;
 
 /**
  * ab8500_fg_get() - returns a reference to the primary AB8500 fuel gauge
@@ -1541,7 +1584,7 @@ static void ab8500_fg_check_capacity_limits(struct ab8500_fg *di, bool init)
 		 * unless we're charging or if we're in init
 		 */
 		if (!(!di->flags.charging && di->bat_cap.level >
-			di->bat_cap.prev_level) || init) {
+			di->bat_cap.prev_level) || init || battlvl_real) {
 			dev_dbg(di->dev, "level changed from %d to %d\n",
 				di->bat_cap.prev_level,
 				di->bat_cap.level);
@@ -1559,7 +1602,7 @@ static void ab8500_fg_check_capacity_limits(struct ab8500_fg *di, bool init)
 	 * If we have received the LOW_BAT IRQ, set capacity to 0 to initiate
 	 * shutdown
 	 */
-	if (di->flags.low_bat) {
+	if (di->flags.low_bat && (di->vbat < pwroff_threshold) ) {
 		dev_dbg(di->dev, "Battery low, set capacity to 0\n");
 		di->bat_cap.prev_percent = 0;
 		di->bat_cap.permille = 0;
@@ -2147,6 +2190,46 @@ err:
 	queue_delayed_work(di->fg_wq, &di->fg_periodic_work, 0);
 }
 
+static void ab8500_fg_charger_control(struct ab8500_fg *di, bool on) 
+{
+	int ret;
+	char val, tmp;
+
+	if (on) {
+		pr_info("[ABB-FG] Enabling Charger\n");
+
+		abx500_get_register_interruptible(di->dev, AB8500_CHARGER, AB8500_MCH_CTRL1, &tmp);
+		val = tmp;
+
+		ret = abx500_set_register_interruptible(di->dev, AB8500_CHARGER, AB8500_MCH_CTRL1, val);
+		if (ret)
+			pr_err("[ABB-FG] Failed to Enable Charger!!!\n");
+
+	} else {
+		pr_info("[ABB-FG] Disabling Charger\n");
+
+		abx500_get_register_interruptible(di->dev, AB8500_CHARGER, AB8500_MCH_CTRL1, &tmp);
+		val = tmp & 0xFE;
+
+		ret = abx500_set_register_interruptible(di->dev, AB8500_CHARGER, AB8500_MCH_CTRL1, val);
+		if (ret)
+			pr_err("[ABB-FG] Failed to Disable Charger!!!\n");
+	}
+}
+
+static int ab8500_fg_charger_status(struct ab8500_fg *di) 
+{
+	int ret;
+	char tmp;
+
+	abx500_get_register_interruptible(di->dev, AB8500_CHARGER, AB8500_MCH_CTRL1, &tmp);
+	
+	/*
+	 * 1: On 0: Off 
+	 */
+	return (tmp & 1);
+}
+
 /**
  * ab8500_fg_algorithm() - Entry point for the FG algorithm
  * @di:		pointer to the ab8500_fg structure
@@ -2171,27 +2254,63 @@ static void ab8500_fg_algorithm(struct ab8500_fg *di)
 			ab8500_fg_algorithm_discharging(di);
 	}
 
-	dev_dbg(di->dev, "[FG_DATA] %d %d %d %d %d %d %d %d %d %d %d %d "
-		"%d %d %d %d %d %d %d\n",
-		di->bat_cap.max_mah_design,
-		di->bat_cap.max_mah,
-		di->bat_cap.mah,
-		di->bat_cap.permille,
-		di->bat_cap.level,
-		di->bat_cap.unusable_permille,
-		di->bat_cap.deltav,
-		di->bat_cap.prev_mah,
-		di->bat_cap.prev_percent,
-		di->bat_cap.prev_level,
-		di->vbat,
-		di->inst_curr,
-		di->avg_curr,
-		di->accu_charge,
-		di->flags.charging,
-		di->charge_state,
-		di->discharge_state,
-		di->high_curr_mode,
-		di->recovery_needed);
+	if (debug_mask) {
+		dev_dbg(di->dev, "[FG_DATA] %d %d %d %d %d %d %d %d %d %d %d %d "
+			"%d %d %d %d %d %d %d\n",
+			di->bat_cap.max_mah_design,
+			di->bat_cap.max_mah,
+			di->bat_cap.mah,
+			di->bat_cap.permille,
+			di->bat_cap.level,
+			di->bat_cap.unusable_permille,
+			di->bat_cap.deltav,
+			di->bat_cap.prev_mah,
+			di->bat_cap.prev_percent,
+			di->bat_cap.prev_level,
+			di->vbat,
+			di->inst_curr,
+			di->avg_curr,
+			di->accu_charge,
+			di->flags.charging,
+			di->charge_state,
+			di->discharge_state,
+			di->high_curr_mode,
+			di->recovery_needed);
+	}
+
+	if (cycle_charging) {
+		/* When charger is online */
+		if (ab8500_fg_charger_status(di)) {
+			if (DIV_ROUND_CLOSEST(di->bat_cap.permille, 10) > threshold_dischar) {
+				
+				ab8500_fg_charger_control(di, false);
+
+				count_discharged++;
+			}
+		}
+
+		/* When charger is offline */
+		if (!ab8500_fg_charger_status(di)) {
+			if (count_discharged) {
+				if (DIV_ROUND_CLOSEST(di->bat_cap.permille, 10) < threshold_rechar) {
+
+					ab8500_fg_charger_control(di, true);
+
+					count_recharged++;
+				}
+			}
+		}
+
+		count_calibrated++;
+
+		if (count_calibrated >= threshold_reinit) {
+			/* Refresh FG machine completely */
+			ab8500_fg_reinit();
+			pr_info("[ABB-FG] ReInit triggered \n");
+
+			count_calibrated = 0;
+		}
+	}
 }
 
 /**
@@ -3081,6 +3200,14 @@ static int ab8500_fg_resume(struct platform_device *pdev)
 		queue_work(di->fg_wq, &di->fg_work);
 	}
 
+	/* 
+	 * FIXME: Workaround to fix laziness on low capacity
+	 */
+	if (di->bat_cap.prev_percent < 5) {
+		ab8500_fg_reinit();
+		pr_info("[ABB-FG] Reinit on low capacity\n");
+	}
+
 	return 0;
 }
 
@@ -3153,6 +3280,154 @@ static int ab8500_fg_suspend(struct platform_device *pdev,
 #define ab8500_fg_resume       NULL
 #endif
 
+static ssize_t abb_fg_refresh_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	int vBuf;
+
+	sscanf(buf, "%d", &vBuf);
+
+	if(vBuf) {
+		ab8500_fg_reinit();
+		pr_info("[ABB-FG] Refreshing battery stats\n");
+	}
+
+	return count;
+}
+
+static struct kobj_attribute abb_fg_refresh_interface = __ATTR(fg_refresh, 0644, NULL, abb_fg_refresh_store);
+
+static ssize_t abb_fg_cycle_charging_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	sprintf(buf,   "Cycle Charging Control:\n\n");
+	sprintf(buf, "%sEnable [%s]\n\n", buf, cycle_charging ? "*" : " ");
+	sprintf(buf, "%sThreshold ReInit [%d]\n", buf, threshold_reinit);
+	sprintf(buf, "%sThreshold ReCharge [%d %%]\n", buf, threshold_rechar);
+	sprintf(buf, "%sThreshold DisCharge [%d %%]\n\n", buf, threshold_dischar);
+	sprintf(buf, "%sDisCharge Count [%d]\n", buf, count_discharged);
+	sprintf(buf, "%sCalibrate Count [%d]\n", buf, count_calibrated);
+
+	return strlen(buf);
+}
+
+#define __CHECK_INVAL	\
+	if (!ret) {	\
+		pr_err("[ABB-FG] Invalid value\n");	\
+		\
+		return -EINVAL;	\
+	}	
+
+
+static ssize_t abb_fg_cycle_charging_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	int ret, val;
+
+	if (!strncmp(buf, "on", 2)) {
+		cycle_charging = true;
+
+		return count;
+	}
+
+	if (!strncmp(buf, "off", 3)) {
+		cycle_charging = false;
+
+		return count;
+	}
+
+	if (!strncmp(buf, "reinit=", 7)) {
+		ret = sscanf(&buf[7], "%d", &val);
+		
+		__CHECK_INVAL;
+
+		threshold_reinit = val;
+
+		return count;
+	}
+
+	if (!strncmp(buf, "rechar=", 7)) {
+		ret = sscanf(&buf[7], "%d", &val);
+		
+		__CHECK_INVAL;
+
+		threshold_rechar = val;
+
+		return count;
+	}
+
+	if (!strncmp(buf, "dischar=", 8)) {
+		ret = sscanf(&buf[8], "%d", &val);
+		
+		__CHECK_INVAL;
+
+		threshold_dischar = val;
+
+		return count;
+	}
+
+	return count;
+}
+
+static struct kobj_attribute abb_fg_cycle_charging_interface = __ATTR(fg_cyc, 0644, abb_fg_cycle_charging_show, abb_fg_cycle_charging_store);
+
+static ssize_t abb_fg_pwroff_threshold_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	sprintf(buf, "%dmV\n\n* HW will shutdown below 2900mV\n", pwroff_threshold);
+
+	return strlen(buf);
+}
+
+static ssize_t abb_fg_pwroff_threshold_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	int ret, val;
+
+	ret = sscanf(buf, "%d", &val);
+
+	if (!ret)
+		return -EINVAL;
+
+	pwroff_threshold = val;
+
+	return count;
+}
+
+static struct kobj_attribute abb_fg_pwroff_threshold_interface = __ATTR(pwroff_threshold, 0644, abb_fg_pwroff_threshold_show, abb_fg_pwroff_threshold_store);
+
+static ssize_t abb_fg_capacity_real_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	sprintf(buf, "%d\n", battlvl_real);
+
+	return strlen(buf);
+}
+
+static ssize_t abb_fg_capacity_real_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	int ret, val;
+
+	ret = sscanf(buf, "%d", &val);
+
+	if (!ret)
+		return -EINVAL;
+
+	battlvl_real = val;
+
+	return count;
+}
+
+static struct kobj_attribute abb_fg_capacity_real_interface = __ATTR(capacity_real, 0644, abb_fg_capacity_real_show, abb_fg_capacity_real_store);
+
+static struct attribute *abb_fg_attrs[] = {
+	&abb_fg_refresh_interface.attr, 
+	&abb_fg_cycle_charging_interface.attr, 
+	&abb_fg_capacity_real_interface.attr, 
+	&abb_fg_pwroff_threshold_interface.attr, 
+	NULL,
+};
+
+static struct attribute_group abb_fg_interface_group = {
+	.attrs = abb_fg_attrs,
+};
+
+static struct kobject *abb_fg_kobject;
+
 static int __devexit ab8500_fg_remove(struct platform_device *pdev)
 {
 	int ret = 0;
@@ -3172,6 +3447,7 @@ static int __devexit ab8500_fg_remove(struct platform_device *pdev)
 
 	ab8500_fg_sysfs_exit(di);
 
+	kobject_put(abb_fg_kobject);
 	flush_scheduled_work();
 	ab8500_fg_sysfs_psy_remove_attrs(di->fg_psy.dev);
 	power_supply_unregister(&di->fg_psy);
@@ -3381,6 +3657,23 @@ static int __devinit ab8500_fg_probe(struct platform_device *pdev)
 
 	/* Run the FG algorithm */
 	queue_delayed_work(di->fg_wq, &di->fg_periodic_work, 0);
+
+	/* Create a pointer to the di structure */
+	static_fg = di;
+
+	abb_fg_kobject = kobject_create_and_add("abb-fg", kernel_kobj);
+
+	if (!abb_fg_kobject) {
+		pr_err("[ABB-FG] Failed to create kobjects\n");
+		return -ENOMEM;
+	}
+
+	ret = sysfs_create_group(abb_fg_kobject, &abb_fg_interface_group);
+
+	if (ret) {
+		pr_err("[ABB-FG] Failed to register sysfs\n");
+		kobject_put(abb_fg_kobject);
+	}
 
 	return ret;
 
