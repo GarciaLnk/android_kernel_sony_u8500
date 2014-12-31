@@ -274,6 +274,11 @@ config RTC_HCTOHC
 	  the value read from the 1st RTC device. This is useful when
 	  the 1st RTC is battery backed but not the 2nd.
 
+config DB8500_CLOCK_CONTROL
+	bool "DB8500 Clock Control Module"
+	depends on UX500_SOC_DB8500
+	default n
+
 
 source "arch/arm/mach-ux500/Kconfig-arch"
 source "arch/arm/mach-ux500/pm/Kconfig"

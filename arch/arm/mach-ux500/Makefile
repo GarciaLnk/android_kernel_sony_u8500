@@ -125,3 +125,5 @@ obj-$(CONFIG_INPUT_AB8505_MICRO_USB_DETECT)	+= ssg_micro_usb_iddet.o abx_micro_u
 obj-$(CONFIG_SIMPLE_REMOTE_PLATFORM)    += simple_remote_ux500_pf.o
 
 obj-$(CONFIG_SONY_SSM)			+= sony_ssm.o
+
+obj-$(CONFIG_DB8500_CLOCK_CONTROL)	+= clock-con.o
