@@ -113,10 +113,10 @@ EXPORT_SYMBOL(udp_table);
 long sysctl_udp_mem[3] __read_mostly;
 EXPORT_SYMBOL(sysctl_udp_mem);
 
-int sysctl_udp_rmem_min __read_mostly;
+int sysctl_udp_rmem_min __read_mostly = 6144;
 EXPORT_SYMBOL(sysctl_udp_rmem_min);
 
-int sysctl_udp_wmem_min __read_mostly;
+int sysctl_udp_wmem_min __read_mostly = 6144;
 EXPORT_SYMBOL(sysctl_udp_wmem_min);
 
 atomic_long_t udp_memory_allocated;

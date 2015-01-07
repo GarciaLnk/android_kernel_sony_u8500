@@ -3315,13 +3315,13 @@ void __init tcp_init(void)
 	max_wshare = min(4UL*1024*1024, limit);
 	max_rshare = min(6UL*1024*1024, limit);
 
-	sysctl_tcp_wmem[0] = SK_MEM_QUANTUM;
-	sysctl_tcp_wmem[1] = 16*1024;
-	sysctl_tcp_wmem[2] = max(64*1024, max_wshare);
+	sysctl_tcp_wmem[0] = 6144;
+	sysctl_tcp_wmem[1] = 87380;
+	sysctl_tcp_wmem[2] = 1048576;
 
-	sysctl_tcp_rmem[0] = SK_MEM_QUANTUM;
+	sysctl_tcp_rmem[0] = 6144;
 	sysctl_tcp_rmem[1] = 87380;
-	sysctl_tcp_rmem[2] = max(87380, max_rshare);
+	sysctl_tcp_rmem[2] = 1048576;
 
 	printk(KERN_INFO "TCP: Hash tables configured "
 	       "(established %u bind %u)\n",

@@ -515,9 +515,9 @@ static unsigned int uksm_sleep_real;
 static unsigned int uksm_sleep_saved;
 
 /* Max percentage of cpu utilization ksmd can take to scan in one batch */
-static unsigned int uksm_max_cpu_percentage;
+static unsigned int uksm_max_cpu_percentage = 95;
 
-static int uksm_cpu_governor;
+static int uksm_cpu_governor = 0;
 
 static char *uksm_cpu_governor_str[4] = { "full", "medium", "low", "quiet" };
 
@@ -552,7 +552,7 @@ static unsigned long uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
 static unsigned int uksm_thrash_threshold = 50;
 
 /* How much dedup ratio is considered to be abundant*/
-static unsigned int uksm_abundant_threshold = 10;
+static unsigned int uksm_abundant_threshold = 0;
 
 /* All slots having merged pages in this eval round. */
 struct list_head vma_slot_dedup = LIST_HEAD_INIT(vma_slot_dedup);
@@ -5557,7 +5557,7 @@ static int __init uksm_init(void)
 	struct task_struct *uksm_thread;
 	int err;
 
-	uksm_sleep_jiffies = msecs_to_jiffies(100);
+	uksm_sleep_jiffies = msecs_to_jiffies(240);
 	uksm_sleep_saved = uksm_sleep_jiffies;
 
 	slot_tree_init();
