@@ -162,6 +162,7 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 	int tasksize;
 	int i;
 	int min_score_adj = OOM_SCORE_ADJ_MAX + 1;
+	int minfree = 0;
 	enum lowmem_process_type proc_type = KILLABLE_PROCESS;
 	int selected_tasksize[MANAGED_PROCESS_TYPES] = {0};
 	int selected_oom_score_adj[MANAGED_PROCESS_TYPES];
